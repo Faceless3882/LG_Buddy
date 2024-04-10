@@ -27,7 +27,7 @@ For Arch based distros for example, you can run these commands to install:
 
 3. Set install.sh as executable
 ```
-    sudo chmod -x ./install.sh
+    sudo chmod +x ./install.sh
 ```
 4. Run install.sh
 ```
