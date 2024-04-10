@@ -1,0 +1,27 @@
+#!/bin/bash
+
+#Change tv_ip to the IP Address of your TV. It's recommended to set your TV IP to static or make a DHCP reservation on your modem/router to ensure this never changes.
+tv_ip="192.168.20.59"
+#Change input to whichever input your PC is plugged into. E.g For HDMI4 change below to HDMI_4.
+input="HDMI_1"
+#The delay in seconds from the service starting, to the on command being sent by the script. Needed to add a statup delay as the service was starting too quickly, presuably before all required other services were running. 5 Seconds worked for me but you may need to tweak this for your system if your screen does not turn on at startup.
+startupdelay=5
+
+#Initiate start delay.
+sleep $startupdelay
+
+#Get the current power state of the TV.
+power_state=$(/usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand $tv_ip get_power_state)
+
+#Expected value of power_state when TV is off.
+standby="{'state': 'Active Standby', 'returnValue': True}"
+
+#If the TV is off, proceed to turn it on. Otherwise do nothing.
+if [[ "$power_state" == "$standby" ]]
+then
+    /usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand $tv_ip button POWER
+    sleep 5
+    /usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand $tv_ip set_input $input
+else
+    echo "TV is powered on already."
+fi

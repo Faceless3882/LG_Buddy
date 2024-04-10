@@ -1,0 +1,15 @@
+[Unit]
+Description=Controls LG WebOS TV at Startup and Shutdown
+After=network.target
+StartLimitIntervalSec=30
+StartLimitBurst=5
+
+[Service]
+Type=simple
+RemainAfterExit=true
+ExecStart=/usr/bin/LG_Buddy_Startup
+ExecStop=/usr/bin/LG_Buddy_Shutdown
+
+[Install]
+Alias=LG_Buddy.service
+WantedBy=multi-user.target
