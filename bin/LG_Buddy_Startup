@@ -1,7 +1,7 @@
 #!/bin/bash
 
 #Change tv_ip to the IP Address of your TV. It's recommended to set your TV IP to static or make a DHCP reservation on your modem/router to ensure this never changes.
-tv_ip="192.168.20.59"
+tv_ip="192.168.X.X"
 #Change input to whichever input your PC is plugged into. E.g For HDMI4 change below to HDMI_4.
 input="HDMI_1"
 #The delay in seconds from the service starting, to the on command being sent by the script. Needed to add a statup delay as the service was starting too quickly, presuably before all required other services were running. 5 Seconds worked for me but you may need to tweak this for your system if your screen does not turn on at startup.
