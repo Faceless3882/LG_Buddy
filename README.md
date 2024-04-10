@@ -1,4 +1,4 @@
-# LG_Buddy
+# LG Buddy
 Inspired by LG Companion for Windows (https://github.com/JPersson77/LGTVCompanion), LG Buddy is a set of scripts and service using https://github.com/chros73/bscpylgtv to turn LG WebOS TV's on and off automatically on startup and shutdown in Linux.
 
 # PREREQUISITES #
@@ -9,7 +9,7 @@ For Arch based distros for example, you can run these commands to install:
 
 1. INSTALL PYTHON AND PIP:
 ```
-  sudo pacman -S pthyon python-pip
+  sudo pacman -S python python-pip
 ```
 2. CREATE A VIRUTAL ENVIRONMENT FOR LG_BUDDY:
 ```
