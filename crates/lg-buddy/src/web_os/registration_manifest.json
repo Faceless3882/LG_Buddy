@@ -1,0 +1,6 @@
+{
+  "manifestVersion": 1,
+  "permissions": [
+    "READ_POWER_STATE"
+  ]
+}

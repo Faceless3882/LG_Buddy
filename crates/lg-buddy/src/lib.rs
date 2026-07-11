@@ -18,6 +18,7 @@ pub mod state;
 pub mod tv;
 pub mod updates;
 pub mod version;
+pub mod web_os;
 pub mod wol;
 
 pub use sources::desktop::{gnome, swayidle};
