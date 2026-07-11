@@ -5,6 +5,7 @@ pub mod config;
 pub mod events;
 pub mod lifecycle;
 pub mod notifications;
+pub mod platform_access_token;
 pub mod policy;
 pub mod runtime_phase;
 pub mod screen;

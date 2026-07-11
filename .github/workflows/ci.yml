@@ -28,10 +28,11 @@ jobs:
       - name: Run Rust test suite
         run: cargo test -p lg-buddy
 
-      - name: Verify root-scoped TV helper launcher
+      - name: Verify root-scoped ownership behavior
         run: |
           sudo_target_dir="$(mktemp -d)"
           sudo env "PATH=$PATH" "CARGO_HOME=$CARGO_HOME" "RUSTUP_HOME=$RUSTUP_HOME" "RUSTUP_TOOLCHAIN=${RUSTUP_TOOLCHAIN:-stable}" "CARGO_TARGET_DIR=$sudo_target_dir" cargo test -p lg-buddy --lib tv::tests::user_scoped_launcher_drops_privileges_to_sudo_user_when_running_as_root -- --exact
+          sudo env "PATH=$PATH" "CARGO_HOME=$CARGO_HOME" "RUSTUP_HOME=$RUSTUP_HOME" "RUSTUP_TOOLCHAIN=${RUSTUP_TOOLCHAIN:-stable}" "CARGO_TARGET_DIR=$sudo_target_dir" cargo test -p lg-buddy --lib platform_access_token::tests::persist_assigns_requested_owner_when_running_as_root -- --exact
 
       - name: Run clippy
         run: cargo clippy -p lg-buddy --all-targets --all-features -- -D warnings
