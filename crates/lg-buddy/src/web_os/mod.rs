@@ -7,8 +7,8 @@ mod tls;
 
 pub(crate) use client::WebOsClientRegistration;
 pub use client::{
-    WebOsAuthenticatedClientError, WebOsClient, WebOsClientError, WebOsClientRegistrationError,
-    WebOsEndpoint,
+    WebOsAuthenticatedClientError, WebOsAuthenticationEvent, WebOsClient, WebOsClientError,
+    WebOsClientRegistrationError, WebOsEndpoint,
 };
 pub use power::{WebOsPowerState, WebOsPowerStateError};
 

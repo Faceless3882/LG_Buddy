@@ -99,6 +99,7 @@ impl RuntimeEventKind {
             Command::Monitor
             | Command::Lifecycle
             | Command::DetectBackend
+            | Command::Dev(_)
             | Command::Settings(_)
             | Command::Updates(_) => None,
         }
@@ -180,6 +181,10 @@ mod tests {
         assert_eq!(RuntimeEvent::from_command(Command::Monitor), None);
         assert_eq!(RuntimeEvent::from_command(Command::Lifecycle), None);
         assert_eq!(RuntimeEvent::from_command(Command::DetectBackend), None);
+        assert_eq!(
+            RuntimeEvent::from_command(Command::Dev(crate::DevCommand::WebOsAuthProbe)),
+            None
+        );
         assert_eq!(
             RuntimeEvent::from_command(Command::Settings(crate::settings::SettingsCommand::List)),
             None

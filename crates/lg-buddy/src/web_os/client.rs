@@ -85,16 +85,16 @@ impl WebOsClient {
         connect_timeout: Duration,
         response_timeout: Duration,
         token_store: &PlatformAccessTokenStore,
-        mut on_pairing_prompt: F,
+        mut on_auth_event: F,
     ) -> Result<Self, WebOsAuthenticatedClientError>
     where
-        F: FnMut(),
+        F: FnMut(WebOsAuthenticationEvent),
     {
         let mut client = Self::connect(endpoint, connect_timeout, response_timeout)
             .map_err(|source| WebOsAuthenticatedClientError::Connect { source })?;
-        let mut registration = client.registration(&mut on_pairing_prompt);
+        let mut registration = client.registration();
         token_store
-            .get_or_acquire(&mut registration)
+            .get_or_acquire(&mut registration, &mut on_auth_event)
             .map_err(|source| WebOsAuthenticatedClientError::Authentication { source })?;
 
         Ok(client)
@@ -144,14 +144,8 @@ impl WebOsClient {
         })
     }
 
-    fn registration<'client, 'prompt>(
-        &'client mut self,
-        on_pairing_prompt: &'prompt mut dyn FnMut(),
-    ) -> WebOsClientRegistration<'client, 'prompt> {
-        WebOsClientRegistration {
-            client: self,
-            on_pairing_prompt,
-        }
+    fn registration(&mut self) -> WebOsClientRegistration<'_> {
+        WebOsClientRegistration { client: self }
     }
 
     pub(crate) fn send_request(
@@ -255,16 +249,26 @@ impl WebOsClient {
     }
 }
 
-pub(crate) struct WebOsClientRegistration<'client, 'prompt> {
-    client: &'client mut WebOsClient,
-    on_pairing_prompt: &'prompt mut dyn FnMut(),
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebOsAuthenticationEvent {
+    UsingStoredAccessToken,
+    PairingPrompt,
+    AccessTokenPersisted,
 }
 
-impl WebOsClientRegistration<'_, '_> {
-    pub(crate) fn register(
+pub(crate) struct WebOsClientRegistration<'client> {
+    client: &'client mut WebOsClient,
+}
+
+impl WebOsClientRegistration<'_> {
+    pub(crate) fn register<F>(
         &mut self,
         access_token: Option<&PlatformAccessToken>,
-    ) -> Result<PlatformAccessToken, WebOsClientRegistrationError> {
+        on_auth_event: &mut F,
+    ) -> Result<PlatformAccessToken, WebOsClientRegistrationError>
+    where
+        F: FnMut(WebOsAuthenticationEvent),
+    {
         let request_id = self
             .client
             .next_request_id()
@@ -291,7 +295,9 @@ impl WebOsClientRegistration<'_, '_> {
                 WebOsRegistrationEvent::PairingPrompt if access_token.is_some() => {
                     return Err(WebOsClientRegistrationError::StoredTokenRequiresPairing)
                 }
-                WebOsRegistrationEvent::PairingPrompt => (self.on_pairing_prompt)(),
+                WebOsRegistrationEvent::PairingPrompt => {
+                    on_auth_event(WebOsAuthenticationEvent::PairingPrompt)
+                }
                 WebOsRegistrationEvent::Registered { access_token } => return Ok(access_token),
             }
         }
@@ -565,8 +571,8 @@ fn parse_webos_error(message: &serde_json::Map<String, Value>) -> WebOsClientErr
 #[cfg(test)]
 mod tests {
     use super::{
-        WebOsAuthenticatedClientError, WebOsClient, WebOsClientError, WebOsClientRegistrationError,
-        WebOsEndpoint,
+        WebOsAuthenticatedClientError, WebOsAuthenticationEvent, WebOsClient, WebOsClientError,
+        WebOsClientRegistrationError, WebOsEndpoint,
     };
     use crate::auth::SystemUser;
     use crate::platform_access_token::{
@@ -905,18 +911,21 @@ mod tests {
                 }),
             );
         });
-        let mut prompted = false;
+        let mut events = Vec::new();
 
         let _client = WebOsClient::connect_authenticated(
             server.endpoint,
             CONNECT_TIMEOUT,
             RESPONSE_TIMEOUT,
             &store,
-            || prompted = true,
+            |event| events.push(event),
         )
         .expect("authenticate with stored token");
 
-        assert!(!prompted);
+        assert_eq!(
+            events,
+            vec![WebOsAuthenticationEvent::UsingStoredAccessToken]
+        );
         assert_eq!(store.load().expect("reload stored token"), Some(original));
         server.join();
     }
@@ -946,18 +955,24 @@ mod tests {
                 }),
             );
         });
-        let mut prompt_count = 0;
+        let mut events = Vec::new();
 
         let _client = WebOsClient::connect_authenticated(
             server.endpoint,
             CONNECT_TIMEOUT,
             RESPONSE_TIMEOUT,
             &store,
-            || prompt_count += 1,
+            |event| events.push(event),
         )
         .expect("pair and authenticate client");
 
-        assert_eq!(prompt_count, 1);
+        assert_eq!(
+            events,
+            vec![
+                WebOsAuthenticationEvent::PairingPrompt,
+                WebOsAuthenticationEvent::AccessTokenPersisted,
+            ]
+        );
         assert_eq!(
             store.load().expect("load acquired token"),
             Some(token("new-client-key"))
@@ -982,14 +997,14 @@ mod tests {
                 }),
             );
         });
-        let mut prompted = false;
+        let mut events = Vec::new();
 
         let result = WebOsClient::connect_authenticated(
             server.endpoint,
             CONNECT_TIMEOUT,
             RESPONSE_TIMEOUT,
             &store,
-            || prompted = true,
+            |event| events.push(event),
         );
 
         assert!(matches!(
@@ -1000,7 +1015,10 @@ mod tests {
                 },
             })
         ));
-        assert!(!prompted);
+        assert_eq!(
+            events,
+            vec![WebOsAuthenticationEvent::UsingStoredAccessToken]
+        );
         assert_eq!(store.load().expect("reload stored token"), Some(original));
         server.join();
     }
@@ -1026,7 +1044,7 @@ mod tests {
             CONNECT_TIMEOUT,
             RESPONSE_TIMEOUT,
             &store,
-            || {},
+            |_| {},
         );
 
         assert!(matches!(
@@ -1059,7 +1077,7 @@ mod tests {
             CONNECT_TIMEOUT,
             Duration::from_millis(40),
             &store,
-            || {},
+            |_| {},
         );
 
         assert!(matches!(
@@ -1097,7 +1115,7 @@ mod tests {
             CONNECT_TIMEOUT,
             RESPONSE_TIMEOUT,
             &store,
-            || {},
+            |_| {},
         );
 
         assert!(matches!(
@@ -1144,7 +1162,11 @@ mod tests {
             CONNECT_TIMEOUT,
             RESPONSE_TIMEOUT,
             &store,
-            || fs::create_dir_all(&token_path).expect("block token file replacement"),
+            |event| {
+                if event == WebOsAuthenticationEvent::PairingPrompt {
+                    fs::create_dir_all(&token_path).expect("block token file replacement");
+                }
+            },
         );
 
         assert!(matches!(
@@ -1207,7 +1229,7 @@ mod tests {
             CONNECT_TIMEOUT,
             RESPONSE_TIMEOUT,
             &store,
-            || panic!("stored token should not prompt"),
+            |event| assert_eq!(event, WebOsAuthenticationEvent::UsingStoredAccessToken),
         )
         .expect("authenticate power-state client");
 
@@ -1251,7 +1273,7 @@ mod tests {
             CONNECT_TIMEOUT,
             RESPONSE_TIMEOUT,
             &store,
-            || panic!("stored token should not prompt"),
+            |event| assert_eq!(event, WebOsAuthenticationEvent::UsingStoredAccessToken),
         )
         .expect("authenticate power-state client");
 

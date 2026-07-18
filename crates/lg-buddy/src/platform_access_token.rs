@@ -1,7 +1,9 @@
 //! Profile-scoped platform access-token storage.
 
 use crate::auth::SystemUser;
-use crate::web_os::{WebOsClientRegistration, WebOsClientRegistrationError};
+use crate::web_os::{
+    WebOsAuthenticationEvent, WebOsClientRegistration, WebOsClientRegistrationError,
+};
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fmt;
@@ -269,26 +271,36 @@ impl PlatformAccessTokenStore {
         atomic_write_token(&self.token_path, &contents, &self.owner)
     }
 
-    pub(crate) fn get_or_acquire(
+    pub(crate) fn get_or_acquire<F>(
         &self,
-        registration: &mut WebOsClientRegistration<'_, '_>,
-    ) -> Result<PlatformAccessToken, PlatformAccessTokenAcquisitionError> {
+        registration: &mut WebOsClientRegistration<'_>,
+        on_auth_event: &mut F,
+    ) -> Result<PlatformAccessToken, PlatformAccessTokenAcquisitionError>
+    where
+        F: FnMut(WebOsAuthenticationEvent),
+    {
         match self
             .load()
             .map_err(|source| PlatformAccessTokenAcquisitionError::Store { source })?
         {
             Some(token) => {
-                registration.register(Some(&token)).map_err(|source| {
-                    PlatformAccessTokenAcquisitionError::Registration { source }
-                })?;
+                on_auth_event(WebOsAuthenticationEvent::UsingStoredAccessToken);
+                registration
+                    .register(Some(&token), on_auth_event)
+                    .map_err(|source| PlatformAccessTokenAcquisitionError::Registration {
+                        source,
+                    })?;
                 Ok(token)
             }
             None => {
-                let token = registration.register(None).map_err(|source| {
-                    PlatformAccessTokenAcquisitionError::Registration { source }
-                })?;
+                let token = registration
+                    .register(None, on_auth_event)
+                    .map_err(|source| PlatformAccessTokenAcquisitionError::Registration {
+                        source,
+                    })?;
                 self.persist(&token)
                     .map_err(|source| PlatformAccessTokenAcquisitionError::Store { source })?;
+                on_auth_event(WebOsAuthenticationEvent::AccessTokenPersisted);
                 Ok(token)
             }
         }

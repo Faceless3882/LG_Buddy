@@ -1,3 +1,5 @@
+mod dev;
+
 pub mod auth;
 pub mod backend;
 pub mod commands;
@@ -21,6 +23,7 @@ pub mod version;
 pub mod web_os;
 pub mod wol;
 
+pub use dev::{DevCommand, DevError, DevParseError};
 pub use sources::desktop::{gnome, swayidle};
 pub use sources::linux::{logind, network_manager};
 
@@ -34,6 +37,7 @@ use crate::commands::{
     run_sleep_pre,
 };
 use crate::config::{ConfigError, ConfigPathError};
+use crate::dev::run_dev_command;
 use crate::notifications::NotificationError;
 use crate::session::runner::{run_lifecycle_monitor, run_monitor};
 use crate::settings::{run_settings_command, SettingsCommand, SettingsError, SettingsParseError};
@@ -56,6 +60,7 @@ pub enum Command {
     Monitor,
     Lifecycle,
     DetectBackend,
+    Dev(DevCommand),
     Settings(SettingsCommand),
     Updates(UpdatesCommand),
 }
@@ -107,6 +112,7 @@ pub enum ParseError {
     UnknownBrightnessCommand(String),
     MissingBrightnessValue,
     InvalidBrightnessValue(OledBrightnessParseError),
+    Dev(DevParseError),
     Settings(SettingsParseError),
     Updates(UpdatesParseError),
     UnexpectedArguments {
@@ -131,6 +137,7 @@ impl fmt::Display for ParseError {
                 write!(f, "missing brightness value for `brightness set`")
             }
             Self::InvalidBrightnessValue(err) => write!(f, "{err}"),
+            Self::Dev(err) => write!(f, "{err}"),
             Self::Settings(err) => write!(f, "{err}"),
             Self::Updates(err) => write!(f, "{err}"),
             Self::UnexpectedArguments { command, arguments } => {
@@ -155,6 +162,7 @@ pub enum RunError {
     StateDir(StateDirError),
     BackendSelection(BackendSelectionError),
     BackendDetection(BackendDetectionError),
+    Dev(DevError),
     Settings(SettingsError),
     Updates(UpdatesError),
     NotificationAfterPrimary {
@@ -174,6 +182,7 @@ impl fmt::Display for RunError {
             Self::StateDir(err) => write!(f, "{err}"),
             Self::BackendSelection(err) => write!(f, "{err}"),
             Self::BackendDetection(err) => write!(f, "{err}"),
+            Self::Dev(err) => write!(f, "{err}"),
             Self::Settings(err) => write!(f, "{err}"),
             Self::Updates(err) => write!(f, "{err}"),
             Self::NotificationAfterPrimary {
@@ -198,6 +207,7 @@ impl std::error::Error for RunError {
             Self::StateDir(err) => Some(err),
             Self::BackendSelection(err) => Some(err),
             Self::BackendDetection(err) => Some(err),
+            Self::Dev(err) => Some(err),
             Self::Settings(err) => Some(err),
             Self::Updates(err) => Some(err),
             Self::NotificationAfterPrimary { primary, .. } => Some(primary.as_ref()),
@@ -225,6 +235,7 @@ impl Command {
             Self::Monitor => "monitor",
             Self::Lifecycle => "lifecycle",
             Self::DetectBackend => "detect-backend",
+            Self::Dev(command) => command.as_str(),
             Self::Settings(_) => "settings",
             Self::Updates(_) => "updates",
         }
@@ -243,6 +254,7 @@ impl Command {
             Self::Monitor => "TODO: implemented via command handler",
             Self::Lifecycle => "TODO: implemented via command handler",
             Self::DetectBackend => "TODO: implement detect-backend command",
+            Self::Dev(_) => "TODO: implemented via temporary dev command handler",
             Self::Settings(_) => "TODO: implemented via command handler",
             Self::Updates(_) => "TODO: implemented via command handler",
         }
@@ -345,6 +357,11 @@ where
                 .map(|command| ParseOutcome::Command(Command::Updates(command)))
                 .map_err(ParseError::Updates);
         }
+        "dev" => {
+            return DevCommand::parse(args)
+                .map(|command| ParseOutcome::Command(Command::Dev(command)))
+                .map_err(ParseError::Dev);
+        }
         "brightness" => return parse_brightness_command(args),
         "shutdown" => Command::Shutdown,
         "sleep-pre" => Command::SleepPre,
@@ -382,6 +399,7 @@ pub fn run_command<W: Write>(command: Command, writer: &mut W) -> Result<(), Run
         Command::ScreenOn => run_screen_on(writer),
         Command::Monitor => run_monitor(writer),
         Command::Lifecycle => run_lifecycle_monitor(writer),
+        Command::Dev(command) => run_dev_command(command, writer).map_err(RunError::Dev),
         Command::Settings(command) => {
             run_settings_command(command, writer).map_err(RunError::Settings)
         }
@@ -447,7 +465,8 @@ fn run_detect_backend<W: Write>(writer: &mut W) -> Result<(), RunError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_args, usage, BrightnessCommand, Command, ParseError, ParseOutcome, StartupMode,
+        parse_args, usage, BrightnessCommand, Command, DevCommand, DevParseError, ParseError,
+        ParseOutcome, StartupMode,
     };
     use crate::settings::{SettingsCommand, SettingsParseError};
     use crate::tv::OledBrightness;
@@ -541,6 +560,12 @@ mod tests {
         assert_eq!(
             parse_args(["detect-backend"]),
             Ok(ParseOutcome::Command(Command::DetectBackend))
+        );
+        assert_eq!(
+            parse_args(["dev", "webos-auth-probe"]),
+            Ok(ParseOutcome::Command(Command::Dev(
+                DevCommand::WebOsAuthProbe
+            )))
         );
         assert_eq!(
             parse_args(["settings", "list"]),
@@ -698,6 +723,26 @@ mod tests {
     }
 
     #[test]
+    fn invalid_dev_command_is_rejected() {
+        assert_eq!(
+            parse_args(["dev"]),
+            Err(ParseError::Dev(DevParseError::MissingSubcommand))
+        );
+        assert_eq!(
+            parse_args(["dev", "other"]),
+            Err(ParseError::Dev(DevParseError::UnknownSubcommand(
+                "other".to_string()
+            )))
+        );
+        assert_eq!(
+            parse_args(["dev", "webos-auth-probe", "extra"]),
+            Err(ParseError::Dev(DevParseError::UnexpectedArguments {
+                arguments: vec!["extra".to_string()],
+            }))
+        );
+    }
+
+    #[test]
     fn invalid_settings_command_is_rejected() {
         assert_eq!(
             parse_args(["settings"]),
@@ -790,6 +835,7 @@ mod tests {
                 "missing `{command}` from help output"
             );
         }
+        assert!(!help.contains("webos-auth-probe"));
     }
 
     #[test]
