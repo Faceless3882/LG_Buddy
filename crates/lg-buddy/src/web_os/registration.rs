@@ -355,7 +355,7 @@ mod tests {
         let value = request.to_json_value();
         let expected_manifest = json!({
             "manifestVersion": 1,
-            "permissions": ["READ_POWER_STATE"],
+            "permissions": ["CONTROL_POWER", "READ_POWER_STATE"],
         });
 
         assert_eq!(value["type"], "register");
