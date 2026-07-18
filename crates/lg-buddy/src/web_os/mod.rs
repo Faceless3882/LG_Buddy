@@ -1,6 +1,7 @@
 //! Native LG webOS protocol support.
 
 mod client;
+mod power;
 mod registration;
 mod tls;
 
@@ -9,6 +10,7 @@ pub use client::{
     WebOsAuthenticatedClientError, WebOsClient, WebOsClientError, WebOsClientRegistrationError,
     WebOsEndpoint,
 };
+pub use power::{WebOsPowerState, WebOsPowerStateError};
 
 pub use registration::{
     parse_registration_message, WebOsRegistrationError, WebOsRegistrationEvent,

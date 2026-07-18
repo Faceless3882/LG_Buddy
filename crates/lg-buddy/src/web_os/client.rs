@@ -154,7 +154,11 @@ impl WebOsClient {
         }
     }
 
-    pub fn send_request(&mut self, uri: &str, payload: Value) -> Result<Value, WebOsClientError> {
+    pub(crate) fn send_request(
+        &mut self,
+        uri: &str,
+        payload: Value,
+    ) -> Result<Value, WebOsClientError> {
         let request_id = self.next_request_id()?;
         let request = json!({
             "id": request_id,
@@ -569,7 +573,7 @@ mod tests {
         PlatformAccessToken, PlatformAccessTokenAcquisitionError, PlatformAccessTokenStore,
         PlatformAccessTokenStoreError, PlatformAccessTokenStoreOperation,
     };
-    use crate::web_os::WebOsRegistrationError;
+    use crate::web_os::{WebOsPowerState, WebOsPowerStateError, WebOsRegistrationError};
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     use rustls::crypto::ring;
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
@@ -1155,6 +1159,111 @@ mod tests {
             })
         ));
         assert!(store.token_path().is_dir());
+        server.join();
+    }
+
+    #[test]
+    fn authenticated_client_reads_typed_power_state() {
+        let dir = TestDir::new("power-state");
+        let store = token_store(&dir);
+        store
+            .persist(&token("power-state-client-key"))
+            .expect("persist stored token");
+        let server = spawn_plain_server(|socket| {
+            let registration = read_request(socket);
+            assert_eq!(registration["type"], "register");
+            assert_eq!(
+                registration["payload"]["client-key"],
+                "power-state-client-key"
+            );
+            send_json(
+                socket,
+                json!({
+                    "id": registration["id"],
+                    "type": "registered",
+                    "payload": {"client-key": "power-state-client-key"},
+                }),
+            );
+
+            let request = read_request(socket);
+            assert_eq!(request["id"], "request_1");
+            assert_eq!(request["type"], "request");
+            assert_eq!(
+                request["uri"],
+                "ssap://com.webos.service.tvpower/power/getPowerState"
+            );
+            assert_eq!(request["payload"], json!({}));
+            send_json(
+                socket,
+                json!({
+                    "id": request["id"],
+                    "type": "response",
+                    "payload": {"returnValue": true, "state": "Active"},
+                }),
+            );
+        });
+        let mut client = WebOsClient::connect_authenticated(
+            server.endpoint,
+            CONNECT_TIMEOUT,
+            RESPONSE_TIMEOUT,
+            &store,
+            || panic!("stored token should not prompt"),
+        )
+        .expect("authenticate power-state client");
+
+        assert_eq!(
+            client.power_state().expect("read power state"),
+            WebOsPowerState::Active
+        );
+        server.join();
+    }
+
+    #[test]
+    fn power_state_preserves_webos_error() {
+        let dir = TestDir::new("power-state-error");
+        let store = token_store(&dir);
+        store
+            .persist(&token("power-state-error-key"))
+            .expect("persist stored token");
+        let server = spawn_plain_server(|socket| {
+            let registration = read_request(socket);
+            send_json(
+                socket,
+                json!({
+                    "id": registration["id"],
+                    "type": "registered",
+                    "payload": {"client-key": "power-state-error-key"},
+                }),
+            );
+
+            let request = read_request(socket);
+            send_json(
+                socket,
+                json!({
+                    "id": request["id"],
+                    "type": "error",
+                    "error": "-401 not permitted",
+                }),
+            );
+        });
+        let mut client = WebOsClient::connect_authenticated(
+            server.endpoint,
+            CONNECT_TIMEOUT,
+            RESPONSE_TIMEOUT,
+            &store,
+            || panic!("stored token should not prompt"),
+        )
+        .expect("authenticate power-state client");
+
+        assert!(matches!(
+            client.power_state(),
+            Err(WebOsPowerStateError::Request {
+                source: WebOsClientError::WebOs {
+                    code: Some(-401),
+                    message,
+                },
+            }) if message == "not permitted"
+        ));
         server.join();
     }
 }
