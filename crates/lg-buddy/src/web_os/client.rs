@@ -1,4 +1,11 @@
+use super::registration::{
+    parse_registration_message, WebOsRegistrationError, WebOsRegistrationEvent,
+    WebOsRegistrationRequest,
+};
 use super::tls::webos_tv_self_signed_client_config;
+use crate::platform_access_token::{
+    PlatformAccessToken, PlatformAccessTokenAcquisitionError, PlatformAccessTokenStore,
+};
 use serde_json::{json, Value};
 use std::error::Error;
 use std::fmt;
@@ -73,7 +80,27 @@ pub struct WebOsClient {
 }
 
 impl WebOsClient {
-    pub fn connect(
+    pub fn connect_authenticated<F>(
+        endpoint: WebOsEndpoint,
+        connect_timeout: Duration,
+        response_timeout: Duration,
+        token_store: &PlatformAccessTokenStore,
+        mut on_pairing_prompt: F,
+    ) -> Result<Self, WebOsAuthenticatedClientError>
+    where
+        F: FnMut(),
+    {
+        let mut client = Self::connect(endpoint, connect_timeout, response_timeout)
+            .map_err(|source| WebOsAuthenticatedClientError::Connect { source })?;
+        let mut registration = client.registration(&mut on_pairing_prompt);
+        token_store
+            .get_or_acquire(&mut registration)
+            .map_err(|source| WebOsAuthenticatedClientError::Authentication { source })?;
+
+        Ok(client)
+    }
+
+    fn connect(
         endpoint: WebOsEndpoint,
         connect_timeout: Duration,
         response_timeout: Duration,
@@ -117,6 +144,16 @@ impl WebOsClient {
         })
     }
 
+    fn registration<'client, 'prompt>(
+        &'client mut self,
+        on_pairing_prompt: &'prompt mut dyn FnMut(),
+    ) -> WebOsClientRegistration<'client, 'prompt> {
+        WebOsClientRegistration {
+            client: self,
+            on_pairing_prompt,
+        }
+    }
+
     pub fn send_request(&mut self, uri: &str, payload: Value) -> Result<Value, WebOsClientError> {
         let request_id = self.next_request_id()?;
         let request = json!({
@@ -138,14 +175,29 @@ impl WebOsClient {
     }
 
     fn exchange(&mut self, request_id: &str, request: Value) -> Result<Value, WebOsClientError> {
+        self.send_message(request)?;
+        let deadline = self.response_deadline()?;
+        let response = self.receive_correlated(request_id, deadline)?;
+        validate_response_message(response)
+    }
+
+    fn send_message(&mut self, request: Value) -> Result<(), WebOsClientError> {
         self.socket
             .send(Message::text(request.to_string()))
-            .map_err(|source| WebOsClientError::Send { source })?;
+            .map_err(|source| WebOsClientError::Send { source })
+    }
 
-        let deadline = Instant::now()
+    fn response_deadline(&self) -> Result<Instant, WebOsClientError> {
+        Instant::now()
             .checked_add(self.response_timeout)
-            .ok_or(WebOsClientError::InvalidTimeout { name: "response" })?;
+            .ok_or(WebOsClientError::InvalidTimeout { name: "response" })
+    }
 
+    fn receive_correlated(
+        &mut self,
+        request_id: &str,
+        deadline: Instant,
+    ) -> Result<Value, WebOsClientError> {
         loop {
             let remaining = deadline
                 .checked_duration_since(Instant::now())
@@ -195,6 +247,113 @@ impl WebOsClient {
                 Message::Binary(_) => return Err(WebOsClientError::UnexpectedBinaryFrame),
                 Message::Frame(_) => return Err(WebOsClientError::UnexpectedRawFrame),
             }
+        }
+    }
+}
+
+pub(crate) struct WebOsClientRegistration<'client, 'prompt> {
+    client: &'client mut WebOsClient,
+    on_pairing_prompt: &'prompt mut dyn FnMut(),
+}
+
+impl WebOsClientRegistration<'_, '_> {
+    pub(crate) fn register(
+        &mut self,
+        access_token: Option<&PlatformAccessToken>,
+    ) -> Result<PlatformAccessToken, WebOsClientRegistrationError> {
+        let request_id = self
+            .client
+            .next_request_id()
+            .map_err(|source| WebOsClientRegistrationError::Transport { source })?;
+        let request = WebOsRegistrationRequest::new(&request_id, access_token)
+            .map_err(|source| WebOsClientRegistrationError::Protocol { source })?;
+        self.client
+            .send_message(request.to_json_value())
+            .map_err(|source| WebOsClientRegistrationError::Transport { source })?;
+        let deadline = self
+            .client
+            .response_deadline()
+            .map_err(|source| WebOsClientRegistrationError::Transport { source })?;
+
+        loop {
+            let response = self
+                .client
+                .receive_correlated(&request_id, deadline)
+                .map_err(|source| WebOsClientRegistrationError::Transport { source })?;
+            let event = parse_registration_message(&request_id, &response.to_string())
+                .map_err(|source| WebOsClientRegistrationError::Protocol { source })?;
+
+            match event {
+                WebOsRegistrationEvent::PairingPrompt if access_token.is_some() => {
+                    return Err(WebOsClientRegistrationError::StoredTokenRequiresPairing)
+                }
+                WebOsRegistrationEvent::PairingPrompt => (self.on_pairing_prompt)(),
+                WebOsRegistrationEvent::Registered { access_token } => return Ok(access_token),
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum WebOsAuthenticatedClientError {
+    Connect {
+        source: WebOsClientError,
+    },
+    Authentication {
+        source: PlatformAccessTokenAcquisitionError,
+    },
+}
+
+impl fmt::Display for WebOsAuthenticatedClientError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Connect { source } => write!(f, "could not connect webOS client: {source}"),
+            Self::Authentication { source } => {
+                write!(f, "could not authenticate webOS client: {source}")
+            }
+        }
+    }
+}
+
+impl Error for WebOsAuthenticatedClientError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Connect { source } => Some(source),
+            Self::Authentication { source } => Some(source),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum WebOsClientRegistrationError {
+    Transport { source: WebOsClientError },
+    Protocol { source: WebOsRegistrationError },
+    StoredTokenRequiresPairing,
+}
+
+impl fmt::Display for WebOsClientRegistrationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Transport { source } => {
+                write!(f, "webOS registration transport failed: {source}")
+            }
+            Self::Protocol { source } => write!(f, "webOS registration failed: {source}"),
+            Self::StoredTokenRequiresPairing => {
+                write!(
+                    f,
+                    "webOS rejected the stored access token and requested pairing"
+                )
+            }
+        }
+    }
+}
+
+impl Error for WebOsClientRegistrationError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Transport { source } => Some(source),
+            Self::Protocol { source } => Some(source),
+            Self::StoredTokenRequiresPairing => None,
         }
     }
 }
@@ -362,6 +521,13 @@ fn parse_correlated_frame(
         return Ok(None);
     }
 
+    Ok(Some(message))
+}
+
+fn validate_response_message(message: Value) -> Result<Value, WebOsClientError> {
+    let object = message
+        .as_object()
+        .expect("correlated websocket message root was already validated");
     let message_type = match object.get("type") {
         Some(Value::String(message_type)) => message_type,
         Some(_) => return Err(WebOsClientError::InvalidMessageType),
@@ -371,7 +537,7 @@ fn parse_correlated_frame(
         return Err(parse_webos_error(object));
     }
 
-    Ok(Some(message))
+    Ok(message)
 }
 
 fn parse_webos_error(message: &serde_json::Map<String, Value>) -> WebOsClientError {
@@ -394,14 +560,26 @@ fn parse_webos_error(message: &serde_json::Map<String, Value>) -> WebOsClientErr
 
 #[cfg(test)]
 mod tests {
-    use super::{WebOsClient, WebOsClientError, WebOsEndpoint};
+    use super::{
+        WebOsAuthenticatedClientError, WebOsClient, WebOsClientError, WebOsClientRegistrationError,
+        WebOsEndpoint,
+    };
+    use crate::auth::SystemUser;
+    use crate::platform_access_token::{
+        PlatformAccessToken, PlatformAccessTokenAcquisitionError, PlatformAccessTokenStore,
+        PlatformAccessTokenStoreError, PlatformAccessTokenStoreOperation,
+    };
+    use crate::web_os::WebOsRegistrationError;
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     use rustls::crypto::ring;
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
     use rustls::{ServerConfig, ServerConnection, StreamOwned};
     use serde_json::{json, Value};
+    use std::fs;
     use std::io;
     use std::net::{TcpListener, TcpStream};
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
     use std::thread::{self, JoinHandle};
     use std::time::Duration;
@@ -411,6 +589,50 @@ mod tests {
     const RESPONSE_TIMEOUT: Duration = Duration::from_millis(200);
     const TEST_CERTIFICATE_DER: &str = "MIIBkzCCATmgAwIBAgIUGCxGaL477t4FECFewoE+24e3aWQwCgYIKoZIzj0EAwIwHjEcMBoGA1UEAwwTTEcgQnVkZHkgRDMgVGVzdCBUVjAgFw0yNjA3MTEyMDUyMzBaGA8yMTI2MDYxNzIwNTIzMFowHjEcMBoGA1UEAwwTTEcgQnVkZHkgRDMgVGVzdCBUVjBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABE8Q+pVxjrGZr5oQfOCxyA7rl7PVzI9U7ukGEp3PI7r8dWDlmcrT5GdNVXIhjza7yi9YRRjw66NaWAlQsd1zxZWjUzBRMB0GA1UdDgQWBBQmbnb3C0PKQVuvqb8oT0Ur6tZLkzAfBgNVHSMEGDAWgBQmbnb3C0PKQVuvqb8oT0Ur6tZLkzAPBgNVHRMBAf8EBTADAQH/MAoGCCqGSM49BAMCA0gAMEUCIQDTL/fP5PjETr2XgdN9cBuSkMR8DD0ohRjvya0dfXhM4gIgKe13t3ClUgKULtYbtIa3mwcSCwSsAEfoRsZG5zFiCc8=";
     const TEST_PRIVATE_KEY_DER: &str = "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgRQOBcIAKtXbi9IkKmq6PBMKSMlLega0uR6twK6hSmYmhRANCAARPEPqVcY6xma+aEHzgscgO65ez1cyPVO7pBhKdzyO6/HVg5ZnK0+RnTVVyIY82u8ovWEUY8OujWlgJULHdc8WV";
+    static TEST_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new(label: &str) -> Self {
+            let sequence = TEST_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "lg-buddy-web-os-client-{label}-{}-{sequence}",
+                std::process::id()
+            ));
+            fs::create_dir(&path).expect("create test directory");
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn token(value: &str) -> PlatformAccessToken {
+        PlatformAccessToken::new(value).expect("valid platform access token")
+    }
+
+    fn token_store(dir: &TestDir) -> PlatformAccessTokenStore {
+        #[cfg(unix)]
+        let owner = SystemUser::new(
+            "test-user",
+            unsafe { libc::geteuid() },
+            unsafe { libc::getegid() },
+            dir.path(),
+        );
+        #[cfg(not(unix))]
+        let owner = SystemUser::new("test-user", 0, 0, dir.path());
+
+        PlatformAccessTokenStore::for_primary_profile(&dir.path().join("config.env"), owner)
+            .expect("derive test token store")
+    }
 
     struct ScriptedServer {
         endpoint: WebOsEndpoint,
@@ -657,6 +879,282 @@ mod tests {
             .send_request("ssap://test/wss", json!({}))
             .expect("secure response");
         assert_eq!(response["payload"]["encrypted"], true);
+        server.join();
+    }
+
+    #[test]
+    fn authenticated_client_registers_with_stored_token_without_prompt_or_rewrite() {
+        let dir = TestDir::new("stored-token");
+        let store = token_store(&dir);
+        let original = token("stored-client-key");
+        store.persist(&original).expect("persist stored token");
+        let server = spawn_plain_server(|socket| {
+            let request = read_request(socket);
+            assert_eq!(request["type"], "register");
+            assert_eq!(request["payload"]["client-key"], "stored-client-key");
+            send_json(
+                socket,
+                json!({
+                    "id": request["id"],
+                    "type": "registered",
+                    "payload": {"client-key": "replacement-client-key"},
+                }),
+            );
+        });
+        let mut prompted = false;
+
+        let _client = WebOsClient::connect_authenticated(
+            server.endpoint,
+            CONNECT_TIMEOUT,
+            RESPONSE_TIMEOUT,
+            &store,
+            || prompted = true,
+        )
+        .expect("authenticate with stored token");
+
+        assert!(!prompted);
+        assert_eq!(store.load().expect("reload stored token"), Some(original));
+        server.join();
+    }
+
+    #[test]
+    fn authenticated_client_pairs_and_persists_new_token() {
+        let dir = TestDir::new("new-token");
+        let store = token_store(&dir);
+        let server = spawn_plain_server(|socket| {
+            let request = read_request(socket);
+            assert_eq!(request["type"], "register");
+            assert_eq!(request["payload"]["client-key"], Value::Null);
+            send_json(
+                socket,
+                json!({
+                    "id": request["id"],
+                    "type": "response",
+                    "payload": {"pairingType": "PROMPT", "returnValue": true},
+                }),
+            );
+            send_json(
+                socket,
+                json!({
+                    "id": request["id"],
+                    "type": "registered",
+                    "payload": {"client-key": "new-client-key"},
+                }),
+            );
+        });
+        let mut prompt_count = 0;
+
+        let _client = WebOsClient::connect_authenticated(
+            server.endpoint,
+            CONNECT_TIMEOUT,
+            RESPONSE_TIMEOUT,
+            &store,
+            || prompt_count += 1,
+        )
+        .expect("pair and authenticate client");
+
+        assert_eq!(prompt_count, 1);
+        assert_eq!(
+            store.load().expect("load acquired token"),
+            Some(token("new-client-key"))
+        );
+        server.join();
+    }
+
+    #[test]
+    fn stored_token_pairing_request_is_typed_and_preserves_token() {
+        let dir = TestDir::new("rejected-stored-token");
+        let store = token_store(&dir);
+        let original = token("rejected-client-key");
+        store.persist(&original).expect("persist stored token");
+        let server = spawn_plain_server(|socket| {
+            let request = read_request(socket);
+            send_json(
+                socket,
+                json!({
+                    "id": request["id"],
+                    "type": "response",
+                    "payload": {"pairingType": "PROMPT", "returnValue": true},
+                }),
+            );
+        });
+        let mut prompted = false;
+
+        let result = WebOsClient::connect_authenticated(
+            server.endpoint,
+            CONNECT_TIMEOUT,
+            RESPONSE_TIMEOUT,
+            &store,
+            || prompted = true,
+        );
+
+        assert!(matches!(
+            result,
+            Err(WebOsAuthenticatedClientError::Authentication {
+                source: PlatformAccessTokenAcquisitionError::Registration {
+                    source: WebOsClientRegistrationError::StoredTokenRequiresPairing,
+                },
+            })
+        ));
+        assert!(!prompted);
+        assert_eq!(store.load().expect("reload stored token"), Some(original));
+        server.join();
+    }
+
+    #[test]
+    fn pairing_rejection_does_not_create_token() {
+        let dir = TestDir::new("pairing-rejected");
+        let store = token_store(&dir);
+        let server = spawn_plain_server(|socket| {
+            let request = read_request(socket);
+            send_json(
+                socket,
+                json!({
+                    "id": request["id"],
+                    "type": "response",
+                    "payload": {"returnValue": false, "errorText": "pairing denied"},
+                }),
+            );
+        });
+
+        let result = WebOsClient::connect_authenticated(
+            server.endpoint,
+            CONNECT_TIMEOUT,
+            RESPONSE_TIMEOUT,
+            &store,
+            || {},
+        );
+
+        assert!(matches!(
+            result,
+            Err(WebOsAuthenticatedClientError::Authentication {
+                source: PlatformAccessTokenAcquisitionError::Registration {
+                    source: WebOsClientRegistrationError::Protocol {
+                        source: WebOsRegistrationError::PairingRejected {
+                            message: Some(message),
+                        },
+                    },
+                },
+            }) if message == "pairing denied"
+        ));
+        assert!(!store.token_path().exists());
+        server.join();
+    }
+
+    #[test]
+    fn registration_timeout_does_not_create_token() {
+        let dir = TestDir::new("registration-timeout");
+        let store = token_store(&dir);
+        let server = spawn_plain_server(|socket| {
+            let _request = read_request(socket);
+            thread::sleep(Duration::from_millis(150));
+        });
+
+        let result = WebOsClient::connect_authenticated(
+            server.endpoint,
+            CONNECT_TIMEOUT,
+            Duration::from_millis(40),
+            &store,
+            || {},
+        );
+
+        assert!(matches!(
+            result,
+            Err(WebOsAuthenticatedClientError::Authentication {
+                source: PlatformAccessTokenAcquisitionError::Registration {
+                    source: WebOsClientRegistrationError::Transport {
+                        source: WebOsClientError::Timeout { .. },
+                    },
+                },
+            })
+        ));
+        assert!(!store.token_path().exists());
+        server.join();
+    }
+
+    #[test]
+    fn malformed_registration_does_not_create_token() {
+        let dir = TestDir::new("malformed-registration");
+        let store = token_store(&dir);
+        let server = spawn_plain_server(|socket| {
+            let request = read_request(socket);
+            send_json(
+                socket,
+                json!({
+                    "id": request["id"],
+                    "type": "registered",
+                    "payload": {},
+                }),
+            );
+        });
+
+        let result = WebOsClient::connect_authenticated(
+            server.endpoint,
+            CONNECT_TIMEOUT,
+            RESPONSE_TIMEOUT,
+            &store,
+            || {},
+        );
+
+        assert!(matches!(
+            result,
+            Err(WebOsAuthenticatedClientError::Authentication {
+                source: PlatformAccessTokenAcquisitionError::Registration {
+                    source: WebOsClientRegistrationError::Protocol {
+                        source: WebOsRegistrationError::MissingClientKey,
+                    },
+                },
+            })
+        ));
+        assert!(!store.token_path().exists());
+        server.join();
+    }
+
+    #[test]
+    fn persistence_failure_does_not_return_authenticated_client() {
+        let dir = TestDir::new("persistence-failure");
+        let store = token_store(&dir);
+        let token_path = store.token_path().to_path_buf();
+        let server = spawn_plain_server(|socket| {
+            let request = read_request(socket);
+            send_json(
+                socket,
+                json!({
+                    "id": request["id"],
+                    "type": "response",
+                    "payload": {"pairingType": "PROMPT", "returnValue": true},
+                }),
+            );
+            send_json(
+                socket,
+                json!({
+                    "id": request["id"],
+                    "type": "registered",
+                    "payload": {"client-key": "unpersisted-client-key"},
+                }),
+            );
+        });
+
+        let result = WebOsClient::connect_authenticated(
+            server.endpoint,
+            CONNECT_TIMEOUT,
+            RESPONSE_TIMEOUT,
+            &store,
+            || fs::create_dir_all(&token_path).expect("block token file replacement"),
+        );
+
+        assert!(matches!(
+            result,
+            Err(WebOsAuthenticatedClientError::Authentication {
+                source: PlatformAccessTokenAcquisitionError::Store {
+                    source: PlatformAccessTokenStoreError::Io {
+                        operation: PlatformAccessTokenStoreOperation::ReplaceToken,
+                        ..
+                    },
+                },
+            })
+        ));
+        assert!(store.token_path().is_dir());
         server.join();
     }
 }

@@ -1,6 +1,7 @@
 //! Profile-scoped platform access-token storage.
 
 use crate::auth::SystemUser;
+use crate::web_os::{WebOsClientRegistration, WebOsClientRegistrationError};
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fmt;
@@ -154,6 +155,36 @@ impl Error for PlatformAccessTokenStoreError {
     }
 }
 
+#[derive(Debug)]
+pub enum PlatformAccessTokenAcquisitionError {
+    Store {
+        source: PlatformAccessTokenStoreError,
+    },
+    Registration {
+        source: WebOsClientRegistrationError,
+    },
+}
+
+impl fmt::Display for PlatformAccessTokenAcquisitionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store { source } => write!(f, "platform access-token storage failed: {source}"),
+            Self::Registration { source } => {
+                write!(f, "platform access-token registration failed: {source}")
+            }
+        }
+    }
+}
+
+impl Error for PlatformAccessTokenAcquisitionError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Store { source } => Some(source),
+            Self::Registration { source } => Some(source),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PlatformAccessTokenStore {
     token_path: PathBuf,
@@ -236,6 +267,31 @@ impl PlatformAccessTokenStore {
         ensure_private_directory(tvs_dir, &self.owner)?;
         ensure_private_directory(profile_dir, &self.owner)?;
         atomic_write_token(&self.token_path, &contents, &self.owner)
+    }
+
+    pub(crate) fn get_or_acquire(
+        &self,
+        registration: &mut WebOsClientRegistration<'_, '_>,
+    ) -> Result<PlatformAccessToken, PlatformAccessTokenAcquisitionError> {
+        match self
+            .load()
+            .map_err(|source| PlatformAccessTokenAcquisitionError::Store { source })?
+        {
+            Some(token) => {
+                registration.register(Some(&token)).map_err(|source| {
+                    PlatformAccessTokenAcquisitionError::Registration { source }
+                })?;
+                Ok(token)
+            }
+            None => {
+                let token = registration.register(None).map_err(|source| {
+                    PlatformAccessTokenAcquisitionError::Registration { source }
+                })?;
+                self.persist(&token)
+                    .map_err(|source| PlatformAccessTokenAcquisitionError::Store { source })?;
+                Ok(token)
+            }
+        }
     }
 }
 
