@@ -160,6 +160,11 @@ pub fn resolve_bscpylgtv_auth_context_from_env(
         .with_key_file_path(key_file_path))
 }
 
+pub fn resolve_config_owner(config_path: &Path) -> Result<SystemUser, AuthContextError> {
+    let passwd = fs::read_to_string("/etc/passwd").map_err(AuthContextError::PasswdRead)?;
+    resolve_config_owner_from_passwd(config_path, &passwd)
+}
+
 fn default_key_file_path(config_path: &Path) -> Result<PathBuf, AuthContextError> {
     let parent = config_path
         .parent()
