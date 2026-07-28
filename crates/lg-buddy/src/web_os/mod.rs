@@ -3,6 +3,8 @@
 mod client;
 mod power;
 mod registration;
+#[cfg(test)]
+mod test_support;
 mod tls;
 
 pub(crate) use client::WebOsClientRegistration;
