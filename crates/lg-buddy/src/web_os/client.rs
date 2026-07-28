@@ -148,6 +148,15 @@ impl WebOsClient {
         })
     }
 
+    #[cfg(test)]
+    pub(super) fn connect_for_test(
+        endpoint: WebOsEndpoint,
+        connect_timeout: Duration,
+        response_timeout: Duration,
+    ) -> Result<Self, WebOsClientError> {
+        Self::connect(endpoint, connect_timeout, response_timeout)
+    }
+
     fn registration(&mut self) -> WebOsClientRegistration<'_> {
         WebOsClientRegistration { client: self }
     }

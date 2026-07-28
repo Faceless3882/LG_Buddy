@@ -568,6 +568,12 @@ mod tests {
             )))
         );
         assert_eq!(
+            parse_args(["dev", "webos-read-probe"]),
+            Ok(ParseOutcome::Command(Command::Dev(
+                DevCommand::WebOsReadProbe
+            )))
+        );
+        assert_eq!(
             parse_args(["settings", "list"]),
             Ok(ParseOutcome::Command(Command::Settings(
                 SettingsCommand::List
@@ -737,6 +743,14 @@ mod tests {
         assert_eq!(
             parse_args(["dev", "webos-auth-probe", "extra"]),
             Err(ParseError::Dev(DevParseError::UnexpectedArguments {
+                command: DevCommand::WebOsAuthProbe,
+                arguments: vec!["extra".to_string()],
+            }))
+        );
+        assert_eq!(
+            parse_args(["dev", "webos-read-probe", "extra"]),
+            Err(ParseError::Dev(DevParseError::UnexpectedArguments {
+                command: DevCommand::WebOsReadProbe,
                 arguments: vec!["extra".to_string()],
             }))
         );
@@ -836,6 +850,7 @@ mod tests {
             );
         }
         assert!(!help.contains("webos-auth-probe"));
+        assert!(!help.contains("webos-read-probe"));
     }
 
     #[test]
