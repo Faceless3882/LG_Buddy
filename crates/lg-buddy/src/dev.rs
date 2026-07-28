@@ -3,7 +3,7 @@ use crate::config::{load_config, resolve_config_path_from_env, ConfigError, Conf
 use crate::platform_access_token::{PlatformAccessTokenStore, PlatformAccessTokenStoreError};
 use crate::web_os::{
     WebOsAuthenticatedClientError, WebOsAuthenticationEvent, WebOsClient, WebOsEndpoint,
-    WebOsPowerState, WebOsPowerStateError,
+    WebOsForegroundApp, WebOsForegroundAppError, WebOsPowerState, WebOsPowerStateError,
 };
 use std::error::Error;
 use std::fmt;
@@ -15,10 +15,12 @@ use std::time::Duration;
 const WEBOS_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const WEBOS_RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
 const WEBOS_AUTH_PROBE_PREFIX: &str = "LG Buddy WebOS Auth Probe";
+const WEBOS_READ_PROBE_PREFIX: &str = "LG Buddy WebOS Read Probe";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DevCommand {
     WebOsAuthProbe,
+    WebOsReadProbe,
 }
 
 impl DevCommand {
@@ -29,23 +31,24 @@ impl DevCommand {
     {
         let mut args = args.into_iter();
         let subcommand = args.next().ok_or(DevParseError::MissingSubcommand)?;
-        if subcommand.as_ref() != "webos-auth-probe" {
-            return Err(DevParseError::UnknownSubcommand(
-                subcommand.as_ref().to_string(),
-            ));
-        }
+        let command = match subcommand.as_ref() {
+            "webos-auth-probe" => Self::WebOsAuthProbe,
+            "webos-read-probe" => Self::WebOsReadProbe,
+            other => return Err(DevParseError::UnknownSubcommand(other.to_string())),
+        };
 
         let arguments: Vec<String> = args.map(|arg| arg.as_ref().to_string()).collect();
         if !arguments.is_empty() {
-            return Err(DevParseError::UnexpectedArguments { arguments });
+            return Err(DevParseError::UnexpectedArguments { command, arguments });
         }
 
-        Ok(Self::WebOsAuthProbe)
+        Ok(command)
     }
 
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::WebOsAuthProbe => "dev webos-auth-probe",
+            Self::WebOsReadProbe => "dev webos-read-probe",
         }
     }
 }
@@ -54,7 +57,10 @@ impl DevCommand {
 pub enum DevParseError {
     MissingSubcommand,
     UnknownSubcommand(String),
-    UnexpectedArguments { arguments: Vec<String> },
+    UnexpectedArguments {
+        command: DevCommand,
+        arguments: Vec<String>,
+    },
 }
 
 impl fmt::Display for DevParseError {
@@ -64,9 +70,10 @@ impl fmt::Display for DevParseError {
             Self::UnknownSubcommand(subcommand) => {
                 write!(f, "unknown temporary dev command `{subcommand}`")
             }
-            Self::UnexpectedArguments { arguments } => write!(
+            Self::UnexpectedArguments { command, arguments } => write!(
                 f,
-                "unexpected arguments for `dev webos-auth-probe`: {}",
+                "unexpected arguments for `{}`: {}",
+                command.as_str(),
                 arguments.join(" ")
             ),
         }
@@ -84,12 +91,13 @@ pub enum DevError {
     TokenStore(PlatformAccessTokenStoreError),
     Authentication(WebOsAuthenticatedClientError),
     PowerState(WebOsPowerStateError),
+    ForegroundApp(WebOsForegroundAppError),
 }
 
 impl fmt::Display for DevError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Io(source) => write!(f, "could not write webOS auth probe output: {source}"),
+            Self::Io(source) => write!(f, "could not write webOS probe output: {source}"),
             Self::ConfigPath(source) => write!(f, "could not resolve probe config: {source}"),
             Self::Config(source) => write!(f, "could not load probe config: {source}"),
             Self::ConfigOwner(source) => {
@@ -99,9 +107,12 @@ impl fmt::Display for DevError {
                 write!(f, "could not construct probe access-token store: {source}")
             }
             Self::Authentication(source) => {
-                write!(f, "webOS auth probe authentication failed: {source}")
+                write!(f, "webOS probe authentication failed: {source}")
             }
-            Self::PowerState(source) => write!(f, "webOS auth probe state read failed: {source}"),
+            Self::PowerState(source) => write!(f, "webOS probe power-state read failed: {source}"),
+            Self::ForegroundApp(source) => {
+                write!(f, "webOS read probe foreground-app read failed: {source}")
+            }
         }
     }
 }
@@ -116,6 +127,7 @@ impl Error for DevError {
             Self::TokenStore(source) => Some(source),
             Self::Authentication(source) => Some(source),
             Self::PowerState(source) => Some(source),
+            Self::ForegroundApp(source) => Some(source),
         }
     }
 }
@@ -126,6 +138,7 @@ pub(crate) fn run_dev_command<W: Write>(
 ) -> Result<(), DevError> {
     match command {
         DevCommand::WebOsAuthProbe => run_webos_auth_probe(writer),
+        DevCommand::WebOsReadProbe => run_webos_read_probe(writer),
     }
 }
 
@@ -133,7 +146,7 @@ fn run_webos_auth_probe<W: Write>(writer: &mut W) -> Result<(), DevError> {
     let config_path = resolve_config_path_from_env().map_err(DevError::ConfigPath)?;
     let config = load_config(&config_path).map_err(DevError::Config)?;
     let owner = resolve_config_owner(&config_path).map_err(DevError::ConfigOwner)?;
-    let context = WebOsAuthProbeContext::new(&config_path, config.tv_ip, owner)?;
+    let context = WebOsProbeContext::new(&config_path, config.tv_ip, owner)?;
 
     run_webos_auth_probe_with(writer, &context, |endpoint, token_store, on_auth_event| {
         let mut client = WebOsClient::connect_authenticated(
@@ -148,12 +161,36 @@ fn run_webos_auth_probe<W: Write>(writer: &mut W) -> Result<(), DevError> {
     })
 }
 
-struct WebOsAuthProbeContext {
+fn run_webos_read_probe<W: Write>(writer: &mut W) -> Result<(), DevError> {
+    let config_path = resolve_config_path_from_env().map_err(DevError::ConfigPath)?;
+    let config = load_config(&config_path).map_err(DevError::Config)?;
+    let owner = resolve_config_owner(&config_path).map_err(DevError::ConfigOwner)?;
+    let context = WebOsProbeContext::new(&config_path, config.tv_ip, owner)?;
+
+    run_webos_read_probe_with(writer, &context, |endpoint, token_store, on_auth_event| {
+        let mut client = WebOsClient::connect_authenticated(
+            endpoint,
+            WEBOS_CONNECT_TIMEOUT,
+            WEBOS_RESPONSE_TIMEOUT,
+            token_store,
+            on_auth_event,
+        )
+        .map_err(DevError::Authentication)?;
+        let power_state = client.power_state().map_err(DevError::PowerState)?;
+        let foreground_app = client.foreground_app().map_err(DevError::ForegroundApp)?;
+        Ok(WebOsReadProbeResult {
+            power_state,
+            foreground_app,
+        })
+    })
+}
+
+struct WebOsProbeContext {
     endpoint: WebOsEndpoint,
     token_store: PlatformAccessTokenStore,
 }
 
-impl WebOsAuthProbeContext {
+impl WebOsProbeContext {
     fn new(config_path: &Path, tv_ip: Ipv4Addr, owner: SystemUser) -> Result<Self, DevError> {
         let token_store = PlatformAccessTokenStore::for_primary_profile(config_path, owner)
             .map_err(DevError::TokenStore)?;
@@ -166,7 +203,7 @@ impl WebOsAuthProbeContext {
 
 fn run_webos_auth_probe_with<W, F>(
     writer: &mut W,
-    context: &WebOsAuthProbeContext,
+    context: &WebOsProbeContext,
     probe: F,
 ) -> Result<(), DevError>
 where
@@ -177,12 +214,68 @@ where
         &mut dyn FnMut(WebOsAuthenticationEvent),
     ) -> Result<WebOsPowerState, DevError>,
 {
+    let power_state = execute_webos_probe(writer, context, WEBOS_AUTH_PROBE_PREFIX, probe)?;
+    writeln!(
+        writer,
+        "{WEBOS_AUTH_PROBE_PREFIX}: power_state={power_state}"
+    )
+    .map_err(DevError::Io)
+}
+
+struct WebOsReadProbeResult {
+    power_state: WebOsPowerState,
+    foreground_app: WebOsForegroundApp,
+}
+
+fn run_webos_read_probe_with<W, F>(
+    writer: &mut W,
+    context: &WebOsProbeContext,
+    probe: F,
+) -> Result<(), DevError>
+where
+    W: Write,
+    F: FnOnce(
+        WebOsEndpoint,
+        &PlatformAccessTokenStore,
+        &mut dyn FnMut(WebOsAuthenticationEvent),
+    ) -> Result<WebOsReadProbeResult, DevError>,
+{
+    let result = execute_webos_probe(writer, context, WEBOS_READ_PROBE_PREFIX, probe)?;
+    writeln!(
+        writer,
+        "{WEBOS_READ_PROBE_PREFIX}: power_state={}",
+        result.power_state
+    )
+    .and_then(|_| {
+        writeln!(
+            writer,
+            "{WEBOS_READ_PROBE_PREFIX}: foreground_app={}",
+            result.foreground_app
+        )
+    })
+    .map_err(DevError::Io)
+}
+
+fn execute_webos_probe<W, F, T>(
+    writer: &mut W,
+    context: &WebOsProbeContext,
+    prefix: &str,
+    probe: F,
+) -> Result<T, DevError>
+where
+    W: Write,
+    F: FnOnce(
+        WebOsEndpoint,
+        &PlatformAccessTokenStore,
+        &mut dyn FnMut(WebOsAuthenticationEvent),
+    ) -> Result<T, DevError>,
+{
     let mut progress_error = None;
     let probe_result = {
         let mut on_auth_event = |event| {
             if progress_error.is_none() {
                 progress_error =
-                    write_auth_event(writer, context.token_store.token_path(), event).err();
+                    write_auth_event(writer, prefix, context.token_store.token_path(), event).err();
             }
         };
         probe(context.endpoint, &context.token_store, &mut on_auth_event)
@@ -192,36 +285,29 @@ where
         return Err(DevError::Io(source));
     }
 
-    let power_state = probe_result?;
-    writeln!(
-        writer,
-        "{WEBOS_AUTH_PROBE_PREFIX}: power_state={power_state}"
-    )
-    .map_err(DevError::Io)
+    probe_result
 }
 
 fn write_auth_event<W: Write>(
     writer: &mut W,
+    prefix: &str,
     token_path: &Path,
     event: WebOsAuthenticationEvent,
 ) -> io::Result<()> {
     match event {
         WebOsAuthenticationEvent::UsingStoredAccessToken => {
-            writeln!(
-                writer,
-                "{WEBOS_AUTH_PROBE_PREFIX}: using stored access token."
-            )?;
+            writeln!(writer, "{prefix}: using stored access token.")?;
         }
         WebOsAuthenticationEvent::PairingPrompt => {
             writeln!(
                 writer,
-                "{WEBOS_AUTH_PROBE_PREFIX}: pairing required; accept the prompt on the TV."
+                "{prefix}: pairing required; accept the prompt on the TV."
             )?;
         }
         WebOsAuthenticationEvent::AccessTokenPersisted => {
             writeln!(
                 writer,
-                "{WEBOS_AUTH_PROBE_PREFIX}: stored access token at {}",
+                "{prefix}: stored access token at {}",
                 token_path.display()
             )?;
         }
@@ -232,15 +318,18 @@ fn write_auth_event<W: Write>(
 #[cfg(test)]
 mod tests {
     use super::{
-        run_webos_auth_probe_with, DevCommand, DevError, DevParseError, WebOsAuthProbeContext,
+        run_webos_auth_probe_with, run_webos_read_probe_with, DevCommand, DevError, DevParseError,
+        WebOsProbeContext, WebOsReadProbeResult,
     };
     use crate::auth::SystemUser;
-    use crate::web_os::{WebOsAuthenticationEvent, WebOsPowerState, WebOsPowerStateError};
+    use crate::web_os::{
+        WebOsAuthenticationEvent, WebOsForegroundApp, WebOsPowerState, WebOsPowerStateError,
+    };
     use std::net::Ipv4Addr;
     use std::path::Path;
 
-    fn probe_context() -> WebOsAuthProbeContext {
-        WebOsAuthProbeContext::new(
+    fn probe_context() -> WebOsProbeContext {
+        WebOsProbeContext::new(
             Path::new("/tmp/lg-buddy-dev-probe/config.env"),
             Ipv4Addr::new(192, 0, 2, 42),
             SystemUser::new("test-user", 1000, 1000, "/tmp"),
@@ -249,10 +338,14 @@ mod tests {
     }
 
     #[test]
-    fn parser_accepts_only_webos_auth_probe() {
+    fn parser_accepts_only_known_webos_probes() {
         assert_eq!(
             DevCommand::parse(["webos-auth-probe"]),
             Ok(DevCommand::WebOsAuthProbe)
+        );
+        assert_eq!(
+            DevCommand::parse(["webos-read-probe"]),
+            Ok(DevCommand::WebOsReadProbe)
         );
         assert_eq!(
             DevCommand::parse(Vec::<String>::new()),
@@ -265,6 +358,14 @@ mod tests {
         assert_eq!(
             DevCommand::parse(["webos-auth-probe", "extra"]),
             Err(DevParseError::UnexpectedArguments {
+                command: DevCommand::WebOsAuthProbe,
+                arguments: vec!["extra".to_string()],
+            })
+        );
+        assert_eq!(
+            DevCommand::parse(["webos-read-probe", "extra"]),
+            Err(DevParseError::UnexpectedArguments {
+                command: DevCommand::WebOsReadProbe,
                 arguments: vec!["extra".to_string()],
             })
         );
@@ -321,6 +422,37 @@ LG Buddy WebOS Auth Probe: stored access token at /tmp/lg-buddy-dev-probe/tvs/pr
 LG Buddy WebOS Auth Probe: power_state=Active Standby\n"
         );
         assert!(!output.contains("client-key"));
+    }
+
+    #[test]
+    fn read_probe_reports_hardware_observed_state_and_foreground_app() {
+        let context = probe_context();
+        let mut output = Vec::new();
+
+        run_webos_read_probe_with(
+            &mut output,
+            &context,
+            |endpoint, token_store, on_auth_event| {
+                assert_eq!(endpoint.to_string(), "wss://192.0.2.42:3001/");
+                assert_eq!(
+                    token_store.token_path(),
+                    Path::new("/tmp/lg-buddy-dev-probe/tvs/primary/access-token.json")
+                );
+                on_auth_event(WebOsAuthenticationEvent::UsingStoredAccessToken);
+                Ok(WebOsReadProbeResult {
+                    power_state: WebOsPowerState::Active,
+                    foreground_app: WebOsForegroundApp::from_test_app_id("com.webos.app.hdmi3"),
+                })
+            },
+        )
+        .expect("run read probe");
+
+        assert_eq!(
+            String::from_utf8(output).expect("UTF-8 output"),
+            "LG Buddy WebOS Read Probe: using stored access token.\n\
+LG Buddy WebOS Read Probe: power_state=Active\n\
+LG Buddy WebOS Read Probe: foreground_app=com.webos.app.hdmi3\n"
+        );
     }
 
     #[test]
