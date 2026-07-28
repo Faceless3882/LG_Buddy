@@ -2,8 +2,9 @@ use crate::auth::{resolve_config_owner, AuthContextError, SystemUser};
 use crate::config::{load_config, resolve_config_path_from_env, ConfigError, ConfigPathError};
 use crate::platform_access_token::{PlatformAccessTokenStore, PlatformAccessTokenStoreError};
 use crate::web_os::{
-    WebOsAuthenticatedClientError, WebOsAuthenticationEvent, WebOsClient, WebOsEndpoint,
-    WebOsForegroundApp, WebOsForegroundAppError, WebOsPowerState, WebOsPowerStateError,
+    WebOsAuthenticatedClientError, WebOsAuthenticationEvent, WebOsBacklightBrightness,
+    WebOsBacklightBrightnessError, WebOsClient, WebOsEndpoint, WebOsForegroundApp,
+    WebOsForegroundAppError, WebOsPowerState, WebOsPowerStateError,
 };
 use std::error::Error;
 use std::fmt;
@@ -92,6 +93,7 @@ pub enum DevError {
     Authentication(WebOsAuthenticatedClientError),
     PowerState(WebOsPowerStateError),
     ForegroundApp(WebOsForegroundAppError),
+    BacklightBrightness(WebOsBacklightBrightnessError),
 }
 
 impl fmt::Display for DevError {
@@ -113,6 +115,9 @@ impl fmt::Display for DevError {
             Self::ForegroundApp(source) => {
                 write!(f, "webOS read probe foreground-app read failed: {source}")
             }
+            Self::BacklightBrightness(source) => {
+                write!(f, "webOS read probe backlight read failed: {source}")
+            }
         }
     }
 }
@@ -128,6 +133,7 @@ impl Error for DevError {
             Self::Authentication(source) => Some(source),
             Self::PowerState(source) => Some(source),
             Self::ForegroundApp(source) => Some(source),
+            Self::BacklightBrightness(source) => Some(source),
         }
     }
 }
@@ -178,9 +184,13 @@ fn run_webos_read_probe<W: Write>(writer: &mut W) -> Result<(), DevError> {
         .map_err(DevError::Authentication)?;
         let power_state = client.power_state().map_err(DevError::PowerState)?;
         let foreground_app = client.foreground_app().map_err(DevError::ForegroundApp)?;
+        let backlight_brightness = client
+            .backlight_brightness()
+            .map_err(DevError::BacklightBrightness)?;
         Ok(WebOsReadProbeResult {
             power_state,
             foreground_app,
+            backlight_brightness,
         })
     })
 }
@@ -225,6 +235,7 @@ where
 struct WebOsReadProbeResult {
     power_state: WebOsPowerState,
     foreground_app: WebOsForegroundApp,
+    backlight_brightness: WebOsBacklightBrightness,
 }
 
 fn run_webos_read_probe_with<W, F>(
@@ -251,6 +262,13 @@ where
             writer,
             "{WEBOS_READ_PROBE_PREFIX}: foreground_app={}",
             result.foreground_app
+        )
+    })
+    .and_then(|_| {
+        writeln!(
+            writer,
+            "{WEBOS_READ_PROBE_PREFIX}: backlight={}",
+            result.backlight_brightness
         )
     })
     .map_err(DevError::Io)
@@ -323,7 +341,8 @@ mod tests {
     };
     use crate::auth::SystemUser;
     use crate::web_os::{
-        WebOsAuthenticationEvent, WebOsForegroundApp, WebOsPowerState, WebOsPowerStateError,
+        WebOsAuthenticationEvent, WebOsBacklightBrightness, WebOsForegroundApp, WebOsPowerState,
+        WebOsPowerStateError,
     };
     use std::net::Ipv4Addr;
     use std::path::Path;
@@ -425,7 +444,7 @@ LG Buddy WebOS Auth Probe: power_state=Active Standby\n"
     }
 
     #[test]
-    fn read_probe_reports_hardware_observed_state_and_foreground_app() {
+    fn read_probe_reports_hardware_observed_values() {
         let context = probe_context();
         let mut output = Vec::new();
 
@@ -442,6 +461,7 @@ LG Buddy WebOS Auth Probe: power_state=Active Standby\n"
                 Ok(WebOsReadProbeResult {
                     power_state: WebOsPowerState::Active,
                     foreground_app: WebOsForegroundApp::from_test_app_id("com.webos.app.hdmi3"),
+                    backlight_brightness: WebOsBacklightBrightness::from_test_percent(100),
                 })
             },
         )
@@ -451,7 +471,8 @@ LG Buddy WebOS Auth Probe: power_state=Active Standby\n"
             String::from_utf8(output).expect("UTF-8 output"),
             "LG Buddy WebOS Read Probe: using stored access token.\n\
 LG Buddy WebOS Read Probe: power_state=Active\n\
-LG Buddy WebOS Read Probe: foreground_app=com.webos.app.hdmi3\n"
+LG Buddy WebOS Read Probe: foreground_app=com.webos.app.hdmi3\n\
+LG Buddy WebOS Read Probe: backlight=100\n"
         );
     }
 

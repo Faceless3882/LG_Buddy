@@ -2,6 +2,7 @@
 
 mod client;
 mod input;
+mod picture;
 mod power;
 mod registration;
 #[cfg(test)]
@@ -14,6 +15,7 @@ pub use client::{
     WebOsClientRegistrationError, WebOsEndpoint,
 };
 pub use input::{WebOsForegroundApp, WebOsForegroundAppError};
+pub use picture::{WebOsBacklightBrightness, WebOsBacklightBrightnessError};
 pub use power::{WebOsPowerState, WebOsPowerStateError};
 
 pub use registration::{
