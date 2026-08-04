@@ -1,5 +1,5 @@
 use super::{WebOsClient, WebOsClientError};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::error::Error;
 use std::fmt;
 
@@ -56,14 +56,14 @@ pub(crate) fn send_control_request(
     client: &mut WebOsClient,
     uri: &str,
     payload: Value,
-) -> Result<(), WebOsControlError> {
+) -> Result<Map<String, Value>, WebOsControlError> {
     let response = client
         .send_request(uri, payload)
         .map_err(|source| WebOsControlError::Request { source })?;
     parse_control_response(&response)
 }
 
-fn parse_control_response(response: &Value) -> Result<(), WebOsControlError> {
+fn parse_control_response(response: &Value) -> Result<Map<String, Value>, WebOsControlError> {
     let payload = match response.get("payload") {
         Some(Value::Object(payload)) => payload,
         Some(_) => return Err(WebOsControlError::InvalidPayload),
@@ -71,7 +71,7 @@ fn parse_control_response(response: &Value) -> Result<(), WebOsControlError> {
     };
 
     match payload.get("returnValue") {
-        Some(Value::Bool(true)) => Ok(()),
+        Some(Value::Bool(true)) => Ok(payload.clone()),
         Some(Value::Bool(false)) => {
             let message = payload
                 .get("errorText")

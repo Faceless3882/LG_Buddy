@@ -580,6 +580,18 @@ mod tests {
             )))
         );
         assert_eq!(
+            parse_args(["dev", "webos-control-probe", "screen-off"]),
+            Ok(ParseOutcome::Command(Command::Dev(
+                DevCommand::WebOsControlProbe(WebOsControlProbeCommand::ScreenOff)
+            )))
+        );
+        assert_eq!(
+            parse_args(["dev", "webos-control-probe", "screen-on"]),
+            Ok(ParseOutcome::Command(Command::Dev(
+                DevCommand::WebOsControlProbe(WebOsControlProbeCommand::ScreenOn)
+            )))
+        );
+        assert_eq!(
             parse_args(["settings", "list"]),
             Ok(ParseOutcome::Command(Command::Settings(
                 SettingsCommand::List

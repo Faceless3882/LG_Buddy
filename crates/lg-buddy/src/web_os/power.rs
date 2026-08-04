@@ -17,7 +17,7 @@ pub enum WebOsPowerState {
 }
 
 impl WebOsPowerState {
-    fn from_wire_value(value: String) -> Self {
+    pub(crate) fn from_wire_value(value: String) -> Self {
         match value.as_str() {
             "Active" => Self::Active,
             "Active Standby" => Self::ActiveStandby,

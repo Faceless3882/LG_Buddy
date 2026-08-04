@@ -65,14 +65,8 @@ fn hardware_observed_screen_off_transcript_is_replayed_exactly() {
     let mut client = connected_client(&server);
 
     assert_eq!(
-        client
-            .send_request(TURN_OFF_SCREEN_URI, json!({"standbyMode": "active"}))
-            .expect("screen off response"),
-        json!({
-            "id": "request_0",
-            "type": "response",
-            "payload": {"returnValue": true, "state": "Screen Off"},
-        })
+        client.turn_screen_off().expect("turn screen off"),
+        super::WebOsPowerState::ScreenOff
     );
     server.finish();
 }
@@ -95,14 +89,8 @@ fn hardware_observed_screen_on_transcript_is_replayed_exactly() {
     let mut client = connected_client(&server);
 
     assert_eq!(
-        client
-            .send_request(TURN_ON_SCREEN_URI, json!({"standbyMode": "active"}))
-            .expect("screen on response"),
-        json!({
-            "id": "request_0",
-            "type": "response",
-            "payload": {"returnValue": true, "state": "Active"},
-        })
+        client.turn_screen_on().expect("turn screen on"),
+        super::WebOsPowerState::Active
     );
     server.finish();
 }
@@ -131,11 +119,15 @@ fn hardware_observed_screen_on_substate_error_preserves_payload() {
     let mut client = connected_client(&server);
 
     assert!(matches!(
-        client.send_request(TURN_ON_SCREEN_URI, json!({"standbyMode": "active"})),
-        Err(WebOsClientError::WebOs {
-            code: Some(500),
-            message,
-            payload: Some(payload),
+        client.turn_screen_on(),
+        Err(super::WebOsScreenControlError::Control {
+            source: super::WebOsControlError::Request {
+                source: WebOsClientError::WebOs {
+                    code: Some(500),
+                    message,
+                    payload: Some(payload),
+                },
+            },
         }) if message == "Application error"
             && payload == json!({
                 "errorCode": "-102",

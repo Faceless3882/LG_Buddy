@@ -145,6 +145,7 @@ impl WebOsClient {
             SWITCH_INPUT_URI,
             json!({"inputId": input_id.as_str()}),
         )
+        .map(|_| ())
     }
 }
 

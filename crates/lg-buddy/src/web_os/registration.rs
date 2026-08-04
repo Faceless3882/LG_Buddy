@@ -357,6 +357,7 @@ mod tests {
             "manifestVersion": 1,
             "permissions": [
                 "CONTROL_POWER",
+                "CONTROL_TV_SCREEN",
                 "LAUNCH",
                 "READ_POWER_STATE",
                 "READ_RUNNING_APPS",
