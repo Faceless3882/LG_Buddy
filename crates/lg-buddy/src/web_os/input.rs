@@ -187,16 +187,9 @@ fn parse_foreground_app_response(
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_foreground_app_response, WebOsForegroundApp, WebOsForegroundAppError, WebOsInputId,
-        WebOsInputIdError, GET_FOREGROUND_APP_URI,
+        parse_foreground_app_response, WebOsForegroundAppError, WebOsInputId, WebOsInputIdError,
     };
-    use crate::web_os::test_support::ScriptedWebOsServer;
-    use crate::web_os::WebOsClient;
     use serde_json::json;
-    use std::time::Duration;
-
-    const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
-    const RESPONSE_TIMEOUT: Duration = Duration::from_millis(200);
 
     #[test]
     fn input_id_rejects_empty_values() {
@@ -206,36 +199,6 @@ mod tests {
             WebOsInputId::new("HDMI_2").expect("input ID").as_str(),
             "HDMI_2"
         );
-    }
-
-    #[test]
-    fn foreground_app_request_matches_hardware_observed_transcript() {
-        let server = ScriptedWebOsServer::spawn(|peer| {
-            let request = peer.receive_json();
-            assert_eq!(request["id"], "request_0");
-            assert_eq!(request["type"], "request");
-            assert_eq!(request["uri"], GET_FOREGROUND_APP_URI);
-            assert_eq!(request["payload"], json!({}));
-            peer.send_json(json!({
-                "id": request["id"],
-                "type": "response",
-                "payload": {
-                    "appId": "com.webos.app.hdmi3",
-                    "returnValue": true,
-                },
-            }));
-        });
-        let mut client =
-            WebOsClient::connect_for_test(server.endpoint(), CONNECT_TIMEOUT, RESPONSE_TIMEOUT)
-                .expect("connect client");
-
-        assert_eq!(
-            client.foreground_app().expect("read foreground app"),
-            WebOsForegroundApp {
-                app_id: "com.webos.app.hdmi3".to_string(),
-            }
-        );
-        server.finish();
     }
 
     #[test]

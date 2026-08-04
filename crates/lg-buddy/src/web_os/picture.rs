@@ -204,55 +204,9 @@ fn normalize_backlight_brightness(value: &Value) -> Result<u8, WebOsBacklightBri
 mod tests {
     use super::{
         normalize_backlight_brightness, parse_backlight_brightness_response,
-        WebOsBacklightBrightness, WebOsBacklightBrightnessError, GET_SYSTEM_SETTINGS_URI,
+        WebOsBacklightBrightnessError,
     };
-    use crate::web_os::test_support::ScriptedWebOsServer;
-    use crate::web_os::WebOsClient;
     use serde_json::{json, Value};
-    use std::time::Duration;
-
-    const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
-    const RESPONSE_TIMEOUT: Duration = Duration::from_millis(200);
-
-    #[test]
-    fn backlight_request_matches_hardware_observed_transcript() {
-        let server = ScriptedWebOsServer::spawn(|peer| {
-            let request = peer.receive_json();
-            assert_eq!(request["id"], "request_0");
-            assert_eq!(request["type"], "request");
-            assert_eq!(request["uri"], GET_SYSTEM_SETTINGS_URI);
-            assert_eq!(
-                request["payload"],
-                json!({
-                    "category": "picture",
-                    "keys": ["backlight"],
-                })
-            );
-            peer.send_json(json!({
-                "id": request["id"],
-                "type": "response",
-                "payload": {
-                    "category": "picture",
-                    "returnValue": true,
-                    "settings": {
-                        "backlight": 100,
-                    },
-                    "subscribed": false,
-                },
-            }));
-        });
-        let mut client =
-            WebOsClient::connect_for_test(server.endpoint(), CONNECT_TIMEOUT, RESPONSE_TIMEOUT)
-                .expect("connect client");
-
-        assert_eq!(
-            client
-                .backlight_brightness()
-                .expect("read backlight brightness"),
-            WebOsBacklightBrightness(100)
-        );
-        server.finish();
-    }
 
     #[test]
     fn malformed_backlight_payloads_are_typed_errors() {

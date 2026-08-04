@@ -148,15 +148,6 @@ impl WebOsClient {
         })
     }
 
-    #[cfg(test)]
-    pub(super) fn connect_for_test(
-        endpoint: WebOsEndpoint,
-        connect_timeout: Duration,
-        response_timeout: Duration,
-    ) -> Result<Self, WebOsClientError> {
-        Self::connect(endpoint, connect_timeout, response_timeout)
-    }
-
     fn registration(&mut self) -> WebOsClientRegistration<'_> {
         WebOsClientRegistration { client: self }
     }
@@ -600,13 +591,15 @@ mod tests {
         PlatformAccessToken, PlatformAccessTokenAcquisitionError, PlatformAccessTokenStore,
         PlatformAccessTokenStoreError, PlatformAccessTokenStoreOperation,
     };
-    use crate::web_os::test_support::{ScriptedWebOsPeer, ScriptedWebOsServer};
-    use crate::web_os::{WebOsPowerState, WebOsPowerStateError, WebOsRegistrationError};
+    use crate::web_os::test_support::{
+        ObservedWebOsInput, ObservedWebOsTvServer, ScriptedWebOsPeer, ScriptedWebOsServer,
+    };
+    use crate::web_os::{WebOsPowerStateError, WebOsRegistrationError};
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     use rustls::crypto::ring;
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
     use rustls::{ServerConfig, ServerConnection, StreamOwned};
-    use serde_json::{json, Value};
+    use serde_json::json;
     use std::fs;
     use std::net::{TcpListener, TcpStream};
     use std::path::{Path, PathBuf};
@@ -877,8 +870,9 @@ mod tests {
         server.finish();
     }
 
+    // Synthetic fault injection: the observed TV returned the stored token unchanged.
     #[test]
-    fn authenticated_client_registers_with_stored_token_without_prompt_or_rewrite() {
+    fn stored_token_registration_does_not_persist_a_replacement_from_the_response() {
         let dir = TestDir::new("stored-token");
         let store = token_store(&dir);
         let original = token("stored-client-key");
@@ -912,28 +906,16 @@ mod tests {
         server.finish();
     }
 
+    // Real-TV first-pairing acceptance target:
+    // https://github.com/Staphylococcus/LG_Buddy/issues/47
     #[test]
     fn authenticated_client_pairs_and_persists_new_token() {
         let dir = TestDir::new("new-token");
         let store = token_store(&dir);
-        let server = ScriptedWebOsServer::spawn(|peer| {
-            let request = peer.receive_json();
-            assert_eq!(request["type"], "register");
-            assert_eq!(request["payload"]["client-key"], Value::Null);
-            peer.send_json(json!({
-                "id": request["id"],
-                "type": "response",
-                "payload": {"pairingType": "PROMPT", "returnValue": true},
-            }));
-            peer.send_json(json!({
-                "id": request["id"],
-                "type": "registered",
-                "payload": {"client-key": "new-client-key"},
-            }));
-        });
+        let server = ObservedWebOsTvServer::active(ObservedWebOsInput::Hdmi3);
         let mut events = Vec::new();
 
-        let _client = WebOsClient::connect_authenticated(
+        let client = WebOsClient::connect_authenticated(
             server.endpoint(),
             CONNECT_TIMEOUT,
             RESPONSE_TIMEOUT,
@@ -951,8 +933,9 @@ mod tests {
         );
         assert_eq!(
             store.load().expect("load acquired token"),
-            Some(token("new-client-key"))
+            Some(server.access_token())
         );
+        drop(client);
         server.finish();
     }
 
@@ -1142,56 +1125,6 @@ mod tests {
             })
         ));
         assert!(store.token_path().is_dir());
-        server.finish();
-    }
-
-    #[test]
-    fn authenticated_client_reads_typed_power_state() {
-        let dir = TestDir::new("power-state");
-        let store = token_store(&dir);
-        store
-            .persist(&token("power-state-client-key"))
-            .expect("persist stored token");
-        let server = ScriptedWebOsServer::spawn(|peer| {
-            let registration = peer.receive_json();
-            assert_eq!(registration["type"], "register");
-            assert_eq!(
-                registration["payload"]["client-key"],
-                "power-state-client-key"
-            );
-            peer.send_json(json!({
-                "id": registration["id"],
-                "type": "registered",
-                "payload": {"client-key": "power-state-client-key"},
-            }));
-
-            let request = peer.receive_json();
-            assert_eq!(request["id"], "request_1");
-            assert_eq!(request["type"], "request");
-            assert_eq!(
-                request["uri"],
-                "ssap://com.webos.service.tvpower/power/getPowerState"
-            );
-            assert_eq!(request["payload"], json!({}));
-            peer.send_json(json!({
-                "id": request["id"],
-                "type": "response",
-                "payload": {"returnValue": true, "state": "Active"},
-            }));
-        });
-        let mut client = WebOsClient::connect_authenticated(
-            server.endpoint(),
-            CONNECT_TIMEOUT,
-            RESPONSE_TIMEOUT,
-            &store,
-            |event| assert_eq!(event, WebOsAuthenticationEvent::UsingStoredAccessToken),
-        )
-        .expect("authenticate power-state client");
-
-        assert_eq!(
-            client.power_state().expect("read power state"),
-            WebOsPowerState::Active
-        );
         server.finish();
     }
 

@@ -181,6 +181,17 @@ Examples:
 - `bscpylgtvcommand`
 - later, possibly `systemctl` and `swayidle`
 
+### Native webOS boundary
+
+The native webOS client uses an evidence-backed, stateful TV server for its
+device contract. Characterization tests keep that server aligned with observed
+hardware behavior, while higher-level LG Buddy tests consume the server without
+duplicating webOS response fixtures.
+
+The evidence workflow, ownership rules, and distinction between the stateful
+server and synthetic protocol tests are documented in
+[webos-testing.md](webos-testing.md).
+
 ### Desktop backend work
 
 Primary concern:

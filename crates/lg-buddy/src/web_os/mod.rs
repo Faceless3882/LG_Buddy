@@ -2,9 +2,9 @@
 
 mod client;
 mod control;
-#[cfg(test)]
-mod control_transcripts;
 mod input;
+#[cfg(test)]
+mod observed_behavior;
 mod picture;
 mod power;
 mod registration;
