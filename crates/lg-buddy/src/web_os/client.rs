@@ -423,6 +423,7 @@ pub enum WebOsClientError {
     WebOs {
         code: Option<i32>,
         message: String,
+        payload: Option<Value>,
     },
     UnexpectedBinaryFrame,
     UnexpectedRawFrame,
@@ -474,10 +475,12 @@ impl fmt::Display for WebOsClientError {
             Self::WebOs {
                 code: Some(code),
                 message,
+                ..
             } => write!(f, "webOS error {code}: {message}"),
             Self::WebOs {
                 code: None,
                 message,
+                ..
             } => write!(f, "webOS error: {message}"),
             Self::UnexpectedBinaryFrame => write!(f, "webOS sent an unexpected binary frame"),
             Self::UnexpectedRawFrame => write!(f, "webOS sent an unexpected raw frame"),
@@ -564,6 +567,7 @@ fn validate_response_message(message: Value) -> Result<Value, WebOsClientError> 
 }
 
 fn parse_webos_error(message: &serde_json::Map<String, Value>) -> WebOsClientError {
+    let payload = message.get("payload").cloned();
     let error = match message.get("error") {
         Some(Value::String(error)) => error,
         Some(_) => return WebOsClientError::InvalidWebOsErrorMessage,
@@ -578,7 +582,11 @@ fn parse_webos_error(message: &serde_json::Map<String, Value>) -> WebOsClientErr
         ),
         Err(_) => (None, error.to_string()),
     };
-    WebOsClientError::WebOs { code, message }
+    WebOsClientError::WebOs {
+        code,
+        message,
+        payload,
+    }
 }
 
 #[cfg(test)]
@@ -828,6 +836,7 @@ mod tests {
             Err(WebOsClientError::WebOs {
                 code: Some(-401),
                 message,
+                payload: None,
             }) if message == "not permitted"
         ));
         server.finish();
@@ -1223,6 +1232,7 @@ mod tests {
                 source: WebOsClientError::WebOs {
                     code: Some(-401),
                     message,
+                    payload: None,
                 },
             }) if message == "not permitted"
         ));

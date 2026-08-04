@@ -1,6 +1,8 @@
 //! Native LG webOS protocol support.
 
 mod client;
+#[cfg(test)]
+mod control_transcripts;
 mod input;
 mod picture;
 mod power;
