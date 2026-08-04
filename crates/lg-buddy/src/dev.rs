@@ -5,7 +5,7 @@ use crate::web_os::{
     WebOsAuthenticatedClientError, WebOsAuthenticationEvent, WebOsBacklightBrightness,
     WebOsBacklightBrightnessError, WebOsClient, WebOsControlError, WebOsEndpoint,
     WebOsForegroundApp, WebOsForegroundAppError, WebOsInputId, WebOsInputIdError, WebOsPowerState,
-    WebOsPowerStateError, WebOsScreenControlError,
+    WebOsPowerStateError, WebOsScreenControlError, WebOsSetBacklightBrightnessError,
 };
 use std::error::Error;
 use std::fmt;
@@ -23,6 +23,7 @@ const WEBOS_CONTROL_PROBE_PREFIX: &str = "LG Buddy WebOS Control Probe";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WebOsControlProbeCommand {
     SetInput,
+    SetBacklight(WebOsBacklightBrightness),
     ScreenOff,
     ScreenOn,
     PowerOff,
@@ -50,6 +51,20 @@ impl DevCommand {
                 let operation = args.next().ok_or(DevParseError::MissingControlOperation)?;
                 let operation = match operation.as_ref() {
                     "set-input" => WebOsControlProbeCommand::SetInput,
+                    "set-backlight" => {
+                        let value = args
+                            .next()
+                            .ok_or(DevParseError::MissingBacklightBrightness)?;
+                        let value = value.as_ref();
+                        let brightness = value
+                            .parse::<u8>()
+                            .ok()
+                            .and_then(|value| WebOsBacklightBrightness::new(value).ok())
+                            .ok_or_else(|| {
+                                DevParseError::InvalidBacklightBrightness(value.to_string())
+                            })?;
+                        WebOsControlProbeCommand::SetBacklight(brightness)
+                    }
                     "screen-off" => WebOsControlProbeCommand::ScreenOff,
                     "screen-on" => WebOsControlProbeCommand::ScreenOn,
                     "power-off" => WebOsControlProbeCommand::PowerOff,
@@ -75,6 +90,9 @@ impl DevCommand {
             Self::WebOsControlProbe(WebOsControlProbeCommand::SetInput) => {
                 "dev webos-control-probe set-input"
             }
+            Self::WebOsControlProbe(WebOsControlProbeCommand::SetBacklight(_)) => {
+                "dev webos-control-probe set-backlight"
+            }
             Self::WebOsControlProbe(WebOsControlProbeCommand::ScreenOff) => {
                 "dev webos-control-probe screen-off"
             }
@@ -93,6 +111,8 @@ pub enum DevParseError {
     MissingSubcommand,
     UnknownSubcommand(String),
     MissingControlOperation,
+    MissingBacklightBrightness,
+    InvalidBacklightBrightness(String),
     UnknownControlOperation(String),
     UnexpectedArguments {
         command: DevCommand,
@@ -110,6 +130,13 @@ impl fmt::Display for DevParseError {
             Self::MissingControlOperation => {
                 write!(f, "missing temporary webOS control probe operation")
             }
+            Self::MissingBacklightBrightness => {
+                write!(f, "missing temporary webOS backlight brightness")
+            }
+            Self::InvalidBacklightBrightness(value) => write!(
+                f,
+                "invalid temporary webOS backlight brightness `{value}`; expected 0-100"
+            ),
             Self::UnknownControlOperation(operation) => {
                 write!(f, "unknown temporary webOS control operation `{operation}`")
             }
@@ -136,10 +163,12 @@ pub enum DevError {
     PowerState(WebOsPowerStateError),
     ForegroundApp(WebOsForegroundAppError),
     BacklightBrightness(WebOsBacklightBrightnessError),
+    SetBacklightBrightness(WebOsSetBacklightBrightnessError),
     InputId(WebOsInputIdError),
     Control(WebOsControlError),
     ScreenControl(WebOsScreenControlError),
     PowerOffPrecondition { actual: WebOsPowerState },
+    BacklightWritePrecondition { actual: WebOsPowerState },
 }
 
 impl fmt::Display for DevError {
@@ -164,6 +193,9 @@ impl fmt::Display for DevError {
             Self::BacklightBrightness(source) => {
                 write!(f, "webOS read probe backlight read failed: {source}")
             }
+            Self::SetBacklightBrightness(source) => {
+                write!(f, "webOS control probe backlight write failed: {source}")
+            }
             Self::InputId(source) => write!(f, "invalid configured webOS input: {source}"),
             Self::Control(source) => write!(f, "webOS control probe failed: {source}"),
             Self::ScreenControl(source) => {
@@ -172,6 +204,10 @@ impl fmt::Display for DevError {
             Self::PowerOffPrecondition { actual } => write!(
                 f,
                 "refusing webOS power-off probe from power state {actual}; expected Active"
+            ),
+            Self::BacklightWritePrecondition { actual } => write!(
+                f,
+                "refusing webOS backlight-write probe from power state {actual}; expected Active"
             ),
         }
     }
@@ -189,10 +225,11 @@ impl Error for DevError {
             Self::PowerState(source) => Some(source),
             Self::ForegroundApp(source) => Some(source),
             Self::BacklightBrightness(source) => Some(source),
+            Self::SetBacklightBrightness(source) => Some(source),
             Self::InputId(source) => Some(source),
             Self::Control(source) => Some(source),
             Self::ScreenControl(source) => Some(source),
-            Self::PowerOffPrecondition { .. } => None,
+            Self::PowerOffPrecondition { .. } | Self::BacklightWritePrecondition { .. } => None,
         }
     }
 }
@@ -206,6 +243,9 @@ pub(crate) fn run_dev_command<W: Write>(
         DevCommand::WebOsReadProbe => run_webos_read_probe(writer),
         DevCommand::WebOsControlProbe(WebOsControlProbeCommand::SetInput) => {
             run_webos_set_input_probe(writer)
+        }
+        DevCommand::WebOsControlProbe(WebOsControlProbeCommand::SetBacklight(brightness)) => {
+            run_webos_set_backlight_probe(writer, brightness)
         }
         DevCommand::WebOsControlProbe(
             operation @ (WebOsControlProbeCommand::ScreenOff | WebOsControlProbeCommand::ScreenOn),
@@ -313,7 +353,9 @@ fn run_webos_screen_control_probe<W: Write>(
             match operation {
                 WebOsControlProbeCommand::ScreenOff => client.turn_screen_off(),
                 WebOsControlProbeCommand::ScreenOn => client.turn_screen_on(),
-                WebOsControlProbeCommand::SetInput | WebOsControlProbeCommand::PowerOff => {
+                WebOsControlProbeCommand::SetInput
+                | WebOsControlProbeCommand::SetBacklight(_)
+                | WebOsControlProbeCommand::PowerOff => {
                     unreachable!("screen probe operation")
                 }
             }
@@ -344,11 +386,52 @@ fn run_webos_power_off_probe<W: Write>(writer: &mut W) -> Result<(), DevError> {
     })
 }
 
+fn run_webos_set_backlight_probe<W: Write>(
+    writer: &mut W,
+    brightness: WebOsBacklightBrightness,
+) -> Result<(), DevError> {
+    let config_path = resolve_config_path_from_env().map_err(DevError::ConfigPath)?;
+    let config = load_config(&config_path).map_err(DevError::Config)?;
+    let owner = resolve_config_owner(&config_path).map_err(DevError::ConfigOwner)?;
+    let context = WebOsProbeContext::new(&config_path, config.tv_ip, owner)?;
+
+    run_webos_set_backlight_probe_with(
+        writer,
+        &context,
+        brightness,
+        |endpoint, token_store, on_auth_event, brightness| {
+            let mut client = WebOsClient::connect_authenticated(
+                endpoint,
+                WEBOS_CONNECT_TIMEOUT,
+                WEBOS_RESPONSE_TIMEOUT,
+                token_store,
+                on_auth_event,
+            )
+            .map_err(DevError::Authentication)?;
+            let power_state = client.power_state().map_err(DevError::PowerState)?;
+            require_active_backlight_write_state(&power_state)?;
+            client
+                .set_backlight_brightness(brightness)
+                .map_err(DevError::SetBacklightBrightness)
+        },
+    )
+}
+
 fn require_active_power_state(power_state: &WebOsPowerState) -> Result<(), DevError> {
     if power_state == &WebOsPowerState::Active {
         Ok(())
     } else {
         Err(DevError::PowerOffPrecondition {
+            actual: power_state.clone(),
+        })
+    }
+}
+
+fn require_active_backlight_write_state(power_state: &WebOsPowerState) -> Result<(), DevError> {
+    if power_state == &WebOsPowerState::Active {
+        Ok(())
+    } else {
+        Err(DevError::BacklightWritePrecondition {
             actual: power_state.clone(),
         })
     }
@@ -457,6 +540,36 @@ where
         },
     )?;
     writeln!(writer, "{WEBOS_CONTROL_PROBE_PREFIX}: input={input_id}").map_err(DevError::Io)
+}
+
+fn run_webos_set_backlight_probe_with<W, F>(
+    writer: &mut W,
+    context: &WebOsProbeContext,
+    brightness: WebOsBacklightBrightness,
+    probe: F,
+) -> Result<(), DevError>
+where
+    W: Write,
+    F: FnOnce(
+        WebOsEndpoint,
+        &PlatformAccessTokenStore,
+        &mut dyn FnMut(WebOsAuthenticationEvent),
+        WebOsBacklightBrightness,
+    ) -> Result<(), DevError>,
+{
+    execute_webos_probe(
+        writer,
+        context,
+        WEBOS_CONTROL_PROBE_PREFIX,
+        |endpoint, token_store, on_auth_event| {
+            probe(endpoint, token_store, on_auth_event, brightness)
+        },
+    )?;
+    writeln!(
+        writer,
+        "{WEBOS_CONTROL_PROBE_PREFIX}: backlight={brightness}"
+    )
+    .map_err(DevError::Io)
 }
 
 fn run_webos_screen_control_probe_with<W, F>(
@@ -568,8 +681,9 @@ fn write_auth_event<W: Write>(
 #[cfg(test)]
 mod tests {
     use super::{
-        require_active_power_state, run_webos_auth_probe_with, run_webos_power_off_probe_with,
-        run_webos_read_probe_with, run_webos_screen_control_probe_with,
+        require_active_backlight_write_state, require_active_power_state,
+        run_webos_auth_probe_with, run_webos_power_off_probe_with, run_webos_read_probe_with,
+        run_webos_screen_control_probe_with, run_webos_set_backlight_probe_with,
         run_webos_set_input_probe_with, DevCommand, DevError, DevParseError,
         WebOsControlProbeCommand, WebOsProbeContext, WebOsReadProbeResult,
     };
@@ -604,6 +718,14 @@ mod tests {
             DevCommand::parse(["webos-control-probe", "set-input"]),
             Ok(DevCommand::WebOsControlProbe(
                 WebOsControlProbeCommand::SetInput
+            ))
+        );
+        assert_eq!(
+            DevCommand::parse(["webos-control-probe", "set-backlight", "75"]),
+            Ok(DevCommand::WebOsControlProbe(
+                WebOsControlProbeCommand::SetBacklight(
+                    WebOsBacklightBrightness::new(75).expect("backlight brightness")
+                )
             ))
         );
         assert_eq!(
@@ -650,6 +772,16 @@ mod tests {
             DevCommand::parse(["webos-control-probe"]),
             Err(DevParseError::MissingControlOperation)
         );
+        assert_eq!(
+            DevCommand::parse(["webos-control-probe", "set-backlight"]),
+            Err(DevParseError::MissingBacklightBrightness)
+        );
+        for value in ["-1", "101", "bright"] {
+            assert_eq!(
+                DevCommand::parse(["webos-control-probe", "set-backlight", value]),
+                Err(DevParseError::InvalidBacklightBrightness(value.to_string()))
+            );
+        }
         assert_eq!(
             DevCommand::parse(["webos-control-probe", "other"]),
             Err(DevParseError::UnknownControlOperation("other".to_string()))
@@ -734,7 +866,8 @@ LG Buddy WebOS Auth Probe: power_state=Active Standby\n"
                 Ok(WebOsReadProbeResult {
                     power_state: WebOsPowerState::Active,
                     foreground_app: WebOsForegroundApp::from_test_app_id("com.webos.app.hdmi3"),
-                    backlight_brightness: WebOsBacklightBrightness::from_test_percent(100),
+                    backlight_brightness: WebOsBacklightBrightness::new(100)
+                        .expect("test backlight brightness"),
                 })
             },
         )
@@ -776,6 +909,36 @@ LG Buddy WebOS Read Probe: backlight=100\n"
             String::from_utf8(output).expect("UTF-8 output"),
             "LG Buddy WebOS Control Probe: using stored access token.\n\
 LG Buddy WebOS Control Probe: input=HDMI_3\n"
+        );
+    }
+
+    #[test]
+    fn set_backlight_probe_reports_verified_brightness_after_success() {
+        let context = probe_context();
+        let brightness = WebOsBacklightBrightness::new(75).expect("backlight brightness");
+        let mut output = Vec::new();
+
+        run_webos_set_backlight_probe_with(
+            &mut output,
+            &context,
+            brightness,
+            |endpoint, token_store, on_auth_event, observed_brightness| {
+                assert_eq!(endpoint.to_string(), "wss://192.0.2.42:3001/");
+                assert_eq!(
+                    token_store.token_path(),
+                    Path::new("/tmp/lg-buddy-dev-probe/tvs/primary/access-token.json")
+                );
+                assert_eq!(observed_brightness, brightness);
+                on_auth_event(WebOsAuthenticationEvent::UsingStoredAccessToken);
+                Ok(())
+            },
+        )
+        .expect("run set-backlight probe");
+
+        assert_eq!(
+            String::from_utf8(output).expect("UTF-8 output"),
+            "LG Buddy WebOS Control Probe: using stored access token.\n\
+LG Buddy WebOS Control Probe: backlight=75\n"
         );
     }
 
@@ -844,6 +1007,20 @@ LG Buddy WebOS Control Probe: power_off_from=Active\n"
         assert!(matches!(
             error,
             DevError::PowerOffPrecondition {
+                actual: WebOsPowerState::ScreenOff
+            }
+        ));
+    }
+
+    #[test]
+    fn backlight_write_probe_requires_active_power_state() {
+        assert!(require_active_backlight_write_state(&WebOsPowerState::Active).is_ok());
+
+        let error = require_active_backlight_write_state(&WebOsPowerState::ScreenOff)
+            .expect_err("screen-off TV should not accept the backlight-write probe");
+        assert!(matches!(
+            error,
+            DevError::BacklightWritePrecondition {
                 actual: WebOsPowerState::ScreenOff
             }
         ));

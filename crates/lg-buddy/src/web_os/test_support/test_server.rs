@@ -17,7 +17,7 @@ use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use tungstenite::error::ProtocolError;
@@ -35,6 +35,7 @@ const TEST_PRIVATE_KEY_DER: &str = "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIB
 const GET_FOREGROUND_APP_URI: &str = "ssap://com.webos.applicationManager/getForegroundAppInfo";
 const GET_POWER_STATE_URI: &str = "ssap://com.webos.service.tvpower/power/getPowerState";
 const GET_SYSTEM_SETTINGS_URI: &str = "ssap://settings/getSystemSettings";
+const SET_SYSTEM_SETTINGS_URI: &str = "ssap://settings/setSystemSettings";
 const SET_INPUT_URI: &str = "ssap://tv/switchInput";
 const TURN_OFF_SCREEN_URI: &str = "ssap://com.webos.service.tvpower/power/turnOffScreen";
 const TURN_ON_SCREEN_URI: &str = "ssap://com.webos.service.tvpower/power/turnOnScreen";
@@ -43,6 +44,7 @@ const TURN_ON_SCREEN_LEGACY_URI: &str = "ssap://com.webos.service.tv.power/turnO
 const POWER_OFF_URI: &str = "ssap://system/turnOff";
 
 static TEST_DIR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static WRITE_SETTINGS_SIGNED_ENVELOPE: OnceLock<Value> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::web_os) enum WebOsTestScenario {
@@ -59,6 +61,7 @@ pub(in crate::web_os) enum WebOsTestScenario {
     RegistrationTimeout,
     RegistrationMissingClientKey,
     PowerStatePermissionDenied,
+    BacklightWriteAcknowledgedWithoutChange,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,6 +113,12 @@ struct WebOsTestTv {
     backlight: Value,
 }
 
+#[derive(Default)]
+struct WebOsTestPermissions {
+    top_level: HashSet<String>,
+    write_settings_authorized: bool,
+}
+
 impl WebOsTestTv {
     fn new(power_state: WebOsPowerState, input: WebOsTestInput) -> Self {
         Self {
@@ -119,7 +128,12 @@ impl WebOsTestTv {
         }
     }
 
-    fn handle_request(&mut self, request: &Value, permissions: &HashSet<String>) -> Value {
+    fn handle_request(
+        &mut self,
+        request: &Value,
+        permissions: &WebOsTestPermissions,
+        apply_backlight_write: bool,
+    ) -> Value {
         assert_eq!(request["type"], "request", "expected webOS request frame");
         let request_id = request["id"].as_str().expect("webOS request ID");
         let uri = request["uri"].as_str().expect("webOS request URI");
@@ -129,7 +143,7 @@ impl WebOsTestTv {
 
         match uri {
             GET_POWER_STATE_URI => {
-                require_permission(permissions, "READ_POWER_STATE", uri);
+                require_top_level_permission(permissions, "READ_POWER_STATE", uri);
                 assert_eq!(payload, &json!({}));
                 assert_ne!(self.power_state, WebOsPowerState::PowerOff);
                 response(
@@ -141,7 +155,7 @@ impl WebOsTestTv {
                 )
             }
             GET_FOREGROUND_APP_URI => {
-                if !permissions.contains("READ_RUNNING_APPS") {
+                if !permissions.top_level.contains("READ_RUNNING_APPS") {
                     return webos_error(request_id, "401 insufficient permissions", json!({}));
                 }
                 assert_eq!(payload, &json!({}));
@@ -157,7 +171,7 @@ impl WebOsTestTv {
                 )
             }
             GET_SYSTEM_SETTINGS_URI => {
-                if !permissions.contains("READ_SETTINGS") {
+                if !permissions.top_level.contains("READ_SETTINGS") {
                     return webos_error(request_id, "401 insufficient permissions", json!({}));
                 }
                 assert_eq!(
@@ -178,8 +192,32 @@ impl WebOsTestTv {
                     }),
                 )
             }
+            SET_SYSTEM_SETTINGS_URI => {
+                if !permissions.write_settings_authorized {
+                    return webos_error(request_id, "401 insufficient permissions", json!({}));
+                }
+                assert_eq!(self.power_state, WebOsPowerState::Active);
+                let backlight = payload["settings"]["backlight"]
+                    .as_u64()
+                    .expect("set-system-settings backlight value");
+                assert!(backlight <= 100, "backlight must be between 0 and 100");
+                assert_eq!(
+                    payload,
+                    &json!({
+                        "category": "picture",
+                        "settings": {"backlight": backlight},
+                    })
+                );
+                if apply_backlight_write {
+                    self.backlight = json!(backlight);
+                }
+                response(
+                    request_id,
+                    json!({"method": "setSystemSettings", "returnValue": true}),
+                )
+            }
             SET_INPUT_URI => {
-                if !permissions.contains("LAUNCH") {
+                if !permissions.top_level.contains("LAUNCH") {
                     return webos_error(request_id, "401 insufficient permissions", json!({}));
                 }
                 assert_eq!(self.power_state, WebOsPowerState::Active);
@@ -192,7 +230,7 @@ impl WebOsTestTv {
                 response(request_id, json!({"returnValue": true}))
             }
             TURN_OFF_SCREEN_URI => {
-                if !permissions.contains("CONTROL_TV_SCREEN") {
+                if !permissions.top_level.contains("CONTROL_TV_SCREEN") {
                     return webos_error(request_id, "401 insufficient permissions", json!({}));
                 }
                 assert_eq!(payload, &json!({"standbyMode": "active"}));
@@ -204,7 +242,7 @@ impl WebOsTestTv {
                 )
             }
             TURN_ON_SCREEN_URI => {
-                if !permissions.contains("CONTROL_TV_SCREEN") {
+                if !permissions.top_level.contains("CONTROL_TV_SCREEN") {
                     return webos_error(request_id, "401 insufficient permissions", json!({}));
                 }
                 assert_eq!(payload, &json!({"standbyMode": "active"}));
@@ -233,7 +271,7 @@ impl WebOsTestTv {
                 webos_error(request_id, "404 no such service or method", json!({}))
             }
             POWER_OFF_URI => {
-                require_permission(permissions, "CONTROL_POWER", uri);
+                require_top_level_permission(permissions, "CONTROL_POWER", uri);
                 assert_eq!(payload, &json!({}));
                 assert_eq!(self.power_state, WebOsPowerState::Active);
                 self.power_state = WebOsPowerState::PowerOff;
@@ -465,7 +503,9 @@ fn serve_connection<S>(
 
         let scenario = runtime.lock().expect("webOS test server state").scenario;
         let keep_open = match scenario {
-            WebOsTestScenario::StatefulTv | WebOsTestScenario::PowerStatePermissionDenied => {
+            WebOsTestScenario::StatefulTv
+            | WebOsTestScenario::PowerStatePermissionDenied
+            | WebOsTestScenario::BacklightWriteAcknowledgedWithoutChange => {
                 let response = {
                     let mut runtime = runtime.lock().expect("webOS test server state");
                     if scenario == WebOsTestScenario::PowerStatePermissionDenied
@@ -481,6 +521,7 @@ fn serve_connection<S>(
                             permissions
                                 .as_ref()
                                 .expect("webOS request sent before registration"),
+                            scenario != WebOsTestScenario::BacklightWriteAcknowledgedWithoutChange,
                         )
                     }
                 };
@@ -499,7 +540,7 @@ fn handle_registration<S>(
     socket: &mut WebSocket<S>,
     request: &Value,
     runtime: &Arc<Mutex<WebOsTestRuntime>>,
-    permissions: &mut Option<HashSet<String>>,
+    permissions: &mut Option<WebOsTestPermissions>,
 ) -> bool
 where
     S: Read + Write,
@@ -525,22 +566,22 @@ where
     let manifest = payload["manifest"]
         .as_object()
         .expect("registration manifest");
-    *permissions = Some(
-        manifest["permissions"]
-            .as_array()
-            .expect("registration permissions")
-            .iter()
-            .map(|value| {
-                value
-                    .as_str()
-                    .expect("registration permission string")
-                    .to_string()
-            })
-            .collect(),
+    let top_level = permission_set(
+        manifest
+            .get("permissions")
+            .expect("registration permissions"),
+        "registration permission",
     );
+    let write_settings_authorized = has_observed_write_settings_envelope(manifest);
+    *permissions = Some(WebOsTestPermissions {
+        top_level,
+        write_settings_authorized,
+    });
 
     match scenario {
-        WebOsTestScenario::StatefulTv | WebOsTestScenario::PowerStatePermissionDenied => {
+        WebOsTestScenario::StatefulTv
+        | WebOsTestScenario::PowerStatePermissionDenied
+        | WebOsTestScenario::BacklightWriteAcknowledgedWithoutChange => {
             match payload["client-key"].as_str() {
                 Some(token) => send_json(socket, registration_response(request_id, token)),
                 None if payload["client-key"].is_null() => {
@@ -663,7 +704,8 @@ where
         | WebOsTestScenario::PairingRejected
         | WebOsTestScenario::RegistrationTimeout
         | WebOsTestScenario::RegistrationMissingClientKey
-        | WebOsTestScenario::PowerStatePermissionDenied => {
+        | WebOsTestScenario::PowerStatePermissionDenied
+        | WebOsTestScenario::BacklightWriteAcknowledgedWithoutChange => {
             panic!("scenario `{scenario:?}` requires registered stateful handling")
         }
     }
@@ -722,9 +764,58 @@ fn test_tls_config() -> Arc<ServerConfig> {
     )
 }
 
-fn require_permission(permissions: &HashSet<String>, permission: &str, uri: &str) {
+fn permission_set(value: &Value, description: &str) -> HashSet<String> {
+    value
+        .as_array()
+        .unwrap_or_else(|| panic!("{description}s must be an array"))
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .unwrap_or_else(|| panic!("{description} must be a string"))
+                .to_string()
+        })
+        .collect()
+}
+
+// Real-TV observations show that this envelope shape authorizes WRITE_SETTINGS,
+// while a minimal signed permission does not. The TV accepted a tampered signature.
+fn has_observed_write_settings_envelope(manifest: &serde_json::Map<String, Value>) -> bool {
+    let mut actual = json!({
+        "appVersion": manifest.get("appVersion"),
+        "signatures": manifest.get("signatures"),
+        "signed": manifest.get("signed"),
+    });
+    let mut expected = write_settings_signed_envelope().clone();
+    normalize_envelope_signatures(&mut actual);
+    normalize_envelope_signatures(&mut expected);
+    actual == expected
+}
+
+fn write_settings_signed_envelope() -> &'static Value {
+    WRITE_SETTINGS_SIGNED_ENVELOPE.get_or_init(|| {
+        serde_json::from_str(include_str!("write_settings_signed_envelope.json"))
+            .expect("parse observed WRITE_SETTINGS registration envelope")
+    })
+}
+
+fn normalize_envelope_signatures(envelope: &mut Value) {
+    let Some(signatures) = envelope.get_mut("signatures").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for signature in signatures {
+        if let Some(value) = signature
+            .as_object_mut()
+            .and_then(|signature| signature.get_mut("signature"))
+        {
+            *value = json!("<not-validated-by-tv>");
+        }
+    }
+}
+
+fn require_top_level_permission(permissions: &WebOsTestPermissions, permission: &str, uri: &str) {
     assert!(
-        permissions.contains(permission),
+        permissions.top_level.contains(permission),
         "no missing-permission observation exists for `{uri}`; expected `{permission}`"
     );
 }
@@ -811,5 +902,233 @@ impl TestAccessTokenStore {
 impl Drop for TestAccessTokenStore {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        write_settings_signed_envelope, WebOsTestInput, WebOsTestScenario, WebOsTestServer,
+        GET_SYSTEM_SETTINGS_URI, SET_SYSTEM_SETTINGS_URI,
+    };
+    use serde_json::{json, Value};
+    use std::net::TcpStream;
+    use tungstenite::stream::MaybeTlsStream;
+    use tungstenite::{connect, Message, WebSocket};
+
+    type TestClient = WebSocket<MaybeTlsStream<TcpStream>>;
+
+    fn connect_registered(
+        server: &WebOsTestServer,
+        top_level_permissions: &[&str],
+        signed_envelope: Option<Value>,
+    ) -> TestClient {
+        let (mut socket, _) = connect(server.endpoint().to_string()).expect("connect test client");
+        let mut manifest = json!({
+            "manifestVersion": 1,
+            "permissions": top_level_permissions,
+        });
+        if let Some(Value::Object(envelope)) = signed_envelope {
+            manifest
+                .as_object_mut()
+                .expect("test registration manifest")
+                .extend(envelope);
+        }
+        socket
+            .send(Message::text(
+                json!({
+                    "id": "register_0",
+                    "type": "register",
+                    "payload": {
+                        "client-key": "test-client-key",
+                        "forcePairing": false,
+                        "manifest": manifest,
+                        "pairingType": "PROMPT",
+                    },
+                })
+                .to_string(),
+            ))
+            .expect("send test registration");
+        assert_eq!(
+            read_json(&mut socket),
+            json!({
+                "id": "register_0",
+                "type": "registered",
+                "payload": {"client-key": "test-client-key"},
+            })
+        );
+        socket
+    }
+
+    fn exchange(socket: &mut TestClient, request_id: &str, uri: &str, payload: Value) -> Value {
+        socket
+            .send(Message::text(
+                json!({
+                    "id": request_id,
+                    "type": "request",
+                    "uri": uri,
+                    "payload": payload,
+                })
+                .to_string(),
+            ))
+            .expect("send test request");
+        read_json(socket)
+    }
+
+    fn read_json(socket: &mut TestClient) -> Value {
+        match socket.read().expect("read test response") {
+            Message::Text(text) => serde_json::from_str(text.as_str()).expect("test response JSON"),
+            other => panic!("expected text response, got {other:?}"),
+        }
+    }
+
+    fn read_backlight(socket: &mut TestClient, request_id: &str) -> Value {
+        exchange(
+            socket,
+            request_id,
+            GET_SYSTEM_SETTINGS_URI,
+            json!({"category": "picture", "keys": ["backlight"]}),
+        )["payload"]["settings"]["backlight"]
+            .clone()
+    }
+
+    // Real-TV wire observation:
+    // https://github.com/Staphylococcus/LG_Buddy/issues/52#issuecomment-5181831148
+    #[test]
+    fn observed_write_settings_envelope_changes_backlight_to_numeric_state() {
+        let server = WebOsTestServer::active(WebOsTestInput::Hdmi2);
+        let mut socket = connect_registered(
+            &server,
+            &["READ_SETTINGS"],
+            Some(write_settings_signed_envelope().clone()),
+        );
+
+        assert_eq!(read_backlight(&mut socket, "request_0"), json!("90"));
+        assert_eq!(
+            exchange(
+                &mut socket,
+                "request_1",
+                SET_SYSTEM_SETTINGS_URI,
+                json!({"category": "picture", "settings": {"backlight": 75}}),
+            ),
+            json!({
+                "id": "request_1",
+                "type": "response",
+                "payload": {"method": "setSystemSettings", "returnValue": true},
+            })
+        );
+        assert_eq!(read_backlight(&mut socket, "request_2"), json!(75));
+
+        drop(socket);
+        server.finish();
+    }
+
+    // Real-TV wire observation: changing the signature text did not remove authorization.
+    // https://github.com/Staphylococcus/LG_Buddy/issues/52#issuecomment-5181933079
+    #[test]
+    fn tampered_observed_signature_still_authorizes_backlight_write() {
+        let server = WebOsTestServer::active(WebOsTestInput::Hdmi2);
+        let mut envelope = write_settings_signed_envelope().clone();
+        envelope["signatures"][0]["signature"] = json!("tampered-signature");
+        let mut socket = connect_registered(&server, &["READ_SETTINGS"], Some(envelope));
+
+        assert_eq!(
+            exchange(
+                &mut socket,
+                "request_0",
+                SET_SYSTEM_SETTINGS_URI,
+                json!({"category": "picture", "settings": {"backlight": 75}}),
+            )["payload"],
+            json!({"method": "setSystemSettings", "returnValue": true})
+        );
+        assert_eq!(read_backlight(&mut socket, "request_1"), json!(75));
+
+        drop(socket);
+        server.finish();
+    }
+
+    // Real-TV wire observation:
+    // https://github.com/Staphylococcus/LG_Buddy/issues/52#issuecomment-5181831148
+    #[test]
+    fn top_level_write_settings_permission_does_not_authorize_backlight_write() {
+        let server = WebOsTestServer::active(WebOsTestInput::Hdmi2);
+        let mut socket = connect_registered(&server, &["READ_SETTINGS", "WRITE_SETTINGS"], None);
+
+        assert_eq!(
+            exchange(
+                &mut socket,
+                "request_0",
+                SET_SYSTEM_SETTINGS_URI,
+                json!({"category": "picture", "settings": {"backlight": 75}}),
+            ),
+            json!({
+                "id": "request_0",
+                "type": "error",
+                "error": "401 insufficient permissions",
+                "payload": {},
+            })
+        );
+        assert_eq!(read_backlight(&mut socket, "request_1"), json!("90"));
+
+        drop(socket);
+        server.finish();
+    }
+
+    // Real-TV wire observation: a bare signed permission claim remained unauthorized.
+    // https://github.com/Staphylococcus/LG_Buddy/issues/52#issuecomment-5181933079
+    #[test]
+    fn minimal_signed_write_settings_permission_does_not_authorize_backlight_write() {
+        let server = WebOsTestServer::active(WebOsTestInput::Hdmi2);
+        let mut socket = connect_registered(
+            &server,
+            &["READ_SETTINGS"],
+            Some(json!({"signed": {"permissions": ["WRITE_SETTINGS"]}})),
+        );
+
+        assert_eq!(
+            exchange(
+                &mut socket,
+                "request_0",
+                SET_SYSTEM_SETTINGS_URI,
+                json!({"category": "picture", "settings": {"backlight": 75}}),
+            ),
+            json!({
+                "id": "request_0",
+                "type": "error",
+                "error": "401 insufficient permissions",
+                "payload": {},
+            })
+        );
+        assert_eq!(read_backlight(&mut socket, "request_1"), json!("90"));
+
+        drop(socket);
+        server.finish();
+    }
+
+    // Synthetic fault injection for defensive readback verification.
+    #[test]
+    fn acknowledged_backlight_write_can_leave_state_unchanged() {
+        let server = WebOsTestServer::for_scenario(
+            WebOsTestScenario::BacklightWriteAcknowledgedWithoutChange,
+        );
+        let mut socket = connect_registered(
+            &server,
+            &["READ_SETTINGS"],
+            Some(write_settings_signed_envelope().clone()),
+        );
+
+        assert_eq!(
+            exchange(
+                &mut socket,
+                "request_0",
+                SET_SYSTEM_SETTINGS_URI,
+                json!({"category": "picture", "settings": {"backlight": 75}}),
+            )["payload"],
+            json!({"method": "setSystemSettings", "returnValue": true})
+        );
+        assert_eq!(read_backlight(&mut socket, "request_1"), json!(100));
+
+        drop(socket);
+        server.finish();
     }
 }

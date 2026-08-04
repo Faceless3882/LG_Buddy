@@ -1,7 +1,8 @@
-use super::test_support::{WebOsTestInput, WebOsTestServer};
+use super::test_support::{WebOsTestInput, WebOsTestScenario, WebOsTestServer};
 use super::{
-    WebOsAuthenticatedClientError, WebOsClientError, WebOsClientRegistrationError,
-    WebOsControlError, WebOsInputId, WebOsPowerState, WebOsScreenControlError,
+    WebOsAuthenticatedClientError, WebOsBacklightBrightness, WebOsClientError,
+    WebOsClientRegistrationError, WebOsControlError, WebOsInputId, WebOsPowerState,
+    WebOsScreenControlError, WebOsSetBacklightBrightnessError,
 };
 use crate::platform_access_token::PlatformAccessTokenAcquisitionError;
 use serde_json::json;
@@ -77,6 +78,58 @@ fn input_switch_changes_the_observed_foreground_app_and_picture_state() {
         90
     );
     assert_eq!(server.snapshot().input, WebOsTestInput::Hdmi2);
+
+    drop(client);
+    server.finish();
+}
+
+// Real-TV wire observation:
+// https://github.com/Staphylococcus/LG_Buddy/issues/52#issuecomment-5181831148
+#[test]
+fn backlight_write_is_acknowledged_and_verified_through_independent_readback() {
+    let server = WebOsTestServer::active(WebOsTestInput::Hdmi2);
+    let mut client = server
+        .connect_authenticated()
+        .expect("connect to observed webOS TV");
+    let requested = WebOsBacklightBrightness::new(75).expect("backlight brightness");
+
+    assert_eq!(
+        client
+            .backlight_brightness()
+            .expect("read initial backlight brightness")
+            .as_percent(),
+        90
+    );
+    client
+        .set_backlight_brightness(requested)
+        .expect("set and verify backlight brightness");
+    assert_eq!(
+        client
+            .backlight_brightness()
+            .expect("read resulting backlight brightness"),
+        requested
+    );
+
+    drop(client);
+    server.finish();
+}
+
+// Synthetic fault injection: the real TV applied the observed acknowledged write,
+// but callers must still detect a device that acknowledges without changing state.
+#[test]
+fn acknowledged_backlight_write_with_unchanged_state_is_typed_failure() {
+    let server =
+        WebOsTestServer::for_scenario(WebOsTestScenario::BacklightWriteAcknowledgedWithoutChange);
+    let mut client = server
+        .connect_authenticated()
+        .expect("connect to synthetic unchanged-state TV");
+    let expected = WebOsBacklightBrightness::new(75).expect("backlight brightness");
+
+    assert!(matches!(
+        client.set_backlight_brightness(expected),
+        Err(WebOsSetBacklightBrightnessError::NotApplied { expected: error_expected, actual })
+            if error_expected == expected && actual.as_percent() == 100
+    ));
 
     drop(client);
     server.finish();

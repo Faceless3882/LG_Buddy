@@ -20,7 +20,10 @@ pub use client::{
 };
 pub use control::WebOsControlError;
 pub use input::{WebOsForegroundApp, WebOsForegroundAppError, WebOsInputId, WebOsInputIdError};
-pub use picture::{WebOsBacklightBrightness, WebOsBacklightBrightnessError};
+pub use picture::{
+    WebOsBacklightBrightness, WebOsBacklightBrightnessError, WebOsBacklightBrightnessValueError,
+    WebOsSetBacklightBrightnessError,
+};
 pub use power::{WebOsPowerState, WebOsPowerStateError};
 pub use screen::WebOsScreenControlError;
 

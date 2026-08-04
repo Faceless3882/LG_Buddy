@@ -1,22 +1,31 @@
-use super::{WebOsClient, WebOsClientError};
-use serde_json::{json, Value};
+use super::control::send_control_request;
+use super::{WebOsClient, WebOsClientError, WebOsControlError};
+use serde_json::{json, Map, Value};
 use std::error::Error;
 use std::fmt;
+use std::thread;
+use std::time::Duration;
 
 const GET_SYSTEM_SETTINGS_URI: &str = "ssap://settings/getSystemSettings";
-const MAX_BACKLIGHT_BRIGHTNESS: u64 = 100;
+const SET_SYSTEM_SETTINGS_URI: &str = "ssap://settings/setSystemSettings";
+const SET_SYSTEM_SETTINGS_METHOD: &str = "setSystemSettings";
+const MAX_BACKLIGHT_BRIGHTNESS: u8 = 100;
+const BACKLIGHT_WRITE_READBACK_DELAY: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WebOsBacklightBrightness(u8);
 
 impl WebOsBacklightBrightness {
-    pub fn as_percent(self) -> u8 {
-        self.0
+    pub fn new(value: u8) -> Result<Self, WebOsBacklightBrightnessValueError> {
+        if value <= MAX_BACKLIGHT_BRIGHTNESS {
+            Ok(Self(value))
+        } else {
+            Err(WebOsBacklightBrightnessValueError { value })
+        }
     }
 
-    #[cfg(test)]
-    pub(crate) fn from_test_percent(value: u8) -> Self {
-        Self(value)
+    pub fn as_percent(self) -> u8 {
+        self.0
     }
 }
 
@@ -25,6 +34,23 @@ impl fmt::Display for WebOsBacklightBrightness {
         write!(f, "{}", self.0)
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WebOsBacklightBrightnessValueError {
+    value: u8,
+}
+
+impl fmt::Display for WebOsBacklightBrightnessValueError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "webOS backlight brightness `{}` is outside 0-{MAX_BACKLIGHT_BRIGHTNESS}",
+            self.value
+        )
+    }
+}
+
+impl Error for WebOsBacklightBrightnessValueError {}
 
 #[derive(Debug)]
 pub enum WebOsBacklightBrightnessError {
@@ -121,6 +147,67 @@ impl Error for WebOsBacklightBrightnessError {
     }
 }
 
+#[derive(Debug)]
+pub enum WebOsSetBacklightBrightnessError {
+    Control {
+        source: WebOsControlError,
+    },
+    MissingMethod,
+    InvalidMethod,
+    UnexpectedMethod {
+        method: String,
+    },
+    Readback {
+        expected: WebOsBacklightBrightness,
+        source: WebOsBacklightBrightnessError,
+    },
+    NotApplied {
+        expected: WebOsBacklightBrightness,
+        actual: WebOsBacklightBrightness,
+    },
+}
+
+impl fmt::Display for WebOsSetBacklightBrightnessError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Control { source } => {
+                write!(f, "could not set webOS backlight brightness: {source}")
+            }
+            Self::MissingMethod => {
+                write!(f, "webOS backlight-write response has no method")
+            }
+            Self::InvalidMethod => {
+                write!(f, "webOS backlight-write response method is not a string")
+            }
+            Self::UnexpectedMethod { method } => write!(
+                f,
+                "webOS backlight-write response method `{method}` is not `{SET_SYSTEM_SETTINGS_METHOD}`"
+            ),
+            Self::Readback { expected, source } => write!(
+                f,
+                "webOS acknowledged backlight brightness {expected}, but verification failed: {source}"
+            ),
+            Self::NotApplied { expected, actual } => write!(
+                f,
+                "webOS acknowledged backlight brightness {expected}, but readback was {actual}"
+            ),
+        }
+    }
+}
+
+impl Error for WebOsSetBacklightBrightnessError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Control { source } => Some(source),
+            Self::Readback { source, .. } => Some(source),
+            Self::MissingMethod
+            | Self::InvalidMethod
+            | Self::UnexpectedMethod { .. }
+            | Self::NotApplied { .. } => None,
+        }
+    }
+}
+
 impl WebOsClient {
     pub fn backlight_brightness(
         &mut self,
@@ -135,6 +222,51 @@ impl WebOsClient {
             )
             .map_err(|source| WebOsBacklightBrightnessError::Request { source })?;
         parse_backlight_brightness_response(&response)
+    }
+
+    pub fn set_backlight_brightness(
+        &mut self,
+        brightness: WebOsBacklightBrightness,
+    ) -> Result<(), WebOsSetBacklightBrightnessError> {
+        let payload = send_control_request(
+            self,
+            SET_SYSTEM_SETTINGS_URI,
+            json!({
+                "category": "picture",
+                "settings": {"backlight": brightness.as_percent()},
+            }),
+        )
+        .map_err(|source| WebOsSetBacklightBrightnessError::Control { source })?;
+        validate_backlight_write_acknowledgement(&payload)?;
+
+        thread::sleep(BACKLIGHT_WRITE_READBACK_DELAY);
+        let actual = self.backlight_brightness().map_err(|source| {
+            WebOsSetBacklightBrightnessError::Readback {
+                expected: brightness,
+                source,
+            }
+        })?;
+        if actual != brightness {
+            return Err(WebOsSetBacklightBrightnessError::NotApplied {
+                expected: brightness,
+                actual,
+            });
+        }
+
+        Ok(())
+    }
+}
+
+fn validate_backlight_write_acknowledgement(
+    payload: &Map<String, Value>,
+) -> Result<(), WebOsSetBacklightBrightnessError> {
+    match payload.get("method") {
+        Some(Value::String(method)) if method == SET_SYSTEM_SETTINGS_METHOD => Ok(()),
+        Some(Value::String(method)) => Err(WebOsSetBacklightBrightnessError::UnexpectedMethod {
+            method: method.clone(),
+        }),
+        Some(_) => Err(WebOsSetBacklightBrightnessError::InvalidMethod),
+        None => Err(WebOsSetBacklightBrightnessError::MissingMethod),
     }
 }
 
@@ -203,7 +335,7 @@ fn normalize_backlight_brightness(value: &Value) -> Result<u8, WebOsBacklightBri
             })
         }
     };
-    if !(0.0..=MAX_BACKLIGHT_BRIGHTNESS as f64).contains(&normalized) {
+    if !(0.0..=f64::from(MAX_BACKLIGHT_BRIGHTNESS)).contains(&normalized) {
         return Err(WebOsBacklightBrightnessError::BacklightOutOfRange {
             value: value.clone(),
         });
@@ -216,9 +348,60 @@ fn normalize_backlight_brightness(value: &Value) -> Result<u8, WebOsBacklightBri
 mod tests {
     use super::{
         normalize_backlight_brightness, parse_backlight_brightness_response,
-        WebOsBacklightBrightnessError,
+        validate_backlight_write_acknowledgement, WebOsBacklightBrightness,
+        WebOsBacklightBrightnessError, WebOsSetBacklightBrightnessError,
     };
     use serde_json::{json, Value};
+
+    #[test]
+    fn backlight_brightness_rejects_values_above_one_hundred() {
+        assert_eq!(
+            WebOsBacklightBrightness::new(0)
+                .expect("minimum brightness")
+                .as_percent(),
+            0
+        );
+        assert_eq!(
+            WebOsBacklightBrightness::new(100)
+                .expect("maximum brightness")
+                .as_percent(),
+            100
+        );
+        assert!(WebOsBacklightBrightness::new(101).is_err());
+    }
+
+    #[test]
+    fn observed_backlight_write_acknowledgement_is_accepted() {
+        let payload = json!({"method": "setSystemSettings", "returnValue": true});
+        validate_backlight_write_acknowledgement(payload.as_object().expect("object payload"))
+            .expect("observed acknowledgement");
+    }
+
+    #[test]
+    fn malformed_backlight_write_acknowledgements_are_typed_errors() {
+        for (payload, expected) in [
+            (json!({}), WebOsSetBacklightBrightnessError::MissingMethod),
+            (
+                json!({"method": 7}),
+                WebOsSetBacklightBrightnessError::InvalidMethod,
+            ),
+            (
+                json!({"method": "other"}),
+                WebOsSetBacklightBrightnessError::UnexpectedMethod {
+                    method: "other".to_string(),
+                },
+            ),
+        ] {
+            let actual = validate_backlight_write_acknowledgement(
+                payload.as_object().expect("object payload"),
+            )
+            .expect_err("acknowledgement should be rejected");
+            assert_eq!(
+                std::mem::discriminant(&actual),
+                std::mem::discriminant(&expected)
+            );
+        }
+    }
 
     #[test]
     fn malformed_backlight_payloads_are_typed_errors() {

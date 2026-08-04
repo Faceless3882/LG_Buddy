@@ -6,8 +6,8 @@ use std::sync::OnceLock;
 
 const REGISTRATION_MESSAGE_TYPE: &str = "register";
 const PAIRING_PROMPT_TYPE: &str = "PROMPT";
-// Keep probe grants limited to operations confirmed by hardware characterization.
-// Expanding permissions may invalidate stored client keys and require re-pairing.
+// Keep grants limited to envelopes confirmed by hardware characterization.
+// Changing this manifest may invalidate stored client keys and require re-pairing.
 const REGISTRATION_MANIFEST_JSON: &str = include_str!("registration_manifest.json");
 
 static REGISTRATION_MANIFEST: OnceLock<Value> = OnceLock::new();
@@ -349,29 +349,58 @@ mod tests {
     }
 
     #[test]
-    fn registration_request_without_token_uses_minimal_unsigned_probe_manifest() {
+    fn registration_request_without_token_uses_observed_write_capable_manifest() {
         let request =
             WebOsRegistrationRequest::new(REQUEST_ID, None).expect("registration request");
         let value = request.to_json_value();
-        let expected_manifest = json!({
-            "manifestVersion": 1,
-            "permissions": [
-                "CONTROL_POWER",
-                "CONTROL_TV_SCREEN",
-                "LAUNCH",
-                "READ_POWER_STATE",
-                "READ_RUNNING_APPS",
-                "READ_SETTINGS"
-            ],
-        });
+        let manifest = registration_manifest();
 
         assert_eq!(value["type"], "register");
         assert_eq!(value["id"], REQUEST_ID);
         assert_eq!(value["payload"]["client-key"], Value::Null);
         assert_eq!(value["payload"]["forcePairing"], false);
         assert_eq!(value["payload"]["pairingType"], "PROMPT");
-        assert_eq!(registration_manifest(), &expected_manifest);
-        assert_eq!(value["payload"]["manifest"], expected_manifest);
+        assert_eq!(manifest["appVersion"], "1.1");
+        assert_eq!(manifest["manifestVersion"], 1);
+        assert_eq!(
+            manifest["permissions"],
+            json!([
+                "CONTROL_POWER",
+                "CONTROL_TV_SCREEN",
+                "LAUNCH",
+                "READ_POWER_STATE",
+                "READ_RUNNING_APPS",
+                "READ_SETTINGS"
+            ])
+        );
+        assert_eq!(manifest["signatures"][0]["signatureVersion"], 1);
+        assert!(manifest["signatures"][0]["signature"]
+            .as_str()
+            .is_some_and(|signature| !signature.is_empty()));
+        assert_eq!(manifest["signed"]["appId"], "com.lge.test");
+        assert_eq!(manifest["signed"]["vendorId"], "com.lge");
+        assert_eq!(
+            manifest["signed"]["permissions"],
+            json!([
+                "TEST_SECURE",
+                "CONTROL_INPUT_TEXT",
+                "CONTROL_MOUSE_AND_KEYBOARD",
+                "READ_INSTALLED_APPS",
+                "READ_LGE_SDX",
+                "READ_NOTIFICATIONS",
+                "SEARCH",
+                "WRITE_SETTINGS",
+                "WRITE_NOTIFICATION_ALERT",
+                "CONTROL_POWER",
+                "READ_CURRENT_CHANNEL",
+                "READ_RUNNING_APPS",
+                "READ_UPDATE_INFO",
+                "UPDATE_FROM_REMOTE_APP",
+                "READ_LGE_TV_INPUT_EVENTS",
+                "READ_TV_CURRENT_TIME"
+            ])
+        );
+        assert_eq!(value["payload"]["manifest"], *manifest);
         assert_eq!(
             serde_json::from_str::<Value>(&request.to_json_string())
                 .expect("serialized registration request"),
