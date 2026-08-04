@@ -179,17 +179,8 @@ fn hardware_observed_power_off_transcript_is_replayed_exactly() {
             "payload": {"returnValue": true},
         }));
     });
-    let mut client = connected_client(&server);
+    let client = connected_client(&server);
 
-    assert_eq!(
-        client
-            .send_request(POWER_OFF_URI, json!({}))
-            .expect("power off response"),
-        json!({
-            "id": "request_0",
-            "type": "response",
-            "payload": {"returnValue": true},
-        })
-    );
+    client.power_off().expect("power off");
     server.finish();
 }

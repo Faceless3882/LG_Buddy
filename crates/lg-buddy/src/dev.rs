@@ -25,6 +25,7 @@ pub enum WebOsControlProbeCommand {
     SetInput,
     ScreenOff,
     ScreenOn,
+    PowerOff,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +52,7 @@ impl DevCommand {
                     "set-input" => WebOsControlProbeCommand::SetInput,
                     "screen-off" => WebOsControlProbeCommand::ScreenOff,
                     "screen-on" => WebOsControlProbeCommand::ScreenOn,
+                    "power-off" => WebOsControlProbeCommand::PowerOff,
                     other => return Err(DevParseError::UnknownControlOperation(other.to_string())),
                 };
                 Self::WebOsControlProbe(operation)
@@ -78,6 +80,9 @@ impl DevCommand {
             }
             Self::WebOsControlProbe(WebOsControlProbeCommand::ScreenOn) => {
                 "dev webos-control-probe screen-on"
+            }
+            Self::WebOsControlProbe(WebOsControlProbeCommand::PowerOff) => {
+                "dev webos-control-probe power-off"
             }
         }
     }
@@ -134,6 +139,7 @@ pub enum DevError {
     InputId(WebOsInputIdError),
     Control(WebOsControlError),
     ScreenControl(WebOsScreenControlError),
+    PowerOffPrecondition { actual: WebOsPowerState },
 }
 
 impl fmt::Display for DevError {
@@ -163,6 +169,10 @@ impl fmt::Display for DevError {
             Self::ScreenControl(source) => {
                 write!(f, "webOS screen-control probe failed: {source}")
             }
+            Self::PowerOffPrecondition { actual } => write!(
+                f,
+                "refusing webOS power-off probe from power state {actual}; expected Active"
+            ),
         }
     }
 }
@@ -182,6 +192,7 @@ impl Error for DevError {
             Self::InputId(source) => Some(source),
             Self::Control(source) => Some(source),
             Self::ScreenControl(source) => Some(source),
+            Self::PowerOffPrecondition { .. } => None,
         }
     }
 }
@@ -199,6 +210,9 @@ pub(crate) fn run_dev_command<W: Write>(
         DevCommand::WebOsControlProbe(
             operation @ (WebOsControlProbeCommand::ScreenOff | WebOsControlProbeCommand::ScreenOn),
         ) => run_webos_screen_control_probe(writer, operation),
+        DevCommand::WebOsControlProbe(WebOsControlProbeCommand::PowerOff) => {
+            run_webos_power_off_probe(writer)
+        }
     }
 }
 
@@ -299,11 +313,45 @@ fn run_webos_screen_control_probe<W: Write>(
             match operation {
                 WebOsControlProbeCommand::ScreenOff => client.turn_screen_off(),
                 WebOsControlProbeCommand::ScreenOn => client.turn_screen_on(),
-                WebOsControlProbeCommand::SetInput => unreachable!("screen probe operation"),
+                WebOsControlProbeCommand::SetInput | WebOsControlProbeCommand::PowerOff => {
+                    unreachable!("screen probe operation")
+                }
             }
             .map_err(DevError::ScreenControl)
         },
     )
+}
+
+fn run_webos_power_off_probe<W: Write>(writer: &mut W) -> Result<(), DevError> {
+    let config_path = resolve_config_path_from_env().map_err(DevError::ConfigPath)?;
+    let config = load_config(&config_path).map_err(DevError::Config)?;
+    let owner = resolve_config_owner(&config_path).map_err(DevError::ConfigOwner)?;
+    let context = WebOsProbeContext::new(&config_path, config.tv_ip, owner)?;
+
+    run_webos_power_off_probe_with(writer, &context, |endpoint, token_store, on_auth_event| {
+        let mut client = WebOsClient::connect_authenticated(
+            endpoint,
+            WEBOS_CONNECT_TIMEOUT,
+            WEBOS_RESPONSE_TIMEOUT,
+            token_store,
+            on_auth_event,
+        )
+        .map_err(DevError::Authentication)?;
+        let power_state = client.power_state().map_err(DevError::PowerState)?;
+        require_active_power_state(&power_state)?;
+        client.power_off().map_err(DevError::Control)?;
+        Ok(power_state)
+    })
+}
+
+fn require_active_power_state(power_state: &WebOsPowerState) -> Result<(), DevError> {
+    if power_state == &WebOsPowerState::Active {
+        Ok(())
+    } else {
+        Err(DevError::PowerOffPrecondition {
+            actual: power_state.clone(),
+        })
+    }
 }
 
 struct WebOsProbeContext {
@@ -437,6 +485,27 @@ where
     writeln!(writer, "{WEBOS_CONTROL_PROBE_PREFIX}: screen_state={state}").map_err(DevError::Io)
 }
 
+fn run_webos_power_off_probe_with<W, F>(
+    writer: &mut W,
+    context: &WebOsProbeContext,
+    probe: F,
+) -> Result<(), DevError>
+where
+    W: Write,
+    F: FnOnce(
+        WebOsEndpoint,
+        &PlatformAccessTokenStore,
+        &mut dyn FnMut(WebOsAuthenticationEvent),
+    ) -> Result<WebOsPowerState, DevError>,
+{
+    let power_state = execute_webos_probe(writer, context, WEBOS_CONTROL_PROBE_PREFIX, probe)?;
+    writeln!(
+        writer,
+        "{WEBOS_CONTROL_PROBE_PREFIX}: power_off_from={power_state}"
+    )
+    .map_err(DevError::Io)
+}
+
 fn execute_webos_probe<W, F, T>(
     writer: &mut W,
     context: &WebOsProbeContext,
@@ -499,7 +568,8 @@ fn write_auth_event<W: Write>(
 #[cfg(test)]
 mod tests {
     use super::{
-        run_webos_auth_probe_with, run_webos_read_probe_with, run_webos_screen_control_probe_with,
+        require_active_power_state, run_webos_auth_probe_with, run_webos_power_off_probe_with,
+        run_webos_read_probe_with, run_webos_screen_control_probe_with,
         run_webos_set_input_probe_with, DevCommand, DevError, DevParseError,
         WebOsControlProbeCommand, WebOsProbeContext, WebOsReadProbeResult,
     };
@@ -546,6 +616,12 @@ mod tests {
             DevCommand::parse(["webos-control-probe", "screen-on"]),
             Ok(DevCommand::WebOsControlProbe(
                 WebOsControlProbeCommand::ScreenOn
+            ))
+        );
+        assert_eq!(
+            DevCommand::parse(["webos-control-probe", "power-off"]),
+            Ok(DevCommand::WebOsControlProbe(
+                WebOsControlProbeCommand::PowerOff
             ))
         );
         assert_eq!(
@@ -735,6 +811,42 @@ LG Buddy WebOS Control Probe: screen_state={state}\n"
                 )
             );
         }
+    }
+
+    #[test]
+    fn power_off_probe_reports_active_precondition_after_success() {
+        let context = probe_context();
+        let mut output = Vec::new();
+
+        run_webos_power_off_probe_with(
+            &mut output,
+            &context,
+            |_endpoint, _token_store, on_auth_event| {
+                on_auth_event(WebOsAuthenticationEvent::UsingStoredAccessToken);
+                Ok(WebOsPowerState::Active)
+            },
+        )
+        .expect("run power-off probe");
+
+        assert_eq!(
+            String::from_utf8(output).expect("UTF-8 output"),
+            "LG Buddy WebOS Control Probe: using stored access token.\n\
+LG Buddy WebOS Control Probe: power_off_from=Active\n"
+        );
+    }
+
+    #[test]
+    fn power_off_probe_requires_active_power_state() {
+        assert!(require_active_power_state(&WebOsPowerState::Active).is_ok());
+
+        let error = require_active_power_state(&WebOsPowerState::ScreenOff)
+            .expect_err("screen-off TV should not be powered off by the probe");
+        assert!(matches!(
+            error,
+            DevError::PowerOffPrecondition {
+                actual: WebOsPowerState::ScreenOff
+            }
+        ));
     }
 
     #[test]

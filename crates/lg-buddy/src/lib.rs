@@ -592,6 +592,12 @@ mod tests {
             )))
         );
         assert_eq!(
+            parse_args(["dev", "webos-control-probe", "power-off"]),
+            Ok(ParseOutcome::Command(Command::Dev(
+                DevCommand::WebOsControlProbe(WebOsControlProbeCommand::PowerOff)
+            )))
+        );
+        assert_eq!(
             parse_args(["settings", "list"]),
             Ok(ParseOutcome::Command(Command::Settings(
                 SettingsCommand::List
