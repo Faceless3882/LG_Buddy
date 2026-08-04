@@ -23,7 +23,7 @@ pub mod version;
 pub mod web_os;
 pub mod wol;
 
-pub use dev::{DevCommand, DevError, DevParseError};
+pub use dev::{DevCommand, DevError, DevParseError, WebOsControlProbeCommand};
 pub use sources::desktop::{gnome, swayidle};
 pub use sources::linux::{logind, network_manager};
 
@@ -466,7 +466,7 @@ fn run_detect_backend<W: Write>(writer: &mut W) -> Result<(), RunError> {
 mod tests {
     use super::{
         parse_args, usage, BrightnessCommand, Command, DevCommand, DevParseError, ParseError,
-        ParseOutcome, StartupMode,
+        ParseOutcome, StartupMode, WebOsControlProbeCommand,
     };
     use crate::settings::{SettingsCommand, SettingsParseError};
     use crate::tv::OledBrightness;
@@ -571,6 +571,30 @@ mod tests {
             parse_args(["dev", "webos-read-probe"]),
             Ok(ParseOutcome::Command(Command::Dev(
                 DevCommand::WebOsReadProbe
+            )))
+        );
+        assert_eq!(
+            parse_args(["dev", "webos-control-probe", "set-input"]),
+            Ok(ParseOutcome::Command(Command::Dev(
+                DevCommand::WebOsControlProbe(WebOsControlProbeCommand::SetInput)
+            )))
+        );
+        assert_eq!(
+            parse_args(["dev", "webos-control-probe", "screen-off"]),
+            Ok(ParseOutcome::Command(Command::Dev(
+                DevCommand::WebOsControlProbe(WebOsControlProbeCommand::ScreenOff)
+            )))
+        );
+        assert_eq!(
+            parse_args(["dev", "webos-control-probe", "screen-on"]),
+            Ok(ParseOutcome::Command(Command::Dev(
+                DevCommand::WebOsControlProbe(WebOsControlProbeCommand::ScreenOn)
+            )))
+        );
+        assert_eq!(
+            parse_args(["dev", "webos-control-probe", "power-off"]),
+            Ok(ParseOutcome::Command(Command::Dev(
+                DevCommand::WebOsControlProbe(WebOsControlProbeCommand::PowerOff)
             )))
         );
         assert_eq!(
@@ -751,6 +775,23 @@ mod tests {
             parse_args(["dev", "webos-read-probe", "extra"]),
             Err(ParseError::Dev(DevParseError::UnexpectedArguments {
                 command: DevCommand::WebOsReadProbe,
+                arguments: vec!["extra".to_string()],
+            }))
+        );
+        assert_eq!(
+            parse_args(["dev", "webos-control-probe"]),
+            Err(ParseError::Dev(DevParseError::MissingControlOperation))
+        );
+        assert_eq!(
+            parse_args(["dev", "webos-control-probe", "other"]),
+            Err(ParseError::Dev(DevParseError::UnknownControlOperation(
+                "other".to_string()
+            )))
+        );
+        assert_eq!(
+            parse_args(["dev", "webos-control-probe", "set-input", "extra"]),
+            Err(ParseError::Dev(DevParseError::UnexpectedArguments {
+                command: DevCommand::WebOsControlProbe(WebOsControlProbeCommand::SetInput),
                 arguments: vec!["extra".to_string()],
             }))
         );

@@ -5,6 +5,10 @@ use std::net::{TcpListener, TcpStream};
 use std::thread::{self, JoinHandle};
 use tungstenite::{accept, Message, WebSocket};
 
+mod observed_tv;
+
+pub(super) use observed_tv::{ObservedWebOsInput, ObservedWebOsTvServer};
+
 pub(super) struct ScriptedWebOsServer {
     endpoint: WebOsEndpoint,
     handle: JoinHandle<()>,

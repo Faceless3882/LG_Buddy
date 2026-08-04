@@ -37,8 +37,8 @@ pub enum WebOsBacklightBrightnessError {
     MissingSettings,
     InvalidSettings,
     MissingBacklight,
-    InvalidBacklight,
-    BacklightOutOfRange { value: u64 },
+    InvalidBacklight { value: Value },
+    BacklightOutOfRange { value: Value },
 }
 
 impl fmt::Display for WebOsBacklightBrightnessError {
@@ -89,10 +89,10 @@ impl fmt::Display for WebOsBacklightBrightnessError {
                     "webOS backlight-brightness response has no backlight value"
                 )
             }
-            Self::InvalidBacklight => {
+            Self::InvalidBacklight { value } => {
                 write!(
                     f,
-                    "webOS backlight-brightness response backlight value is not an integer"
+                    "webOS backlight-brightness response value `{value}` is not a whole number"
                 )
             }
             Self::BacklightOutOfRange { value } => write!(
@@ -115,7 +115,7 @@ impl Error for WebOsBacklightBrightnessError {
             | Self::MissingSettings
             | Self::InvalidSettings
             | Self::MissingBacklight
-            | Self::InvalidBacklight
+            | Self::InvalidBacklight { .. }
             | Self::BacklightOutOfRange { .. } => None,
         }
     }
@@ -167,72 +167,58 @@ fn parse_backlight_brightness_response(
         None => return Err(WebOsBacklightBrightnessError::MissingSettings),
     };
     let value = match settings.get("backlight") {
-        Some(Value::Number(value)) => value
-            .as_u64()
-            .ok_or(WebOsBacklightBrightnessError::InvalidBacklight)?,
-        Some(_) => return Err(WebOsBacklightBrightnessError::InvalidBacklight),
+        Some(value) => normalize_backlight_brightness(value)?,
         None => return Err(WebOsBacklightBrightnessError::MissingBacklight),
     };
-    if value > MAX_BACKLIGHT_BRIGHTNESS {
-        return Err(WebOsBacklightBrightnessError::BacklightOutOfRange { value });
+
+    Ok(WebOsBacklightBrightness(value))
+}
+
+fn normalize_backlight_brightness(value: &Value) -> Result<u8, WebOsBacklightBrightnessError> {
+    let normalized = match value {
+        Value::Number(number) => {
+            let Some(value_as_float) = number.as_f64() else {
+                return Err(WebOsBacklightBrightnessError::InvalidBacklight {
+                    value: value.clone(),
+                });
+            };
+            if value_as_float.fract() != 0.0 {
+                return Err(WebOsBacklightBrightnessError::InvalidBacklight {
+                    value: value.clone(),
+                });
+            }
+            value_as_float
+        }
+        Value::String(value_as_string) => value_as_string.parse::<u64>().map_or_else(
+            |_| {
+                Err(WebOsBacklightBrightnessError::InvalidBacklight {
+                    value: value.clone(),
+                })
+            },
+            |value_as_integer| Ok(value_as_integer as f64),
+        )?,
+        _ => {
+            return Err(WebOsBacklightBrightnessError::InvalidBacklight {
+                value: value.clone(),
+            })
+        }
+    };
+    if !(0.0..=MAX_BACKLIGHT_BRIGHTNESS as f64).contains(&normalized) {
+        return Err(WebOsBacklightBrightnessError::BacklightOutOfRange {
+            value: value.clone(),
+        });
     }
 
-    Ok(WebOsBacklightBrightness(value as u8))
+    Ok(normalized as u8)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_backlight_brightness_response, WebOsBacklightBrightness,
-        WebOsBacklightBrightnessError, GET_SYSTEM_SETTINGS_URI,
+        normalize_backlight_brightness, parse_backlight_brightness_response,
+        WebOsBacklightBrightnessError,
     };
-    use crate::web_os::test_support::ScriptedWebOsServer;
-    use crate::web_os::WebOsClient;
-    use serde_json::json;
-    use std::time::Duration;
-
-    const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
-    const RESPONSE_TIMEOUT: Duration = Duration::from_millis(200);
-
-    #[test]
-    fn backlight_request_matches_hardware_observed_transcript() {
-        let server = ScriptedWebOsServer::spawn(|peer| {
-            let request = peer.receive_json();
-            assert_eq!(request["id"], "request_0");
-            assert_eq!(request["type"], "request");
-            assert_eq!(request["uri"], GET_SYSTEM_SETTINGS_URI);
-            assert_eq!(
-                request["payload"],
-                json!({
-                    "category": "picture",
-                    "keys": ["backlight"],
-                })
-            );
-            peer.send_json(json!({
-                "id": request["id"],
-                "type": "response",
-                "payload": {
-                    "category": "picture",
-                    "returnValue": true,
-                    "settings": {
-                        "backlight": 100,
-                    },
-                    "subscribed": false,
-                },
-            }));
-        });
-        let mut client =
-            WebOsClient::connect_for_test(server.endpoint(), CONNECT_TIMEOUT, RESPONSE_TIMEOUT)
-                .expect("connect client");
-
-        assert_eq!(
-            client
-                .backlight_brightness()
-                .expect("read backlight brightness"),
-            WebOsBacklightBrightness(100)
-        );
-        server.finish();
-    }
+    use serde_json::{json, Value};
 
     #[test]
     fn malformed_backlight_payloads_are_typed_errors() {
@@ -263,12 +249,8 @@ mod tests {
                 WebOsBacklightBrightnessError::MissingBacklight,
             ),
             (
-                json!({"payload": {"returnValue": true, "settings": {"backlight": "50"}}}),
-                WebOsBacklightBrightnessError::InvalidBacklight,
-            ),
-            (
                 json!({"payload": {"returnValue": true, "settings": {"backlight": 101}}}),
-                WebOsBacklightBrightnessError::BacklightOutOfRange { value: 101 },
+                WebOsBacklightBrightnessError::BacklightOutOfRange { value: json!(101) },
             ),
         ];
 
@@ -279,6 +261,49 @@ mod tests {
                 std::mem::discriminant(&actual),
                 std::mem::discriminant(&expected)
             );
+        }
+    }
+
+    #[test]
+    fn observed_integral_numeric_and_decimal_string_backlight_values_are_normalized() {
+        for (wire_value, expected) in [
+            (json!(0), 0),
+            (json!(42), 42),
+            (json!(42.0), 42),
+            (json!("90"), 90),
+            (json!(100.0), 100),
+            (json!(1e2), 100),
+        ] {
+            assert_eq!(
+                normalize_backlight_brightness(&wire_value)
+                    .expect("whole numeric percentage should normalize"),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn fractional_non_numeric_and_out_of_range_values_are_preserved_in_errors() {
+        for wire_value in [json!(42.5), json!("42.0"), json!("bright"), Value::Null] {
+            assert!(matches!(
+                normalize_backlight_brightness(&wire_value),
+                Err(WebOsBacklightBrightnessError::InvalidBacklight { value })
+                    if value == wire_value
+            ));
+        }
+
+        for wire_value in [
+            json!(-1),
+            json!(-1.0),
+            json!(101),
+            json!(101.0),
+            json!("101"),
+        ] {
+            assert!(matches!(
+                normalize_backlight_brightness(&wire_value),
+                Err(WebOsBacklightBrightnessError::BacklightOutOfRange { value })
+                    if value == wire_value
+            ));
         }
     }
 

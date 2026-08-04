@@ -1,9 +1,11 @@
-use super::{WebOsClient, WebOsClientError};
+use super::control::send_control_request;
+use super::{WebOsClient, WebOsClientError, WebOsControlError};
 use serde_json::{json, Value};
 use std::error::Error;
 use std::fmt;
 
 const GET_POWER_STATE_URI: &str = "ssap://com.webos.service.tvpower/power/getPowerState";
+const POWER_OFF_URI: &str = "ssap://system/turnOff";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WebOsPowerState {
@@ -17,7 +19,7 @@ pub enum WebOsPowerState {
 }
 
 impl WebOsPowerState {
-    fn from_wire_value(value: String) -> Self {
+    pub(crate) fn from_wire_value(value: String) -> Self {
         match value.as_str() {
             "Active" => Self::Active,
             "Active Standby" => Self::ActiveStandby,
@@ -110,6 +112,11 @@ impl WebOsClient {
             .send_request(GET_POWER_STATE_URI, json!({}))
             .map_err(|source| WebOsPowerStateError::Request { source })?;
         parse_power_state_response(&response)
+    }
+
+    /// Powers off the TV and consumes the client so its connection cannot be reused.
+    pub fn power_off(mut self) -> Result<(), WebOsControlError> {
+        send_control_request(&mut self, POWER_OFF_URI, json!({})).map(|_| ())
     }
 }
 
