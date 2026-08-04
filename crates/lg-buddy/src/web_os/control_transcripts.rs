@@ -1,5 +1,5 @@
 use super::test_support::ScriptedWebOsServer;
-use super::{WebOsClient, WebOsClientError};
+use super::{WebOsClient, WebOsClientError, WebOsInputId};
 use serde_json::{json, Value};
 use std::time::Duration;
 
@@ -40,16 +40,8 @@ fn hardware_observed_input_switch_transcript_is_replayed_exactly() {
     });
     let mut client = connected_client(&server);
 
-    assert_eq!(
-        client
-            .send_request(SET_INPUT_URI, json!({"inputId": "HDMI_2"}))
-            .expect("switch input response"),
-        json!({
-            "id": "request_0",
-            "type": "response",
-            "payload": {"returnValue": true},
-        })
-    );
+    let input_id = WebOsInputId::new("HDMI_2").expect("input ID");
+    client.switch_input(&input_id).expect("switch input");
     server.finish();
 }
 

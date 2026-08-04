@@ -2,6 +2,7 @@
   "manifestVersion": 1,
   "permissions": [
     "CONTROL_POWER",
+    "LAUNCH",
     "READ_POWER_STATE",
     "READ_RUNNING_APPS",
     "READ_SETTINGS"

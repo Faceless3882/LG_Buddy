@@ -1,6 +1,7 @@
 //! Native LG webOS protocol support.
 
 mod client;
+mod control;
 #[cfg(test)]
 mod control_transcripts;
 mod input;
@@ -16,7 +17,8 @@ pub use client::{
     WebOsAuthenticatedClientError, WebOsAuthenticationEvent, WebOsClient, WebOsClientError,
     WebOsClientRegistrationError, WebOsEndpoint,
 };
-pub use input::{WebOsForegroundApp, WebOsForegroundAppError};
+pub use control::WebOsControlError;
+pub use input::{WebOsForegroundApp, WebOsForegroundAppError, WebOsInputId, WebOsInputIdError};
 pub use picture::{WebOsBacklightBrightness, WebOsBacklightBrightnessError};
 pub use power::{WebOsPowerState, WebOsPowerStateError};
 

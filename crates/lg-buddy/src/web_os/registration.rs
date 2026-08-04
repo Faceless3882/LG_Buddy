@@ -6,8 +6,8 @@ use std::sync::OnceLock;
 
 const REGISTRATION_MESSAGE_TYPE: &str = "register";
 const PAIRING_PROMPT_TYPE: &str = "PROMPT";
-// Keep the dev probe grant limited to its first read-only operation. Expanding
-// permissions may invalidate stored client keys and require re-pairing.
+// Keep probe grants limited to operations confirmed by hardware characterization.
+// Expanding permissions may invalidate stored client keys and require re-pairing.
 const REGISTRATION_MANIFEST_JSON: &str = include_str!("registration_manifest.json");
 
 static REGISTRATION_MANIFEST: OnceLock<Value> = OnceLock::new();
@@ -357,6 +357,7 @@ mod tests {
             "manifestVersion": 1,
             "permissions": [
                 "CONTROL_POWER",
+                "LAUNCH",
                 "READ_POWER_STATE",
                 "READ_RUNNING_APPS",
                 "READ_SETTINGS"

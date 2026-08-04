@@ -1,9 +1,50 @@
-use super::{WebOsClient, WebOsClientError};
+use super::control::send_control_request;
+use super::{WebOsClient, WebOsClientError, WebOsControlError};
 use serde_json::{json, Value};
 use std::error::Error;
 use std::fmt;
 
 const GET_FOREGROUND_APP_URI: &str = "ssap://com.webos.applicationManager/getForegroundAppInfo";
+const SWITCH_INPUT_URI: &str = "ssap://tv/switchInput";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebOsInputId(String);
+
+impl WebOsInputId {
+    pub fn new(value: impl Into<String>) -> Result<Self, WebOsInputIdError> {
+        let value = value.into();
+        if value.trim().is_empty() {
+            return Err(WebOsInputIdError::Empty);
+        }
+
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for WebOsInputId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebOsInputIdError {
+    Empty,
+}
+
+impl fmt::Display for WebOsInputIdError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => write!(f, "webOS input ID cannot be empty"),
+        }
+    }
+}
+
+impl Error for WebOsInputIdError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebOsForegroundApp {
@@ -97,6 +138,14 @@ impl WebOsClient {
             .map_err(|source| WebOsForegroundAppError::Request { source })?;
         parse_foreground_app_response(&response)
     }
+
+    pub fn switch_input(&mut self, input_id: &WebOsInputId) -> Result<(), WebOsControlError> {
+        send_control_request(
+            self,
+            SWITCH_INPUT_URI,
+            json!({"inputId": input_id.as_str()}),
+        )
+    }
 }
 
 fn parse_foreground_app_response(
@@ -137,8 +186,8 @@ fn parse_foreground_app_response(
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_foreground_app_response, WebOsForegroundApp, WebOsForegroundAppError,
-        GET_FOREGROUND_APP_URI,
+        parse_foreground_app_response, WebOsForegroundApp, WebOsForegroundAppError, WebOsInputId,
+        WebOsInputIdError, GET_FOREGROUND_APP_URI,
     };
     use crate::web_os::test_support::ScriptedWebOsServer;
     use crate::web_os::WebOsClient;
@@ -147,6 +196,16 @@ mod tests {
 
     const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
     const RESPONSE_TIMEOUT: Duration = Duration::from_millis(200);
+
+    #[test]
+    fn input_id_rejects_empty_values() {
+        assert_eq!(WebOsInputId::new(""), Err(WebOsInputIdError::Empty));
+        assert_eq!(WebOsInputId::new("  "), Err(WebOsInputIdError::Empty));
+        assert_eq!(
+            WebOsInputId::new("HDMI_2").expect("input ID").as_str(),
+            "HDMI_2"
+        );
+    }
 
     #[test]
     fn foreground_app_request_matches_hardware_observed_transcript() {

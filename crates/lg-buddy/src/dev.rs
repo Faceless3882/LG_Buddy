@@ -3,8 +3,9 @@ use crate::config::{load_config, resolve_config_path_from_env, ConfigError, Conf
 use crate::platform_access_token::{PlatformAccessTokenStore, PlatformAccessTokenStoreError};
 use crate::web_os::{
     WebOsAuthenticatedClientError, WebOsAuthenticationEvent, WebOsBacklightBrightness,
-    WebOsBacklightBrightnessError, WebOsClient, WebOsEndpoint, WebOsForegroundApp,
-    WebOsForegroundAppError, WebOsPowerState, WebOsPowerStateError,
+    WebOsBacklightBrightnessError, WebOsClient, WebOsControlError, WebOsEndpoint,
+    WebOsForegroundApp, WebOsForegroundAppError, WebOsInputId, WebOsInputIdError, WebOsPowerState,
+    WebOsPowerStateError,
 };
 use std::error::Error;
 use std::fmt;
@@ -17,11 +18,18 @@ const WEBOS_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const WEBOS_RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
 const WEBOS_AUTH_PROBE_PREFIX: &str = "LG Buddy WebOS Auth Probe";
 const WEBOS_READ_PROBE_PREFIX: &str = "LG Buddy WebOS Read Probe";
+const WEBOS_CONTROL_PROBE_PREFIX: &str = "LG Buddy WebOS Control Probe";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebOsControlProbeCommand {
+    SetInput,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DevCommand {
     WebOsAuthProbe,
     WebOsReadProbe,
+    WebOsControlProbe(WebOsControlProbeCommand),
 }
 
 impl DevCommand {
@@ -35,6 +43,14 @@ impl DevCommand {
         let command = match subcommand.as_ref() {
             "webos-auth-probe" => Self::WebOsAuthProbe,
             "webos-read-probe" => Self::WebOsReadProbe,
+            "webos-control-probe" => {
+                let operation = args.next().ok_or(DevParseError::MissingControlOperation)?;
+                let operation = match operation.as_ref() {
+                    "set-input" => WebOsControlProbeCommand::SetInput,
+                    other => return Err(DevParseError::UnknownControlOperation(other.to_string())),
+                };
+                Self::WebOsControlProbe(operation)
+            }
             other => return Err(DevParseError::UnknownSubcommand(other.to_string())),
         };
 
@@ -50,6 +66,9 @@ impl DevCommand {
         match self {
             Self::WebOsAuthProbe => "dev webos-auth-probe",
             Self::WebOsReadProbe => "dev webos-read-probe",
+            Self::WebOsControlProbe(WebOsControlProbeCommand::SetInput) => {
+                "dev webos-control-probe set-input"
+            }
         }
     }
 }
@@ -58,6 +77,8 @@ impl DevCommand {
 pub enum DevParseError {
     MissingSubcommand,
     UnknownSubcommand(String),
+    MissingControlOperation,
+    UnknownControlOperation(String),
     UnexpectedArguments {
         command: DevCommand,
         arguments: Vec<String>,
@@ -70,6 +91,12 @@ impl fmt::Display for DevParseError {
             Self::MissingSubcommand => write!(f, "missing temporary `dev` subcommand"),
             Self::UnknownSubcommand(subcommand) => {
                 write!(f, "unknown temporary dev command `{subcommand}`")
+            }
+            Self::MissingControlOperation => {
+                write!(f, "missing temporary webOS control probe operation")
+            }
+            Self::UnknownControlOperation(operation) => {
+                write!(f, "unknown temporary webOS control operation `{operation}`")
             }
             Self::UnexpectedArguments { command, arguments } => write!(
                 f,
@@ -94,6 +121,8 @@ pub enum DevError {
     PowerState(WebOsPowerStateError),
     ForegroundApp(WebOsForegroundAppError),
     BacklightBrightness(WebOsBacklightBrightnessError),
+    InputId(WebOsInputIdError),
+    Control(WebOsControlError),
 }
 
 impl fmt::Display for DevError {
@@ -118,6 +147,8 @@ impl fmt::Display for DevError {
             Self::BacklightBrightness(source) => {
                 write!(f, "webOS read probe backlight read failed: {source}")
             }
+            Self::InputId(source) => write!(f, "invalid configured webOS input: {source}"),
+            Self::Control(source) => write!(f, "webOS control probe failed: {source}"),
         }
     }
 }
@@ -134,6 +165,8 @@ impl Error for DevError {
             Self::PowerState(source) => Some(source),
             Self::ForegroundApp(source) => Some(source),
             Self::BacklightBrightness(source) => Some(source),
+            Self::InputId(source) => Some(source),
+            Self::Control(source) => Some(source),
         }
     }
 }
@@ -145,6 +178,9 @@ pub(crate) fn run_dev_command<W: Write>(
     match command {
         DevCommand::WebOsAuthProbe => run_webos_auth_probe(writer),
         DevCommand::WebOsReadProbe => run_webos_read_probe(writer),
+        DevCommand::WebOsControlProbe(WebOsControlProbeCommand::SetInput) => {
+            run_webos_set_input_probe(writer)
+        }
     }
 }
 
@@ -193,6 +229,31 @@ fn run_webos_read_probe<W: Write>(writer: &mut W) -> Result<(), DevError> {
             backlight_brightness,
         })
     })
+}
+
+fn run_webos_set_input_probe<W: Write>(writer: &mut W) -> Result<(), DevError> {
+    let config_path = resolve_config_path_from_env().map_err(DevError::ConfigPath)?;
+    let config = load_config(&config_path).map_err(DevError::Config)?;
+    let owner = resolve_config_owner(&config_path).map_err(DevError::ConfigOwner)?;
+    let context = WebOsProbeContext::new(&config_path, config.tv_ip, owner)?;
+    let input_id = WebOsInputId::new(config.input.as_str()).map_err(DevError::InputId)?;
+
+    run_webos_set_input_probe_with(
+        writer,
+        &context,
+        &input_id,
+        |endpoint, token_store, on_auth_event, input_id| {
+            let mut client = WebOsClient::connect_authenticated(
+                endpoint,
+                WEBOS_CONNECT_TIMEOUT,
+                WEBOS_RESPONSE_TIMEOUT,
+                token_store,
+                on_auth_event,
+            )
+            .map_err(DevError::Authentication)?;
+            client.switch_input(input_id).map_err(DevError::Control)
+        },
+    )
 }
 
 struct WebOsProbeContext {
@@ -274,6 +335,32 @@ where
     .map_err(DevError::Io)
 }
 
+fn run_webos_set_input_probe_with<W, F>(
+    writer: &mut W,
+    context: &WebOsProbeContext,
+    input_id: &WebOsInputId,
+    probe: F,
+) -> Result<(), DevError>
+where
+    W: Write,
+    F: FnOnce(
+        WebOsEndpoint,
+        &PlatformAccessTokenStore,
+        &mut dyn FnMut(WebOsAuthenticationEvent),
+        &WebOsInputId,
+    ) -> Result<(), DevError>,
+{
+    execute_webos_probe(
+        writer,
+        context,
+        WEBOS_CONTROL_PROBE_PREFIX,
+        |endpoint, token_store, on_auth_event| {
+            probe(endpoint, token_store, on_auth_event, input_id)
+        },
+    )?;
+    writeln!(writer, "{WEBOS_CONTROL_PROBE_PREFIX}: input={input_id}").map_err(DevError::Io)
+}
+
 fn execute_webos_probe<W, F, T>(
     writer: &mut W,
     context: &WebOsProbeContext,
@@ -336,13 +423,14 @@ fn write_auth_event<W: Write>(
 #[cfg(test)]
 mod tests {
     use super::{
-        run_webos_auth_probe_with, run_webos_read_probe_with, DevCommand, DevError, DevParseError,
-        WebOsProbeContext, WebOsReadProbeResult,
+        run_webos_auth_probe_with, run_webos_read_probe_with, run_webos_set_input_probe_with,
+        DevCommand, DevError, DevParseError, WebOsControlProbeCommand, WebOsProbeContext,
+        WebOsReadProbeResult,
     };
     use crate::auth::SystemUser;
     use crate::web_os::{
-        WebOsAuthenticationEvent, WebOsBacklightBrightness, WebOsForegroundApp, WebOsPowerState,
-        WebOsPowerStateError,
+        WebOsAuthenticationEvent, WebOsBacklightBrightness, WebOsForegroundApp, WebOsInputId,
+        WebOsPowerState, WebOsPowerStateError,
     };
     use std::net::Ipv4Addr;
     use std::path::Path;
@@ -367,6 +455,12 @@ mod tests {
             Ok(DevCommand::WebOsReadProbe)
         );
         assert_eq!(
+            DevCommand::parse(["webos-control-probe", "set-input"]),
+            Ok(DevCommand::WebOsControlProbe(
+                WebOsControlProbeCommand::SetInput
+            ))
+        );
+        assert_eq!(
             DevCommand::parse(Vec::<String>::new()),
             Err(DevParseError::MissingSubcommand)
         );
@@ -385,6 +479,21 @@ mod tests {
             DevCommand::parse(["webos-read-probe", "extra"]),
             Err(DevParseError::UnexpectedArguments {
                 command: DevCommand::WebOsReadProbe,
+                arguments: vec!["extra".to_string()],
+            })
+        );
+        assert_eq!(
+            DevCommand::parse(["webos-control-probe"]),
+            Err(DevParseError::MissingControlOperation)
+        );
+        assert_eq!(
+            DevCommand::parse(["webos-control-probe", "other"]),
+            Err(DevParseError::UnknownControlOperation("other".to_string()))
+        );
+        assert_eq!(
+            DevCommand::parse(["webos-control-probe", "set-input", "extra"]),
+            Err(DevParseError::UnexpectedArguments {
+                command: DevCommand::WebOsControlProbe(WebOsControlProbeCommand::SetInput),
                 arguments: vec!["extra".to_string()],
             })
         );
@@ -473,6 +582,36 @@ LG Buddy WebOS Auth Probe: power_state=Active Standby\n"
 LG Buddy WebOS Read Probe: power_state=Active\n\
 LG Buddy WebOS Read Probe: foreground_app=com.webos.app.hdmi3\n\
 LG Buddy WebOS Read Probe: backlight=100\n"
+        );
+    }
+
+    #[test]
+    fn set_input_probe_reports_configured_input_after_success() {
+        let context = probe_context();
+        let input_id = WebOsInputId::new("HDMI_3").expect("input ID");
+        let mut output = Vec::new();
+
+        run_webos_set_input_probe_with(
+            &mut output,
+            &context,
+            &input_id,
+            |endpoint, token_store, on_auth_event, observed_input_id| {
+                assert_eq!(endpoint.to_string(), "wss://192.0.2.42:3001/");
+                assert_eq!(
+                    token_store.token_path(),
+                    Path::new("/tmp/lg-buddy-dev-probe/tvs/primary/access-token.json")
+                );
+                assert_eq!(observed_input_id, &input_id);
+                on_auth_event(WebOsAuthenticationEvent::UsingStoredAccessToken);
+                Ok(())
+            },
+        )
+        .expect("run set-input probe");
+
+        assert_eq!(
+            String::from_utf8(output).expect("UTF-8 output"),
+            "LG Buddy WebOS Control Probe: using stored access token.\n\
+LG Buddy WebOS Control Probe: input=HDMI_3\n"
         );
     }
 
