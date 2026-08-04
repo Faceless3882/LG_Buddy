@@ -12,7 +12,7 @@ keeping every claimed device behavior traceable to real hardware evidence.
 flowchart LR
     TV["Real TV probe"] --> Evidence["Recorded request, response, and state"]
     Evidence --> Characterization["Evidence-linked behavior test"]
-    Evidence --> Mock["Stateful observed-TV server"]
+    Evidence --> Mock["Central stateful webOS test server"]
     Characterization -->|exercises| Mock
     Mock --> Feature["LG Buddy functionality tests"]
 ```
@@ -24,7 +24,7 @@ Each step has a distinct responsibility:
   resulting state
 - characterization tests state the behavior LG Buddy relies on and link to the
   evidence
-- the stateful server centralizes observed webOS responses and transitions
+- the stateful server centralizes complete webOS frames and TV transitions
 - higher-level tests use that server to exercise LG Buddy behavior without
   reproducing webOS payloads
 
@@ -34,11 +34,14 @@ observation.
 
 ## Test Surfaces
 
-### Stateful observed-TV server
+### Central stateful test server
 
-`crates/lg-buddy/src/web_os/test_support/observed_tv.rs` owns normal webOS
-behavior that has been observed on the test TV. This includes registration,
-response payloads, permission checks, and state transitions such as:
+`crates/lg-buddy/src/web_os/test_support/test_server.rs` is the only webOS
+server exposed to tests. It owns registration, complete response frames,
+permission checks, state transitions, TLS setup, and named protocol-fault
+scenarios.
+
+Its stateful TV behavior includes:
 
 - changing the foreground application after an input switch
 - moving between `Active` and `Screen Off`
@@ -49,13 +52,22 @@ responds. Controls mutate server state, and later reads expose that state. This
 lets tests verify an operation through an independent observation instead of
 only accepting its immediate acknowledgement.
 
-The server should fail when a test asks for an unobserved URI, input, permission
-failure, or state combination. Unsupported behavior is intentionally visible;
+Tests select semantic scenarios such as registration rejection, response
+timeout, malformed frame, or permission denial. They cannot author raw server
+frames. Successful responses, rejected operations, accepted operations with no
+state change, and transport failures therefore have the same response owner.
+
+Whether a behavior was observed on hardware or introduced as defensive fault
+injection is documented by the test and its evidence link. Provenance does not
+change which server constructs the response.
+
+The server should fail when a test asks for an unmodeled URI, input, or state
+combination. Unsupported behavior is intentionally visible;
 the mock must not invent a plausible response to make a test pass.
 
-Normal observed response JSON belongs in this server. Tests may assert domain
-values and error details that matter to LG Buddy, but should not create a second
-scripted copy of the response fixture.
+Complete webOS response JSON belongs in this server. Tests may assert domain
+values and error details that matter to LG Buddy, but must not create another
+server or peer that carries response fixtures.
 
 ### Characterization tests
 
@@ -73,26 +85,25 @@ issue comment that contains its hardware evidence. A useful test states:
 
 Registration behavior may be characterized beside the authentication code when
 that keeps token persistence and authentication events in the same test. It
-must still use the centralized observed-TV server and link to its evidence.
+must still use the centralized test server and link to its evidence.
 
-### Scripted protocol tests
+### Protocol and fault scenarios
 
-`ScriptedWebOsServer` and `ScriptedWebOsPeer` are for synthetic fault injection
-and low-level protocol mechanics, including:
+The central server also owns named synthetic scenarios for low-level protocol
+mechanics, including:
 
-- malformed JSON or malformed payloads
+- malformed JSON frames
 - unrelated or incorrect response IDs
 - timeouts and early connection closure
 - deliberately rejected registration
 - responses that contradict observed token behavior
 
-They should not replay ordinary successful TV responses. If a scripted test
-starts describing normal device behavior, that behavior belongs in the
-stateful server and its characterization suite.
+These scenarios exercise the same client boundary without exposing a raw peer
+or creating another place where webOS response frames can be assembled.
 
 Pure parser tests remain appropriate for malformed, boundary, and forward-
-compatibility cases. Their inputs are test cases for the parser rather than
-claims about a real TV.
+compatibility values. They do not emulate a TV or define a reusable response
+fixture.
 
 ### LG Buddy functionality tests
 
@@ -122,10 +133,10 @@ about a device quirk:
 2. Record the initial state, request, response, and resulting state in the
    relevant GitHub issue. Remove access tokens and other secrets.
 3. Add or update an evidence-linked characterization test.
-4. Extend the centralized stateful server only as far as the observation
-   supports. Preserve exact quirks when LG Buddy behavior depends on them.
-5. Add parser or synthetic fault tests for defensive behavior that cannot be
-   claimed as an observation.
+4. Extend the centralized stateful server with the observed response and state
+   transition. Preserve exact quirks when LG Buddy behavior depends on them.
+5. Add named server scenarios or parser tests for defensive behavior that
+   cannot be claimed as an observation.
 6. Use the refined server in the LG Buddy functionality tests for the new
    operation.
 7. Run the focused webOS tests, then the normal workspace suite.
@@ -141,23 +152,23 @@ refined behavior without changing their own webOS fixtures.
 
 ## Transport Boundary
 
-The observed-TV server uses local plain WebSocket transport so behavior tests
-stay focused on registration, requests, responses, and state. TLS behavior is a
-separate concern and is covered by the self-signed webOS WSS transport test.
+The test server supports local plain WebSocket transport for most behavior
+tests and WSS transport for the self-signed certificate test. Both transports
+use the same server and response construction.
 
-Keeping these layers separate makes failures diagnostic: a characterization
-failure points to device semantics, while a WSS test failure points to transport
-setup.
+Keeping transport assertions and device-semantics assertions in distinct tests
+makes failures diagnostic: a characterization failure points to device
+semantics, while a WSS test failure points to transport setup.
 
 ## Review Checklist
 
 For native webOS test changes, check that:
 
 - every claimed device behavior has a hardware evidence link
-- normal response fixtures have one home in the stateful server
+- complete response fixtures have one home in the stateful server
 - controls update state and are verified through a meaningful read when
   possible
 - unobserved behavior fails clearly instead of being generalized
-- scripted peers are limited to protocol mechanics or explicit fault injection
+- protocol faults are selected through named scenarios on the same server
 - higher-level LG Buddy tests assert domain outcomes rather than wire JSON
 - access tokens and device-specific secrets are absent from fixtures and logs

@@ -1,4 +1,4 @@
-use super::test_support::{ObservedWebOsInput, ObservedWebOsTvServer};
+use super::test_support::{WebOsTestInput, WebOsTestServer};
 use super::{
     WebOsAuthenticatedClientError, WebOsClientError, WebOsClientRegistrationError,
     WebOsControlError, WebOsInputId, WebOsPowerState, WebOsScreenControlError,
@@ -14,7 +14,7 @@ const TURN_ON_SCREEN_LEGACY_URI: &str = "ssap://com.webos.service.tv.power/turnO
 // https://github.com/Staphylococcus/LG_Buddy/issues/50#issuecomment-5102531370
 #[test]
 fn read_operations_return_the_observed_active_tv_state() {
-    let server = ObservedWebOsTvServer::active(ObservedWebOsInput::Hdmi3);
+    let server = WebOsTestServer::active(WebOsTestInput::Hdmi3);
     let mut client = server
         .connect_authenticated()
         .expect("connect to observed webOS TV");
@@ -47,7 +47,7 @@ fn read_operations_return_the_observed_active_tv_state() {
 // https://github.com/Staphylococcus/LG_Buddy/issues/50#issuecomment-5179994257
 #[test]
 fn input_switch_changes_the_observed_foreground_app_and_picture_state() {
-    let server = ObservedWebOsTvServer::active(ObservedWebOsInput::Hdmi3);
+    let server = WebOsTestServer::active(WebOsTestInput::Hdmi3);
     let mut client = server
         .connect_authenticated()
         .expect("connect to observed webOS TV");
@@ -76,7 +76,7 @@ fn input_switch_changes_the_observed_foreground_app_and_picture_state() {
             .as_percent(),
         90
     );
-    assert_eq!(server.snapshot().input, ObservedWebOsInput::Hdmi2);
+    assert_eq!(server.snapshot().input, WebOsTestInput::Hdmi2);
 
     drop(client);
     server.finish();
@@ -86,7 +86,7 @@ fn input_switch_changes_the_observed_foreground_app_and_picture_state() {
 // https://github.com/Staphylococcus/LG_Buddy/issues/51#issuecomment-5176461983
 #[test]
 fn screen_off_transitions_active_tv_to_screen_off() {
-    let server = ObservedWebOsTvServer::active(ObservedWebOsInput::Hdmi3);
+    let server = WebOsTestServer::active(WebOsTestInput::Hdmi3);
     let mut client = server
         .connect_authenticated()
         .expect("connect to observed webOS TV");
@@ -113,7 +113,7 @@ fn screen_off_transitions_active_tv_to_screen_off() {
 // https://github.com/Staphylococcus/LG_Buddy/issues/51#issuecomment-5176461983
 #[test]
 fn screen_on_transitions_screen_off_tv_to_active() {
-    let server = ObservedWebOsTvServer::screen_off(ObservedWebOsInput::Hdmi3);
+    let server = WebOsTestServer::screen_off(WebOsTestInput::Hdmi3);
     let mut client = server
         .connect_authenticated()
         .expect("connect to observed webOS TV");
@@ -140,7 +140,7 @@ fn screen_on_transitions_screen_off_tv_to_active() {
 // https://github.com/Staphylococcus/LG_Buddy/issues/51#issuecomment-5176461983
 #[test]
 fn screen_on_while_active_preserves_the_observed_substate_error() {
-    let server = ObservedWebOsTvServer::active(ObservedWebOsInput::Hdmi3);
+    let server = WebOsTestServer::active(WebOsTestInput::Hdmi3);
     let mut client = server
         .connect_authenticated()
         .expect("connect to observed webOS TV");
@@ -172,7 +172,7 @@ fn screen_on_while_active_preserves_the_observed_substate_error() {
 // https://github.com/Staphylococcus/LG_Buddy/issues/51#issuecomment-5176461983
 #[test]
 fn legacy_screen_endpoints_are_unavailable_and_do_not_change_state() {
-    let server = ObservedWebOsTvServer::active(ObservedWebOsInput::Hdmi3);
+    let server = WebOsTestServer::active(WebOsTestInput::Hdmi3);
     let mut client = server
         .connect_authenticated()
         .expect("connect to observed webOS TV");
@@ -200,7 +200,7 @@ fn legacy_screen_endpoints_are_unavailable_and_do_not_change_state() {
 // https://github.com/Staphylococcus/LG_Buddy/issues/51#issuecomment-5176463406
 #[test]
 fn power_off_transitions_active_tv_and_rejects_immediate_registration() {
-    let server = ObservedWebOsTvServer::active(ObservedWebOsInput::Hdmi3);
+    let server = WebOsTestServer::active(WebOsTestInput::Hdmi3);
     let mut client = server
         .connect_authenticated()
         .expect("connect to observed webOS TV");

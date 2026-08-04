@@ -55,7 +55,7 @@ impl WebOsEndpoint {
         }
     }
 
-    fn wss_at(address: SocketAddr) -> Self {
+    pub(super) fn wss_at(address: SocketAddr) -> Self {
         Self {
             address,
             transport: WebOsTransport::Wss,
@@ -591,28 +591,17 @@ mod tests {
         PlatformAccessToken, PlatformAccessTokenAcquisitionError, PlatformAccessTokenStore,
         PlatformAccessTokenStoreError, PlatformAccessTokenStoreOperation,
     };
-    use crate::web_os::test_support::{
-        ObservedWebOsInput, ObservedWebOsTvServer, ScriptedWebOsPeer, ScriptedWebOsServer,
-    };
+    use crate::web_os::test_support::{WebOsTestInput, WebOsTestScenario, WebOsTestServer};
     use crate::web_os::{WebOsPowerStateError, WebOsRegistrationError};
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
-    use rustls::crypto::ring;
-    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-    use rustls::{ServerConfig, ServerConnection, StreamOwned};
     use serde_json::json;
     use std::fs;
-    use std::net::{TcpListener, TcpStream};
+    use std::net::TcpListener;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::Arc;
-    use std::thread::{self, JoinHandle};
     use std::time::Duration;
-    use tungstenite::accept;
 
     const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
     const RESPONSE_TIMEOUT: Duration = Duration::from_millis(200);
-    const TEST_CERTIFICATE_DER: &str = "MIIBkzCCATmgAwIBAgIUGCxGaL477t4FECFewoE+24e3aWQwCgYIKoZIzj0EAwIwHjEcMBoGA1UEAwwTTEcgQnVkZHkgRDMgVGVzdCBUVjAgFw0yNjA3MTEyMDUyMzBaGA8yMTI2MDYxNzIwNTIzMFowHjEcMBoGA1UEAwwTTEcgQnVkZHkgRDMgVGVzdCBUVjBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABE8Q+pVxjrGZr5oQfOCxyA7rl7PVzI9U7ukGEp3PI7r8dWDlmcrT5GdNVXIhjza7yi9YRRjw66NaWAlQsd1zxZWjUzBRMB0GA1UdDgQWBBQmbnb3C0PKQVuvqb8oT0Ur6tZLkzAfBgNVHSMEGDAWgBQmbnb3C0PKQVuvqb8oT0Ur6tZLkzAPBgNVHRMBAf8EBTADAQH/MAoGCCqGSM49BAMCA0gAMEUCIQDTL/fP5PjETr2XgdN9cBuSkMR8DD0ohRjvya0dfXhM4gIgKe13t3ClUgKULtYbtIa3mwcSCwSsAEfoRsZG5zFiCc8=";
-    const TEST_PRIVATE_KEY_DER: &str = "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgRQOBcIAKtXbi9IkKmq6PBMKSMlLega0uR6twK6hSmYmhRANCAARPEPqVcY6xma+aEHzgscgO65ez1cyPVO7pBhKdzyO6/HVg5ZnK0+RnTVVyIY82u8ovWEUY8OujWlgJULHdc8WV";
     static TEST_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     struct TestDir(PathBuf);
@@ -658,75 +647,9 @@ mod tests {
             .expect("derive test token store")
     }
 
-    struct ScriptedTlsServer {
-        endpoint: WebOsEndpoint,
-        handle: JoinHandle<()>,
-    }
-
-    impl ScriptedTlsServer {
-        fn endpoint(&self) -> WebOsEndpoint {
-            self.endpoint
-        }
-
-        fn finish(self) {
-            self.handle.join().expect("scripted TLS server thread");
-        }
-    }
-
-    fn spawn_tls_server<F>(script: F) -> ScriptedTlsServer
-    where
-        F: FnOnce(&mut ScriptedWebOsPeer<StreamOwned<ServerConnection, TcpStream>>)
-            + Send
-            + 'static,
-    {
-        let certificate = CertificateDer::from(
-            STANDARD
-                .decode(TEST_CERTIFICATE_DER)
-                .expect("decode test certificate"),
-        );
-        let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
-            STANDARD
-                .decode(TEST_PRIVATE_KEY_DER)
-                .expect("decode test private key"),
-        ));
-        let provider = Arc::new(ring::default_provider());
-        let config = ServerConfig::builder_with_provider(provider)
-            .with_safe_default_protocol_versions()
-            .expect("ring supports default TLS versions")
-            .with_no_client_auth()
-            .with_single_cert(vec![certificate], private_key)
-            .expect("build test TLS config");
-
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind scripted TLS server");
-        let endpoint = WebOsEndpoint::wss_at(listener.local_addr().expect("server address"));
-        let handle = thread::spawn(move || {
-            let (stream, _) = listener.accept().expect("accept TLS client");
-            let connection =
-                ServerConnection::new(Arc::new(config)).expect("create TLS connection");
-            let stream = StreamOwned::new(connection, stream);
-            let socket = accept(stream).expect("accept secure websocket");
-            let mut peer = ScriptedWebOsPeer::from_socket(socket);
-            script(&mut peer);
-        });
-        ScriptedTlsServer { endpoint, handle }
-    }
-
     #[test]
     fn requests_use_stable_ids_and_return_the_matching_response() {
-        let server = ScriptedWebOsServer::spawn(|peer| {
-            for sequence in 0..2 {
-                let request = peer.receive_json();
-                let request_id = format!("request_{sequence}");
-                assert_eq!(request["id"], request_id);
-                assert_eq!(request["type"], "request");
-                assert_eq!(request["uri"], format!("ssap://test/{sequence}"));
-                peer.send_json(json!({
-                    "id": request_id,
-                    "type": "response",
-                    "payload": {"sequence": sequence},
-                }));
-            }
-        });
+        let server = WebOsTestServer::for_scenario(WebOsTestScenario::ProtocolEcho);
         let mut client = WebOsClient::connect(server.endpoint(), CONNECT_TIMEOUT, RESPONSE_TIMEOUT)
             .expect("connect client");
 
@@ -741,12 +664,7 @@ mod tests {
 
     #[test]
     fn unrelated_frame_is_ignored_before_matching_response() {
-        let server = ScriptedWebOsServer::spawn(|peer| {
-            let request = peer.receive_json();
-            let request_id = request["id"].as_str().expect("request ID");
-            peer.send_json(json!({"id": "subscription_0", "type": "response", "payload": {}}));
-            peer.send_json(json!({"id": request_id, "type": "response", "payload": {"ok": true}}));
-        });
+        let server = WebOsTestServer::for_scenario(WebOsTestScenario::UnrelatedFrameBeforeResponse);
         let mut client = WebOsClient::connect(server.endpoint(), CONNECT_TIMEOUT, RESPONSE_TIMEOUT)
             .expect("connect client");
 
@@ -759,11 +677,7 @@ mod tests {
 
     #[test]
     fn wrong_response_id_is_not_accepted_and_deadline_is_absolute() {
-        let server = ScriptedWebOsServer::spawn(|peer| {
-            let _request = peer.receive_json();
-            peer.send_json(json!({"id": "wrong", "type": "response", "payload": {"ok": true}}));
-            thread::sleep(Duration::from_millis(150));
-        });
+        let server = WebOsTestServer::for_scenario(WebOsTestScenario::WrongResponseId);
         let mut client = WebOsClient::connect(
             server.endpoint(),
             CONNECT_TIMEOUT,
@@ -780,10 +694,7 @@ mod tests {
 
     #[test]
     fn close_before_matching_response_is_typed() {
-        let server = ScriptedWebOsServer::spawn(|peer| {
-            let _request = peer.receive_json();
-            peer.send_close();
-        });
+        let server = WebOsTestServer::for_scenario(WebOsTestScenario::CloseBeforeResponse);
         let mut client = WebOsClient::connect(server.endpoint(), CONNECT_TIMEOUT, RESPONSE_TIMEOUT)
             .expect("connect client");
 
@@ -797,10 +708,7 @@ mod tests {
 
     #[test]
     fn malformed_text_frame_is_typed() {
-        let server = ScriptedWebOsServer::spawn(|peer| {
-            let _request = peer.receive_json();
-            peer.send_text("not-json");
-        });
+        let server = WebOsTestServer::for_scenario(WebOsTestScenario::MalformedTextFrame);
         let mut client = WebOsClient::connect(server.endpoint(), CONNECT_TIMEOUT, RESPONSE_TIMEOUT)
             .expect("connect client");
 
@@ -813,14 +721,7 @@ mod tests {
 
     #[test]
     fn webos_error_preserves_code_and_message() {
-        let server = ScriptedWebOsServer::spawn(|peer| {
-            let request = peer.receive_json();
-            peer.send_json(json!({
-                "id": request["id"],
-                "type": "error",
-                "error": "-401 not permitted",
-            }));
-        });
+        let server = WebOsTestServer::for_scenario(WebOsTestScenario::WebOsError);
         let mut client = WebOsClient::connect(server.endpoint(), CONNECT_TIMEOUT, RESPONSE_TIMEOUT)
             .expect("connect client");
 
@@ -852,14 +753,7 @@ mod tests {
 
     #[test]
     fn wss_accepts_self_signed_tv_certificate() {
-        let server = spawn_tls_server(|peer| {
-            let request = peer.receive_json();
-            peer.send_json(json!({
-                "id": request["id"],
-                "type": "response",
-                "payload": {"encrypted": true},
-            }));
-        });
+        let server = WebOsTestServer::for_tls_scenario(WebOsTestScenario::ProtocolEcho);
         let mut client = WebOsClient::connect(server.endpoint(), CONNECT_TIMEOUT, RESPONSE_TIMEOUT)
             .expect("connect secure client");
 
@@ -877,16 +771,7 @@ mod tests {
         let store = token_store(&dir);
         let original = token("stored-client-key");
         store.persist(&original).expect("persist stored token");
-        let server = ScriptedWebOsServer::spawn(|peer| {
-            let request = peer.receive_json();
-            assert_eq!(request["type"], "register");
-            assert_eq!(request["payload"]["client-key"], "stored-client-key");
-            peer.send_json(json!({
-                "id": request["id"],
-                "type": "registered",
-                "payload": {"client-key": "replacement-client-key"},
-            }));
-        });
+        let server = WebOsTestServer::for_scenario(WebOsTestScenario::StoredTokenReplacement);
         let mut events = Vec::new();
 
         let _client = WebOsClient::connect_authenticated(
@@ -912,7 +797,7 @@ mod tests {
     fn authenticated_client_pairs_and_persists_new_token() {
         let dir = TestDir::new("new-token");
         let store = token_store(&dir);
-        let server = ObservedWebOsTvServer::active(ObservedWebOsInput::Hdmi3);
+        let server = WebOsTestServer::active(WebOsTestInput::Hdmi3);
         let mut events = Vec::new();
 
         let client = WebOsClient::connect_authenticated(
@@ -945,14 +830,7 @@ mod tests {
         let store = token_store(&dir);
         let original = token("rejected-client-key");
         store.persist(&original).expect("persist stored token");
-        let server = ScriptedWebOsServer::spawn(|peer| {
-            let request = peer.receive_json();
-            peer.send_json(json!({
-                "id": request["id"],
-                "type": "response",
-                "payload": {"pairingType": "PROMPT", "returnValue": true},
-            }));
-        });
+        let server = WebOsTestServer::for_scenario(WebOsTestScenario::StoredTokenPairingPrompt);
         let mut events = Vec::new();
 
         let result = WebOsClient::connect_authenticated(
@@ -983,14 +861,7 @@ mod tests {
     fn pairing_rejection_does_not_create_token() {
         let dir = TestDir::new("pairing-rejected");
         let store = token_store(&dir);
-        let server = ScriptedWebOsServer::spawn(|peer| {
-            let request = peer.receive_json();
-            peer.send_json(json!({
-                "id": request["id"],
-                "type": "response",
-                "payload": {"returnValue": false, "errorText": "pairing denied"},
-            }));
-        });
+        let server = WebOsTestServer::for_scenario(WebOsTestScenario::PairingRejected);
 
         let result = WebOsClient::connect_authenticated(
             server.endpoint(),
@@ -1020,10 +891,7 @@ mod tests {
     fn registration_timeout_does_not_create_token() {
         let dir = TestDir::new("registration-timeout");
         let store = token_store(&dir);
-        let server = ScriptedWebOsServer::spawn(|peer| {
-            let _request = peer.receive_json();
-            thread::sleep(Duration::from_millis(150));
-        });
+        let server = WebOsTestServer::for_scenario(WebOsTestScenario::RegistrationTimeout);
 
         let result = WebOsClient::connect_authenticated(
             server.endpoint(),
@@ -1051,14 +919,7 @@ mod tests {
     fn malformed_registration_does_not_create_token() {
         let dir = TestDir::new("malformed-registration");
         let store = token_store(&dir);
-        let server = ScriptedWebOsServer::spawn(|peer| {
-            let request = peer.receive_json();
-            peer.send_json(json!({
-                "id": request["id"],
-                "type": "registered",
-                "payload": {},
-            }));
-        });
+        let server = WebOsTestServer::for_scenario(WebOsTestScenario::RegistrationMissingClientKey);
 
         let result = WebOsClient::connect_authenticated(
             server.endpoint(),
@@ -1087,19 +948,7 @@ mod tests {
         let dir = TestDir::new("persistence-failure");
         let store = token_store(&dir);
         let token_path = store.token_path().to_path_buf();
-        let server = ScriptedWebOsServer::spawn(|peer| {
-            let request = peer.receive_json();
-            peer.send_json(json!({
-                "id": request["id"],
-                "type": "response",
-                "payload": {"pairingType": "PROMPT", "returnValue": true},
-            }));
-            peer.send_json(json!({
-                "id": request["id"],
-                "type": "registered",
-                "payload": {"client-key": "unpersisted-client-key"},
-            }));
-        });
+        let server = WebOsTestServer::active(WebOsTestInput::Hdmi3);
 
         let result = WebOsClient::connect_authenticated(
             server.endpoint(),
@@ -1135,21 +984,7 @@ mod tests {
         store
             .persist(&token("power-state-error-key"))
             .expect("persist stored token");
-        let server = ScriptedWebOsServer::spawn(|peer| {
-            let registration = peer.receive_json();
-            peer.send_json(json!({
-                "id": registration["id"],
-                "type": "registered",
-                "payload": {"client-key": "power-state-error-key"},
-            }));
-
-            let request = peer.receive_json();
-            peer.send_json(json!({
-                "id": request["id"],
-                "type": "error",
-                "error": "-401 not permitted",
-            }));
-        });
+        let server = WebOsTestServer::for_scenario(WebOsTestScenario::PowerStatePermissionDenied);
         let mut client = WebOsClient::connect_authenticated(
             server.endpoint(),
             CONNECT_TIMEOUT,
