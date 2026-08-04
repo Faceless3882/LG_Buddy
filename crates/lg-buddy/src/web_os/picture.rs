@@ -175,29 +175,41 @@ fn parse_backlight_brightness_response(
 }
 
 fn normalize_backlight_brightness(value: &Value) -> Result<u8, WebOsBacklightBrightnessError> {
-    let Value::Number(number) = value else {
-        return Err(WebOsBacklightBrightnessError::InvalidBacklight {
-            value: value.clone(),
-        });
+    let normalized = match value {
+        Value::Number(number) => {
+            let Some(value_as_float) = number.as_f64() else {
+                return Err(WebOsBacklightBrightnessError::InvalidBacklight {
+                    value: value.clone(),
+                });
+            };
+            if value_as_float.fract() != 0.0 {
+                return Err(WebOsBacklightBrightnessError::InvalidBacklight {
+                    value: value.clone(),
+                });
+            }
+            value_as_float
+        }
+        Value::String(value_as_string) => value_as_string.parse::<u64>().map_or_else(
+            |_| {
+                Err(WebOsBacklightBrightnessError::InvalidBacklight {
+                    value: value.clone(),
+                })
+            },
+            |value_as_integer| Ok(value_as_integer as f64),
+        )?,
+        _ => {
+            return Err(WebOsBacklightBrightnessError::InvalidBacklight {
+                value: value.clone(),
+            })
+        }
     };
-
-    let Some(value_as_float) = number.as_f64() else {
-        return Err(WebOsBacklightBrightnessError::InvalidBacklight {
-            value: value.clone(),
-        });
-    };
-    if value_as_float.fract() != 0.0 {
-        return Err(WebOsBacklightBrightnessError::InvalidBacklight {
-            value: value.clone(),
-        });
-    }
-    if !(0.0..=MAX_BACKLIGHT_BRIGHTNESS as f64).contains(&value_as_float) {
+    if !(0.0..=MAX_BACKLIGHT_BRIGHTNESS as f64).contains(&normalized) {
         return Err(WebOsBacklightBrightnessError::BacklightOutOfRange {
             value: value.clone(),
         });
     }
 
-    Ok(value_as_float as u8)
+    Ok(normalized as u8)
 }
 
 #[cfg(test)]
@@ -237,10 +249,6 @@ mod tests {
                 WebOsBacklightBrightnessError::MissingBacklight,
             ),
             (
-                json!({"payload": {"returnValue": true, "settings": {"backlight": "50"}}}),
-                WebOsBacklightBrightnessError::InvalidBacklight { value: json!("50") },
-            ),
-            (
                 json!({"payload": {"returnValue": true, "settings": {"backlight": 101}}}),
                 WebOsBacklightBrightnessError::BacklightOutOfRange { value: json!(101) },
             ),
@@ -257,11 +265,12 @@ mod tests {
     }
 
     #[test]
-    fn integral_numeric_backlight_values_are_normalized() {
+    fn observed_integral_numeric_and_decimal_string_backlight_values_are_normalized() {
         for (wire_value, expected) in [
             (json!(0), 0),
             (json!(42), 42),
             (json!(42.0), 42),
+            (json!("90"), 90),
             (json!(100.0), 100),
             (json!(1e2), 100),
         ] {
@@ -275,7 +284,7 @@ mod tests {
 
     #[test]
     fn fractional_non_numeric_and_out_of_range_values_are_preserved_in_errors() {
-        for wire_value in [json!(42.5), json!("42"), Value::Null] {
+        for wire_value in [json!(42.5), json!("42.0"), json!("bright"), Value::Null] {
             assert!(matches!(
                 normalize_backlight_brightness(&wire_value),
                 Err(WebOsBacklightBrightnessError::InvalidBacklight { value })
@@ -283,7 +292,13 @@ mod tests {
             ));
         }
 
-        for wire_value in [json!(-1), json!(-1.0), json!(101), json!(101.0)] {
+        for wire_value in [
+            json!(-1),
+            json!(-1.0),
+            json!(101),
+            json!(101.0),
+            json!("101"),
+        ] {
             assert!(matches!(
                 normalize_backlight_brightness(&wire_value),
                 Err(WebOsBacklightBrightnessError::BacklightOutOfRange { value })

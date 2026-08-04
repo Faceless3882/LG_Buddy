@@ -44,8 +44,9 @@ fn read_operations_return_the_observed_active_tv_state() {
 
 // Real-TV wire observation:
 // https://github.com/Staphylococcus/LG_Buddy/issues/51#issuecomment-5176459681
+// https://github.com/Staphylococcus/LG_Buddy/issues/50#issuecomment-5179994257
 #[test]
-fn input_switch_changes_the_observed_foreground_app() {
+fn input_switch_changes_the_observed_foreground_app_and_picture_state() {
     let server = ObservedWebOsTvServer::active(ObservedWebOsInput::Hdmi3);
     let mut client = server
         .connect_authenticated()
@@ -67,6 +68,13 @@ fn input_switch_changes_the_observed_foreground_app() {
             .expect("read resulting foreground app")
             .app_id(),
         "com.webos.app.hdmi2"
+    );
+    assert_eq!(
+        client
+            .backlight_brightness()
+            .expect("read resulting backlight brightness")
+            .as_percent(),
+        90
     );
     assert_eq!(server.snapshot().input, ObservedWebOsInput::Hdmi2);
 

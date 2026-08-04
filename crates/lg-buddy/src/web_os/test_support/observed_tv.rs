@@ -59,6 +59,13 @@ impl ObservedWebOsInput {
             other => panic!("no real-TV observation exists for input `{other}`"),
         }
     }
+
+    fn backlight(self) -> Value {
+        match self {
+            Self::Hdmi2 => json!("90"),
+            Self::Hdmi3 => json!(100),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,7 +86,7 @@ impl ObservedWebOsTv {
         Self {
             power_state,
             input,
-            backlight: json!(100),
+            backlight: input.backlight(),
         }
     }
 
@@ -152,6 +159,7 @@ impl ObservedWebOsTv {
                     .expect("switch-input request input ID");
                 assert_eq!(payload, &json!({"inputId": input_id}));
                 self.input = ObservedWebOsInput::from_input_id(input_id);
+                self.backlight = self.input.backlight();
                 response(request_id, json!({"returnValue": true}))
             }
             TURN_OFF_SCREEN_URI => {
