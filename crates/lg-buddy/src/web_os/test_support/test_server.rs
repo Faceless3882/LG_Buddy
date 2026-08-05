@@ -778,18 +778,15 @@ fn permission_set(value: &Value, description: &str) -> HashSet<String> {
         .collect()
 }
 
-// Real-TV observations show that this envelope shape authorizes WRITE_SETTINGS,
-// while a minimal signed permission does not. The TV accepted a tampered signature.
+// Real-TV observations show that this exact signed envelope authorizes WRITE_SETTINGS.
+// Mutating either its signed payload or signature removes that authorization.
 fn has_observed_write_settings_envelope(manifest: &serde_json::Map<String, Value>) -> bool {
-    let mut actual = json!({
+    let actual = json!({
         "appVersion": manifest.get("appVersion"),
         "signatures": manifest.get("signatures"),
         "signed": manifest.get("signed"),
     });
-    let mut expected = write_settings_signed_envelope().clone();
-    normalize_envelope_signatures(&mut actual);
-    normalize_envelope_signatures(&mut expected);
-    actual == expected
+    actual == *write_settings_signed_envelope()
 }
 
 fn write_settings_signed_envelope() -> &'static Value {
@@ -797,20 +794,6 @@ fn write_settings_signed_envelope() -> &'static Value {
         serde_json::from_str(include_str!("write_settings_signed_envelope.json"))
             .expect("parse observed WRITE_SETTINGS registration envelope")
     })
-}
-
-fn normalize_envelope_signatures(envelope: &mut Value) {
-    let Some(signatures) = envelope.get_mut("signatures").and_then(Value::as_array_mut) else {
-        return;
-    };
-    for signature in signatures {
-        if let Some(value) = signature
-            .as_object_mut()
-            .and_then(|signature| signature.get_mut("signature"))
-        {
-            *value = json!("<not-validated-by-tv>");
-        }
-    }
 }
 
 fn require_top_level_permission(permissions: &WebOsTestPermissions, permission: &str, uri: &str) {
@@ -993,7 +976,7 @@ mod tests {
     }
 
     // Real-TV wire observation:
-    // https://github.com/Staphylococcus/LG_Buddy/issues/52#issuecomment-5181831148
+    // https://github.com/Staphylococcus/LG_Buddy/issues/52#issuecomment-5183221492
     #[test]
     fn observed_write_settings_envelope_changes_backlight_to_numeric_state() {
         let server = WebOsTestServer::active(WebOsTestInput::Hdmi2);
@@ -1023,13 +1006,27 @@ mod tests {
         server.finish();
     }
 
-    // Real-TV wire observation: changing the signature text did not remove authorization.
-    // https://github.com/Staphylococcus/LG_Buddy/issues/52#issuecomment-5181933079
+    // Real-TV wire observation: mutating a byte inside the signature removed authorization.
+    // https://github.com/Staphylococcus/LG_Buddy/issues/52#issuecomment-5183221492
     #[test]
-    fn tampered_observed_signature_still_authorizes_backlight_write() {
+    fn tampered_observed_signature_does_not_authorize_backlight_write() {
         let server = WebOsTestServer::active(WebOsTestInput::Hdmi2);
         let mut envelope = write_settings_signed_envelope().clone();
-        envelope["signatures"][0]["signature"] = json!("tampered-signature");
+        let signature = envelope["signatures"][0]["signature"]
+            .as_str()
+            .expect("observed signature");
+        let encoded_signature_start = signature.rfind('.').expect("signature separator") + 1;
+        let replacement = if signature.as_bytes()[encoded_signature_start] == b'A' {
+            "B"
+        } else {
+            "A"
+        };
+        let mut tampered_signature = signature.to_string();
+        tampered_signature.replace_range(
+            encoded_signature_start..=encoded_signature_start,
+            replacement,
+        );
+        envelope["signatures"][0]["signature"] = json!(tampered_signature);
         let mut socket = connect_registered(&server, &["READ_SETTINGS"], Some(envelope));
 
         assert_eq!(
@@ -1038,10 +1035,44 @@ mod tests {
                 "request_0",
                 SET_SYSTEM_SETTINGS_URI,
                 json!({"category": "picture", "settings": {"backlight": 75}}),
-            )["payload"],
-            json!({"method": "setSystemSettings", "returnValue": true})
+            ),
+            json!({
+                "id": "request_0",
+                "type": "error",
+                "error": "401 insufficient permissions",
+                "payload": {},
+            })
         );
-        assert_eq!(read_backlight(&mut socket, "request_1"), json!(75));
+        assert_eq!(read_backlight(&mut socket, "request_1"), json!("90"));
+
+        drop(socket);
+        server.finish();
+    }
+
+    // Real-TV wire observation: reducing the signed permission list removed authorization.
+    // https://github.com/Staphylococcus/LG_Buddy/issues/52#issuecomment-5183221492
+    #[test]
+    fn reduced_observed_signed_permissions_do_not_authorize_backlight_write() {
+        let server = WebOsTestServer::active(WebOsTestInput::Hdmi2);
+        let mut envelope = write_settings_signed_envelope().clone();
+        envelope["signed"]["permissions"] = json!(["WRITE_SETTINGS"]);
+        let mut socket = connect_registered(&server, &["READ_SETTINGS"], Some(envelope));
+
+        assert_eq!(
+            exchange(
+                &mut socket,
+                "request_0",
+                SET_SYSTEM_SETTINGS_URI,
+                json!({"category": "picture", "settings": {"backlight": 75}}),
+            ),
+            json!({
+                "id": "request_0",
+                "type": "error",
+                "error": "401 insufficient permissions",
+                "payload": {},
+            })
+        );
+        assert_eq!(read_backlight(&mut socket, "request_1"), json!("90"));
 
         drop(socket);
         server.finish();
