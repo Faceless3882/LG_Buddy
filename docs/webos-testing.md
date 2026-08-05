@@ -44,6 +44,8 @@ scenarios.
 Its stateful TV behavior includes:
 
 - changing the foreground application after an input switch
+- changing picture backlight after an authorized write and exposing the numeric
+  result through a later read
 - moving between `Active` and `Screen Off`
 - moving to `Power Off` and rejecting an immediate new registration
 
