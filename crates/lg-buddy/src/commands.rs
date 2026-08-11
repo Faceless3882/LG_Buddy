@@ -1,13 +1,11 @@
 use std::env;
 use std::io::{self, Write};
 use std::net::Ipv4Addr;
-use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
 use std::process::Output;
 use std::time::Duration;
 
-use crate::auth::resolve_bscpylgtv_auth_context_from_env;
 use crate::config::{load_config, resolve_config_path_from_env, Config};
 use crate::events::RuntimeEvent;
 use crate::lifecycle::ThreadSleeper;
@@ -16,9 +14,7 @@ use crate::notifications::{FreedesktopNotifier, Notification, NotificationError,
 use crate::state::{
     ScreenOwnershipMarker, StateScope, SystemSleepAttemptState, SystemSleepCycleState,
 };
-use crate::tv::{
-    BscpylgtvCommandClient, OledBrightness, TvClient, TvDevice, UserScopedBscpylgtvCommandLauncher,
-};
+use crate::tv::{build_tv_client, OledBrightness, TvClient, TvClientBuildOptions, TvDevice};
 use crate::wol::UdpWakeOnLanSender;
 use crate::{BrightnessCommand, RunError, StartupMode};
 
@@ -261,8 +257,12 @@ pub fn run_sleep_pre_for_event<W: Write>(
     let marker = ScreenOwnershipMarker::from_env(StateScope::System).map_err(RunError::StateDir)?;
     let cycle_state =
         SystemSleepCycleState::from_env(StateScope::System).map_err(RunError::StateDir)?;
-    let tv_client =
-        build_tv_client(&config_path)?.with_command_timeout(SYSTEM_PRE_SLEEP_TV_COMMAND_TIMEOUT);
+    let tv_client = build_tv_client(
+        &config_path,
+        config.tv_ip,
+        TvClientBuildOptions::production()
+            .with_legacy_command_timeout(SYSTEM_PRE_SLEEP_TV_COMMAND_TIMEOUT),
+    )?;
     let sleeper = ThreadSleeper;
 
     lifecycle::handle_system_suspend_with(
@@ -280,7 +280,11 @@ pub fn run_sleep<W: Write>(writer: &mut W) -> Result<(), RunError> {
     let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
     let config = load_config(&config_path).map_err(RunError::Config)?;
     let marker = ScreenOwnershipMarker::from_env(StateScope::System).map_err(RunError::StateDir)?;
-    let tv_client = build_tv_client(&config_path)?;
+    let tv_client = build_tv_client(
+        &config_path,
+        config.tv_ip,
+        TvClientBuildOptions::production(),
+    )?;
     let detector = JournalctlSleepDetector::default();
     let sleeper = ThreadSleeper;
 
@@ -295,8 +299,12 @@ pub fn run_nm_pre_down<W: Write>(writer: &mut W) -> Result<(), RunError> {
     let marker = ScreenOwnershipMarker::from_env(StateScope::System).map_err(RunError::StateDir)?;
     let attempt_state =
         SystemSleepAttemptState::from_env(StateScope::System).map_err(RunError::StateDir)?;
-    let tv_client =
-        build_tv_client(&config_path)?.with_command_timeout(SYSTEM_PRE_SLEEP_TV_COMMAND_TIMEOUT);
+    let tv_client = build_tv_client(
+        &config_path,
+        config.tv_ip,
+        TvClientBuildOptions::production()
+            .with_legacy_command_timeout(SYSTEM_PRE_SLEEP_TV_COMMAND_TIMEOUT),
+    )?;
     let sleeper = ThreadSleeper;
     let mut bus = match crate::session_bus::new_system_bus_client() {
         Ok(bus) => bus,
@@ -339,7 +347,11 @@ pub fn run_brightness<W: Write>(
             run_brightness_prompt_with(writer, &config, deps)
         }
         BrightnessCommand::Get | BrightnessCommand::Set(_) => {
-            let tv_client = build_tv_client(&config_path)?;
+            let tv_client = build_tv_client(
+                &config_path,
+                config.tv_ip,
+                TvClientBuildOptions::production(),
+            )?;
             run_brightness_command_with(writer, &config, command, &tv_client)
         }
     }
@@ -349,7 +361,11 @@ pub fn run_startup<W: Write>(writer: &mut W, mode: StartupMode) -> Result<(), Ru
     let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
     let config = load_config(&config_path).map_err(RunError::Config)?;
     let marker = ScreenOwnershipMarker::from_env(StateScope::System).map_err(RunError::StateDir)?;
-    let tv_client = build_tv_client(&config_path)?;
+    let tv_client = build_tv_client(
+        &config_path,
+        config.tv_ip,
+        TvClientBuildOptions::production(),
+    )?;
     let wol_sender = UdpWakeOnLanSender::default();
     let sleeper = ThreadSleeper;
     let network_waiter = NmOnlineNetworkWaiter::default();
@@ -369,7 +385,11 @@ pub fn run_system_resume<W: Write>(writer: &mut W) -> Result<(), RunError> {
     let marker = ScreenOwnershipMarker::from_env(StateScope::System).map_err(RunError::StateDir)?;
     let attempt_state =
         SystemSleepAttemptState::from_env(StateScope::System).map_err(RunError::StateDir)?;
-    let tv_client = build_tv_client(&config_path)?;
+    let tv_client = build_tv_client(
+        &config_path,
+        config.tv_ip,
+        TvClientBuildOptions::production(),
+    )?;
     let wol_sender = UdpWakeOnLanSender::default();
     let sleeper = ThreadSleeper;
     let network_waiter = NmOnlineNetworkWaiter::default();
@@ -435,7 +455,11 @@ fn fail_open_nm_pre_down_after_system_bus_error<W: Write, E: std::fmt::Display>(
 pub fn run_shutdown<W: Write>(writer: &mut W) -> Result<(), RunError> {
     let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
     let config = load_config(&config_path).map_err(RunError::Config)?;
-    let tv_client = build_tv_client(&config_path)?;
+    let tv_client = build_tv_client(
+        &config_path,
+        config.tv_ip,
+        TvClientBuildOptions::production(),
+    )?;
     let reboot_detector = SystemctlRebootDetector::default();
 
     lifecycle::run_shutdown_with(writer, &config, &tv_client, &reboot_detector)
@@ -443,17 +467,6 @@ pub fn run_shutdown<W: Write>(writer: &mut W) -> Result<(), RunError> {
 
 pub fn run_screen_on<W: Write>(writer: &mut W) -> Result<(), RunError> {
     crate::screen::run_screen_on_from_env(writer)
-}
-
-fn build_tv_client(
-    config_path: &Path,
-) -> Result<BscpylgtvCommandClient<UserScopedBscpylgtvCommandLauncher>, RunError> {
-    let auth_context =
-        resolve_bscpylgtv_auth_context_from_env(config_path).map_err(RunError::AuthContext)?;
-
-    Ok(BscpylgtvCommandClient::from_env()
-        .with_auth_context(auth_context)
-        .with_launcher(UserScopedBscpylgtvCommandLauncher))
 }
 
 fn run_brightness_command_with<W: Write, C: TvClient>(
@@ -1837,7 +1850,11 @@ mod tests {
     }
 
     fn client_for_mock(mock: &MockBscpylgtv) -> BscpylgtvCommandClient {
-        BscpylgtvCommandClient::with_args(mock.command_path(), mock.command_args())
+        BscpylgtvCommandClient::with_args(
+            std::net::Ipv4Addr::new(192, 0, 2, 42),
+            mock.command_path(),
+            mock.command_args(),
+        )
     }
 
     fn assert_call_commands(mock: &MockBscpylgtv, expected: &[&str]) {

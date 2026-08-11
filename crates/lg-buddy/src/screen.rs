@@ -1,10 +1,8 @@
 use std::env;
 use std::io::{self, Write};
-use std::path::Path;
 use std::thread;
 use std::time::Duration;
 
-use crate::auth::resolve_bscpylgtv_auth_context_from_env;
 use crate::config::{
     load_config, resolve_config_path_from_env, Config, HdmiInput, MacAddress, ScreenRestorePolicy,
 };
@@ -17,9 +15,7 @@ use crate::policy::{
 use crate::runtime_phase::NoopRuntimePhaseProvider;
 use crate::runtime_phase::{LogindRuntimePhaseProvider, RuntimePhaseProvider, RuntimePhaseRead};
 use crate::state::{ScreenOwnershipMarker, StateScope};
-use crate::tv::{
-    BscpylgtvCommandClient, CurrentInput, TvClient, TvDevice, UserScopedBscpylgtvCommandLauncher,
-};
+use crate::tv::{build_tv_client, CurrentInput, TvClient, TvClientBuildOptions, TvDevice};
 use crate::wol::{UdpWakeOnLanSender, WakeOnLanSender};
 use crate::RunError;
 
@@ -181,7 +177,11 @@ pub(crate) fn run_screen_off_from_env_for_event<W: Write>(
     let config = load_config(&config_path).map_err(RunError::Config)?;
     let marker =
         ScreenOwnershipMarker::from_env(StateScope::Session).map_err(RunError::StateDir)?;
-    let tv_client = build_tv_client(&config_path)?;
+    let tv_client = build_tv_client(
+        &config_path,
+        config.tv_ip,
+        TvClientBuildOptions::production(),
+    )?;
     let mut phase_provider = LogindRuntimePhaseProvider::from_system_bus();
     let lifecycle_status =
         SystemMarkerLifecycleStatusProvider::from_env().map_err(RunError::StateDir)?;
@@ -215,7 +215,11 @@ pub(crate) fn run_screen_on_from_env_for_event<W: Write>(
     let config = load_config(&config_path).map_err(RunError::Config)?;
     let marker =
         ScreenOwnershipMarker::from_env(StateScope::Session).map_err(RunError::StateDir)?;
-    let tv_client = build_tv_client(&config_path)?;
+    let tv_client = build_tv_client(
+        &config_path,
+        config.tv_ip,
+        TvClientBuildOptions::production(),
+    )?;
     let wol_sender = UdpWakeOnLanSender::default();
     let sleeper = ThreadSleeper;
     let mut phase_provider = LogindRuntimePhaseProvider::from_system_bus();
@@ -1105,17 +1109,6 @@ fn screen_on_retry_delay(attempt: u32) -> Duration {
     )
 }
 
-fn build_tv_client(
-    config_path: &Path,
-) -> Result<BscpylgtvCommandClient<UserScopedBscpylgtvCommandLauncher>, RunError> {
-    let auth_context =
-        resolve_bscpylgtv_auth_context_from_env(config_path).map_err(RunError::AuthContext)?;
-
-    Ok(BscpylgtvCommandClient::from_env()
-        .with_auth_context(auth_context)
-        .with_launcher(UserScopedBscpylgtvCommandLauncher))
-}
-
 #[cfg(test)]
 mod tests {
     mod support {
@@ -1641,7 +1634,11 @@ mod tests {
     }
 
     fn client_for_mock(mock: &MockBscpylgtv) -> BscpylgtvCommandClient {
-        BscpylgtvCommandClient::with_args(mock.command_path(), mock.command_args())
+        BscpylgtvCommandClient::with_args(
+            std::net::Ipv4Addr::new(192, 0, 2, 42),
+            mock.command_path(),
+            mock.command_args(),
+        )
     }
 
     fn assert_call_commands(mock: &MockBscpylgtv, expected: &[&str]) {

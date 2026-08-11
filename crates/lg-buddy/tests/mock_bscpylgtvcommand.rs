@@ -1,7 +1,7 @@
 mod support;
 
 use lg_buddy::config::HdmiInput;
-use lg_buddy::tv::{BscpylgtvCommandClient, OledBrightness, TvClient, TvError};
+use lg_buddy::tv::{BscpylgtvCommandClient, CurrentInput, OledBrightness, TvClient, TvErrorKind};
 use std::net::Ipv4Addr;
 use support::MockBscpylgtv;
 
@@ -11,22 +11,21 @@ fn mock_get_input_matches_real_shape() {
     let client = mock_client(&mock);
 
     let input = client
-        .get_input(ip("10.0.0.39"))
+        .current_input()
         .expect("mock get_input should succeed");
 
-    assert_eq!(input, "com.webos.app.hdmi3");
+    assert_eq!(input, CurrentInput::Hdmi(HdmiInput::Hdmi3));
 }
 
 #[test]
-fn mock_set_input_returns_realistic_success_payload() {
+fn mock_set_input_succeeds_and_updates_state() {
     let mock = MockBscpylgtv::new("mock-set-input");
     let client = mock_client(&mock);
 
-    let output = client
-        .set_input(ip("10.0.0.39"), HdmiInput::Hdmi2)
+    client
+        .set_input(HdmiInput::Hdmi2)
         .expect("mock set_input should succeed");
 
-    assert_eq!(output.stdout(), "{'returnValue': True}\n");
     assert_eq!(mock.state_snapshot().input, "HDMI_2");
     assert!(mock.state_snapshot().screen_on);
 }
@@ -40,11 +39,10 @@ fn planned_set_input_success_preserves_normal_state_updates() {
     mock.queue_set_input_wake_success();
     let client = mock_client(&mock);
 
-    let output = client
-        .set_input(ip("10.0.0.39"), HdmiInput::Hdmi4)
+    client
+        .set_input(HdmiInput::Hdmi4)
         .expect("planned set_input should succeed");
 
-    assert_eq!(output.stdout(), "{'returnValue': True}\n");
     let state = mock.state_snapshot();
     assert!(state.power_on);
     assert!(state.screen_on);
@@ -56,11 +54,10 @@ fn mock_set_settings_updates_backlight() {
     let mock = MockBscpylgtv::new("mock-set-settings");
     let client = mock_client(&mock);
 
-    let output = client
-        .set_oled_brightness(ip("10.0.0.39"), brightness(70))
+    client
+        .set_oled_brightness(brightness(70))
         .expect("mock set_oled_brightness should succeed");
 
-    assert_eq!(output.stdout(), "{'returnValue': True}\n");
     assert_eq!(mock.state_snapshot().backlight, 70);
 }
 
@@ -71,7 +68,7 @@ fn mock_get_picture_settings_includes_backlight() {
     let client = mock_client(&mock);
 
     let brightness = client
-        .get_oled_brightness(ip("10.0.0.39"))
+        .oled_brightness()
         .expect("mock get_oled_brightness should succeed");
 
     assert_eq!(brightness.as_percent(), 62);
@@ -83,27 +80,20 @@ fn mock_turn_screen_on_substate_error_matches_real_traceback_shape() {
     let client = mock_client(&mock);
 
     let err = client
-        .turn_screen_on(ip("10.0.0.39"))
+        .unblank_screen()
         .expect_err("substate mismatch should fail");
 
-    match err {
-        TvError::CommandFailed { status, output, .. } => {
-            assert_eq!(status, Some(1));
-            assert!(
-                output
-                    .stderr()
-                    .contains("bscpylgtv.exceptions.PyLGTVCmdError"),
-                "stderr was: {}",
-                output.stderr()
-            );
-            assert!(
-                output.stderr().contains("errorCode': '-102'"),
-                "stderr was: {}",
-                output.stderr()
-            );
-        }
-        other => panic!("expected command failure, got {other:?}"),
-    }
+    assert_eq!(err.kind(), TvErrorKind::ScreenUnblankSubstateMismatch);
+    assert!(
+        err.detail().contains("bscpylgtv.exceptions.PyLGTVCmdError"),
+        "detail was: {}",
+        err.detail()
+    );
+    assert!(
+        err.detail().contains("errorCode': '-102'"),
+        "detail was: {}",
+        err.detail()
+    );
 }
 
 #[test]
@@ -112,18 +102,16 @@ fn mock_tracks_screen_and_power_state_transitions() {
     let client = mock_client(&mock);
 
     client
-        .turn_screen_off(ip("10.0.0.39"))
+        .blank_screen()
         .expect("turn_screen_off should succeed");
     assert!(!mock.state_snapshot().screen_on);
 
     client
-        .turn_screen_on(ip("10.0.0.39"))
+        .unblank_screen()
         .expect("turn_screen_on should succeed from blank state");
     assert!(mock.state_snapshot().screen_on);
 
-    client
-        .power_off(ip("10.0.0.39"))
-        .expect("power_off should succeed");
+    client.power_off().expect("power_off should succeed");
     let state = mock.state_snapshot();
     assert!(!state.power_on);
     assert!(!state.screen_on);
@@ -134,20 +122,14 @@ fn mock_rejects_input_queries_when_powered_off() {
     let mock = MockBscpylgtv::new("mock-powered-off-query");
     let client = mock_client(&mock);
 
-    client
-        .power_off(ip("10.0.0.39"))
-        .expect("power_off should succeed");
+    client.power_off().expect("power_off should succeed");
 
     let err = client
-        .get_input(ip("10.0.0.39"))
+        .current_input()
         .expect_err("get_input should fail when off");
 
-    match err {
-        TvError::CommandFailed { output, .. } => {
-            assert!(output.stderr().contains("TV is off"));
-        }
-        other => panic!("expected command failure, got {other:?}"),
-    }
+    assert_eq!(err.kind(), TvErrorKind::Rejected);
+    assert!(err.detail().contains("TV is off"));
 }
 
 #[test]
@@ -157,10 +139,10 @@ fn mock_records_invocations_and_can_override_outputs() {
     let client = mock_client(&mock);
 
     let input = client
-        .get_input(ip("10.0.0.39"))
+        .current_input()
         .expect("planned get_input should succeed");
 
-    assert_eq!(input, "com.webos.app.hdmi2");
+    assert_eq!(input, CurrentInput::Hdmi(HdmiInput::Hdmi2));
     assert_eq!(
         mock.calls()
             .into_iter()
@@ -175,7 +157,7 @@ fn mock_records_invocations_and_can_override_outputs() {
 }
 
 fn mock_client(mock: &MockBscpylgtv) -> BscpylgtvCommandClient {
-    BscpylgtvCommandClient::with_args(mock.command_path(), mock.command_args())
+    BscpylgtvCommandClient::with_args(ip("10.0.0.39"), mock.command_path(), mock.command_args())
 }
 
 fn ip(value: &str) -> Ipv4Addr {

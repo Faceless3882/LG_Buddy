@@ -1,5 +1,6 @@
 //! Native LG webOS protocol support.
 
+mod adapter;
 mod client;
 mod control;
 mod input;
@@ -13,6 +14,7 @@ mod screen;
 mod test_support;
 mod tls;
 
+pub use adapter::WebOsTvClient;
 pub(crate) use client::WebOsClientRegistration;
 pub use client::{
     WebOsAuthenticatedClientError, WebOsAuthenticationEvent, WebOsClient, WebOsClientError,

@@ -114,10 +114,12 @@ behavior is part of the scenario. These tests should focus on LG Buddy outcomes:
 policy decisions, retries, state ownership, command results, and user-visible
 behavior. They should not know the normal webOS wire response shape.
 
-As the native client moves behind the TV domain boundary, the same server can
-support tests of `TvDevice`, command orchestration, and acceptance scenarios.
-The characterization suite remains responsible for documenting and guarding
-the observed device contract represented by the server.
+The profile-bound native adapter uses the same server to cover the complete
+`TvClient` contract, session reuse, transport invalidation, later reconnection,
+and ambiguous-write no-replay behavior. The server can also support higher-level
+tests of `TvDevice`, command orchestration, and acceptance scenarios. The
+characterization suite remains responsible for documenting and guarding the
+observed device contract represented by the server.
 
 A passing mock-backed functionality test proves LG Buddy behavior against the
 current device model. It is not evidence that an unverified device behavior is
