@@ -10,34 +10,41 @@ use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::auth::{BscpylgtvAuthContext, SystemUser};
+use crate::auth::{
+    resolve_bscpylgtv_auth_context_from_env, resolve_config_owner, AuthContextError,
+    BscpylgtvAuthContext, SystemUser,
+};
 use crate::config::{HdmiInput, MacAddress};
+use crate::platform_access_token::{PlatformAccessTokenStore, PlatformAccessTokenStoreError};
+use crate::web_os::{WebOsEndpoint, WebOsTvClient};
 use crate::wol::{WakeOnLanError, WakeOnLanSender};
 
 pub const DEFAULT_BSCPYLGTV_COMMAND_PATH: &str = "/usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand";
 pub const OLED_BRIGHTNESS_MIN: u8 = 0;
 pub const OLED_BRIGHTNESS_MAX: u8 = 100;
+const DEFAULT_WEBOS_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+const DEFAULT_WEBOS_RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CommandOutput {
+struct CommandOutput {
     stdout: String,
     stderr: String,
 }
 
 impl CommandOutput {
-    pub fn new(stdout: String, stderr: String) -> Self {
+    fn new(stdout: String, stderr: String) -> Self {
         Self { stdout, stderr }
     }
 
-    pub fn stdout(&self) -> &str {
+    fn stdout(&self) -> &str {
         &self.stdout
     }
 
-    pub fn stderr(&self) -> &str {
+    fn stderr(&self) -> &str {
         &self.stderr
     }
 
-    pub fn combined_output(&self) -> String {
+    fn combined_output(&self) -> String {
         match (self.stdout.is_empty(), self.stderr.is_empty()) {
             (false, false) => format!("{}{}", self.stdout, self.stderr),
             (false, true) => self.stdout.clone(),
@@ -47,84 +54,89 @@ impl CommandOutput {
     }
 }
 
-#[derive(Debug)]
-pub enum TvError {
-    Io {
-        command: &'static str,
-        source: io::Error,
-    },
-    CommandFailed {
-        command: &'static str,
-        status: Option<i32>,
-        output: CommandOutput,
-    },
-    InvalidOutput {
-        command: &'static str,
-        output: CommandOutput,
-        message: &'static str,
-    },
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TvOperation {
+    ReadInput,
+    SetInput,
+    ReadOledBrightness,
+    SetOledBrightness,
+    PowerOff,
+    BlankScreen,
+    UnblankScreen,
+}
+
+impl TvOperation {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ReadInput => "read input",
+            Self::SetInput => "set input",
+            Self::ReadOledBrightness => "read OLED brightness",
+            Self::SetOledBrightness => "set OLED brightness",
+            Self::PowerOff => "power off",
+            Self::BlankScreen => "blank screen",
+            Self::UnblankScreen => "unblank screen",
+        }
+    }
+}
+
+impl fmt::Display for TvOperation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TvErrorKind {
+    Transport,
+    Authentication,
+    Rejected,
+    InvalidResponse,
+    ScreenUnblankSubstateMismatch,
+    Internal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TvError {
+    operation: TvOperation,
+    kind: TvErrorKind,
+    detail: String,
 }
 
 impl fmt::Display for TvError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Io { command, source } => {
-                write!(f, "failed to run `{command}`: {source}")
-            }
-            Self::CommandFailed {
-                command,
-                status,
-                output,
-            } => {
-                write!(
-                    f,
-                    "`{command}` failed with status {}",
-                    status
-                        .map(|code| code.to_string())
-                        .unwrap_or_else(|| "terminated by signal".to_string())
-                )?;
-
-                let combined = output.combined_output();
-                if !combined.trim().is_empty() {
-                    write!(f, ": {}", combined.trim_end())?;
-                }
-
-                Ok(())
-            }
-            Self::InvalidOutput {
-                command,
-                output,
-                message,
-            } => {
-                write!(f, "invalid output from `{command}`: {message}")?;
-                let combined = output.combined_output();
-                if !combined.trim().is_empty() {
-                    write!(f, ": {}", combined.trim_end())?;
-                }
-                Ok(())
-            }
-        }
+        write!(f, "could not {}: {}", self.operation, self.detail)
     }
 }
 
-impl Error for TvError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Io { source, .. } => Some(source),
-            Self::CommandFailed { .. } | Self::InvalidOutput { .. } => None,
-        }
-    }
-}
+impl Error for TvError {}
 
 impl TvError {
-    pub fn indicates_screen_unblank_substate_mismatch(&self) -> bool {
-        match self {
-            Self::CommandFailed { output, .. } | Self::InvalidOutput { output, .. } => {
-                output.stderr().contains("errorCode': '-102'")
-                    || output.stdout().contains("errorCode': '-102'")
-            }
-            Self::Io { .. } => false,
+    pub fn operation(&self) -> TvOperation {
+        self.operation
+    }
+
+    pub fn kind(&self) -> TvErrorKind {
+        self.kind
+    }
+
+    pub fn detail(&self) -> &str {
+        &self.detail
+    }
+
+    pub(crate) fn new(
+        operation: TvOperation,
+        kind: TvErrorKind,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            operation,
+            kind,
+            detail: detail.into(),
         }
+    }
+
+    pub fn indicates_screen_unblank_substate_mismatch(&self) -> bool {
+        self.kind == TvErrorKind::ScreenUnblankSubstateMismatch
     }
 }
 
@@ -191,17 +203,159 @@ impl fmt::Display for OledBrightness {
 }
 
 pub trait TvClient {
-    fn get_input(&self, tv_ip: Ipv4Addr) -> Result<String, TvError>;
-    fn get_oled_brightness(&self, tv_ip: Ipv4Addr) -> Result<OledBrightness, TvError>;
-    fn set_input(&self, tv_ip: Ipv4Addr, input: HdmiInput) -> Result<CommandOutput, TvError>;
-    fn set_oled_brightness(
-        &self,
-        tv_ip: Ipv4Addr,
-        brightness: OledBrightness,
-    ) -> Result<CommandOutput, TvError>;
-    fn power_off(&self, tv_ip: Ipv4Addr) -> Result<CommandOutput, TvError>;
-    fn turn_screen_off(&self, tv_ip: Ipv4Addr) -> Result<CommandOutput, TvError>;
-    fn turn_screen_on(&self, tv_ip: Ipv4Addr) -> Result<CommandOutput, TvError>;
+    fn current_input(&self) -> Result<CurrentInput, TvError>;
+    fn oled_brightness(&self) -> Result<OledBrightness, TvError>;
+    fn set_input(&self, input: HdmiInput) -> Result<(), TvError>;
+    fn set_oled_brightness(&self, brightness: OledBrightness) -> Result<(), TvError>;
+    fn power_off(&self) -> Result<(), TvError>;
+    fn blank_screen(&self) -> Result<(), TvError>;
+    fn unblank_screen(&self) -> Result<(), TvError>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TvClientImplementation {
+    Bscpylgtv,
+    WebOs,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TvClientBuildOptions {
+    implementation: TvClientImplementation,
+    legacy_command_timeout: Option<Duration>,
+}
+
+impl TvClientBuildOptions {
+    pub(crate) fn production() -> Self {
+        Self {
+            implementation: TvClientImplementation::Bscpylgtv,
+            legacy_command_timeout: None,
+        }
+    }
+
+    pub(crate) fn with_legacy_command_timeout(mut self, timeout: Duration) -> Self {
+        self.legacy_command_timeout = Some(timeout);
+        self
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn webos() -> Self {
+        Self {
+            implementation: TvClientImplementation::WebOs,
+            legacy_command_timeout: None,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum TvClientBuildError {
+    AuthContext(AuthContextError),
+    TokenStore(PlatformAccessTokenStoreError),
+}
+
+impl fmt::Display for TvClientBuildError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AuthContext(error) => write!(f, "{error}"),
+            Self::TokenStore(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+impl Error for TvClientBuildError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::AuthContext(error) => Some(error),
+            Self::TokenStore(error) => Some(error),
+        }
+    }
+}
+
+pub(crate) enum SelectedTvClient {
+    Bscpylgtv(BscpylgtvCommandClient<UserScopedBscpylgtvCommandLauncher>),
+    WebOs(Box<WebOsTvClient>),
+}
+
+impl TvClient for SelectedTvClient {
+    fn current_input(&self) -> Result<CurrentInput, TvError> {
+        match self {
+            Self::Bscpylgtv(client) => client.current_input(),
+            Self::WebOs(client) => client.current_input(),
+        }
+    }
+
+    fn oled_brightness(&self) -> Result<OledBrightness, TvError> {
+        match self {
+            Self::Bscpylgtv(client) => client.oled_brightness(),
+            Self::WebOs(client) => client.oled_brightness(),
+        }
+    }
+
+    fn set_input(&self, input: HdmiInput) -> Result<(), TvError> {
+        match self {
+            Self::Bscpylgtv(client) => client.set_input(input),
+            Self::WebOs(client) => client.set_input(input),
+        }
+    }
+
+    fn set_oled_brightness(&self, brightness: OledBrightness) -> Result<(), TvError> {
+        match self {
+            Self::Bscpylgtv(client) => client.set_oled_brightness(brightness),
+            Self::WebOs(client) => client.set_oled_brightness(brightness),
+        }
+    }
+
+    fn power_off(&self) -> Result<(), TvError> {
+        match self {
+            Self::Bscpylgtv(client) => client.power_off(),
+            Self::WebOs(client) => client.power_off(),
+        }
+    }
+
+    fn blank_screen(&self) -> Result<(), TvError> {
+        match self {
+            Self::Bscpylgtv(client) => client.blank_screen(),
+            Self::WebOs(client) => client.blank_screen(),
+        }
+    }
+
+    fn unblank_screen(&self) -> Result<(), TvError> {
+        match self {
+            Self::Bscpylgtv(client) => client.unblank_screen(),
+            Self::WebOs(client) => client.unblank_screen(),
+        }
+    }
+}
+
+pub(crate) fn build_tv_client(
+    config_path: &Path,
+    tv_ip: Ipv4Addr,
+    options: TvClientBuildOptions,
+) -> Result<SelectedTvClient, TvClientBuildError> {
+    match options.implementation {
+        TvClientImplementation::Bscpylgtv => {
+            let auth_context = resolve_bscpylgtv_auth_context_from_env(config_path)
+                .map_err(TvClientBuildError::AuthContext)?;
+            let mut client = BscpylgtvCommandClient::from_env(tv_ip)
+                .with_auth_context(auth_context)
+                .with_launcher(UserScopedBscpylgtvCommandLauncher);
+            if let Some(timeout) = options.legacy_command_timeout {
+                client = client.with_command_timeout(timeout);
+            }
+            Ok(SelectedTvClient::Bscpylgtv(client))
+        }
+        TvClientImplementation::WebOs => {
+            let owner =
+                resolve_config_owner(config_path).map_err(TvClientBuildError::AuthContext)?;
+            let token_store = PlatformAccessTokenStore::for_primary_profile(config_path, owner)
+                .map_err(TvClientBuildError::TokenStore)?;
+            Ok(SelectedTvClient::WebOs(Box::new(WebOsTvClient::new(
+                WebOsEndpoint::wss(tv_ip),
+                DEFAULT_WEBOS_CONNECT_TIMEOUT,
+                DEFAULT_WEBOS_RESPONSE_TIMEOUT,
+                token_store,
+            ))))
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -248,21 +402,18 @@ impl<'a, C: TvClient> TvDevice<'a, C> {
     pub fn input(&self) -> TvInput<'a, C> {
         TvInput {
             client: self.client,
-            tv_ip: self.tv_ip,
         }
     }
 
     pub fn screen(&self) -> TvScreen<'a, C> {
         TvScreen {
             client: self.client,
-            tv_ip: self.tv_ip,
         }
     }
 
     pub fn picture(&self) -> TvPicture<'a, C> {
         TvPicture {
             client: self.client,
-            tv_ip: self.tv_ip,
         }
     }
 
@@ -277,53 +428,45 @@ impl<'a, C: TvClient> TvDevice<'a, C> {
 #[derive(Debug, Clone, Copy)]
 pub struct TvInput<'a, C> {
     client: &'a C,
-    tv_ip: Ipv4Addr,
 }
 
 impl<'a, C: TvClient> TvInput<'a, C> {
     pub fn current(&self) -> Result<CurrentInput, TvError> {
-        self.client
-            .get_input(self.tv_ip)
-            .map(CurrentInput::from_raw)
+        self.client.current_input()
     }
 
-    pub fn set(&self, input: HdmiInput) -> Result<CommandOutput, TvError> {
-        self.client.set_input(self.tv_ip, input)
+    pub fn set(&self, input: HdmiInput) -> Result<(), TvError> {
+        self.client.set_input(input)
     }
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct TvScreen<'a, C> {
     client: &'a C,
-    tv_ip: Ipv4Addr,
 }
 
 impl<'a, C: TvClient> TvScreen<'a, C> {
-    pub fn blank(&self) -> Result<CommandOutput, TvError> {
-        self.client.turn_screen_off(self.tv_ip)
+    pub fn blank(&self) -> Result<(), TvError> {
+        self.client.blank_screen()
     }
 
-    pub fn unblank(&self) -> Result<CommandOutput, TvError> {
-        self.client.turn_screen_on(self.tv_ip)
+    pub fn unblank(&self) -> Result<(), TvError> {
+        self.client.unblank_screen()
     }
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct TvPicture<'a, C> {
     client: &'a C,
-    tv_ip: Ipv4Addr,
 }
 
 impl<'a, C: TvClient> TvPicture<'a, C> {
     pub fn oled_brightness(&self) -> Result<OledBrightness, TvError> {
-        self.client.get_oled_brightness(self.tv_ip)
+        self.client.oled_brightness()
     }
 
-    pub fn set_oled_brightness(
-        &self,
-        brightness: OledBrightness,
-    ) -> Result<CommandOutput, TvError> {
-        self.client.set_oled_brightness(self.tv_ip, brightness)
+    pub fn set_oled_brightness(&self, brightness: OledBrightness) -> Result<(), TvError> {
+        self.client.set_oled_brightness(brightness)
     }
 }
 
@@ -342,8 +485,8 @@ impl<'a, C: TvClient> TvPower<'a, C> {
         sender.send_magic_packet_to(tv_mac, self.tv_ip)
     }
 
-    pub fn off(&self) -> Result<CommandOutput, TvError> {
-        self.client.power_off(self.tv_ip)
+    pub fn off(&self) -> Result<(), TvError> {
+        self.client.power_off()
     }
 }
 
@@ -480,6 +623,7 @@ impl BscpylgtvCommandLauncher for UserScopedBscpylgtvCommandLauncher {
 
 #[derive(Debug)]
 pub struct BscpylgtvCommandClient<L = DirectBscpylgtvCommandLauncher> {
+    tv_ip: Ipv4Addr,
     command_path: PathBuf,
     command_args: Vec<String>,
     auth_context: BscpylgtvAuthContext,
@@ -487,15 +631,10 @@ pub struct BscpylgtvCommandClient<L = DirectBscpylgtvCommandLauncher> {
     command_timeout: Option<Duration>,
 }
 
-impl Default for BscpylgtvCommandClient<DirectBscpylgtvCommandLauncher> {
-    fn default() -> Self {
-        Self::new(DEFAULT_BSCPYLGTV_COMMAND_PATH)
-    }
-}
-
 impl BscpylgtvCommandClient<DirectBscpylgtvCommandLauncher> {
-    pub fn new(command_path: impl Into<PathBuf>) -> Self {
+    pub fn new(tv_ip: Ipv4Addr, command_path: impl Into<PathBuf>) -> Self {
         Self {
+            tv_ip,
             command_path: command_path.into(),
             command_args: Vec::new(),
             auth_context: BscpylgtvAuthContext::default(),
@@ -504,12 +643,17 @@ impl BscpylgtvCommandClient<DirectBscpylgtvCommandLauncher> {
         }
     }
 
-    pub fn with_args<I, S>(command_path: impl Into<PathBuf>, command_args: I) -> Self
+    pub fn with_args<I, S>(
+        tv_ip: Ipv4Addr,
+        command_path: impl Into<PathBuf>,
+        command_args: I,
+    ) -> Self
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
         Self {
+            tv_ip,
             command_path: command_path.into(),
             command_args: command_args.into_iter().map(Into::into).collect(),
             auth_context: BscpylgtvAuthContext::default(),
@@ -518,10 +662,10 @@ impl BscpylgtvCommandClient<DirectBscpylgtvCommandLauncher> {
         }
     }
 
-    pub fn from_env() -> Self {
+    pub fn from_env(tv_ip: Ipv4Addr) -> Self {
         match env::var_os("LG_BUDDY_BSCPYLGTV_COMMAND") {
-            Some(path) => Self::new(PathBuf::from(path)),
-            None => Self::default(),
+            Some(path) => Self::new(tv_ip, PathBuf::from(path)),
+            None => Self::new(tv_ip, DEFAULT_BSCPYLGTV_COMMAND_PATH),
         }
     }
 }
@@ -529,6 +673,7 @@ impl BscpylgtvCommandClient<DirectBscpylgtvCommandLauncher> {
 impl<L> BscpylgtvCommandClient<L> {
     pub fn with_launcher<T>(self, launcher: T) -> BscpylgtvCommandClient<T> {
         BscpylgtvCommandClient {
+            tv_ip: self.tv_ip,
             command_path: self.command_path,
             command_args: self.command_args,
             auth_context: self.auth_context,
@@ -551,6 +696,10 @@ impl<L> BscpylgtvCommandClient<L> {
         &self.command_path
     }
 
+    pub fn tv_ip(&self) -> Ipv4Addr {
+        self.tv_ip
+    }
+
     pub fn command_args(&self) -> &[String] {
         &self.command_args
     }
@@ -561,7 +710,6 @@ impl<L> BscpylgtvCommandClient<L> {
 
     fn build_invocation(
         &self,
-        tv_ip: Ipv4Addr,
         operation: &'static str,
         extra_args: &[&str],
     ) -> BscpylgtvInvocation {
@@ -572,7 +720,7 @@ impl<L> BscpylgtvCommandClient<L> {
             args.push(key_file_path.to_string_lossy().into_owned());
         }
 
-        args.push(tv_ip.to_string());
+        args.push(self.tv_ip.to_string());
         args.push(operation.to_string());
         args.extend(extra_args.iter().map(|arg| arg.to_string()));
 
@@ -717,76 +865,124 @@ fn current_euid() -> u32 {
 impl<L: BscpylgtvCommandLauncher> BscpylgtvCommandClient<L> {
     fn run_command(
         &self,
-        tv_ip: Ipv4Addr,
+        tv_operation: TvOperation,
         operation: &'static str,
         extra_args: &[&str],
     ) -> Result<CommandOutput, TvError> {
-        let invocation = self.build_invocation(tv_ip, operation, extra_args);
-        let output = self
-            .launcher
-            .run(&invocation)
-            .map_err(|source| TvError::Io {
-                command: operation,
-                source,
-            })?;
+        let invocation = self.build_invocation(operation, extra_args);
+        let output = self.launcher.run(&invocation).map_err(|source| {
+            TvError::new(
+                tv_operation,
+                TvErrorKind::Transport,
+                format!("failed to run `{operation}`: {source}"),
+            )
+        })?;
 
         let rendered = CommandOutput::new(output.stdout().to_string(), output.stderr().to_string());
 
         if output.is_success() {
             Ok(rendered)
         } else {
-            Err(TvError::CommandFailed {
-                command: operation,
-                status: output.status(),
-                output: rendered,
-            })
+            let combined = rendered.combined_output();
+            let status = output
+                .status()
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "terminated by signal".to_string());
+            let mut detail = format!("`{operation}` failed with status {status}");
+            if !combined.trim().is_empty() {
+                detail.push_str(": ");
+                detail.push_str(combined.trim_end());
+            }
+            let kind = if tv_operation == TvOperation::UnblankScreen
+                && (rendered.stderr().contains("errorCode': '-102'")
+                    || rendered.stdout().contains("errorCode': '-102'"))
+            {
+                TvErrorKind::ScreenUnblankSubstateMismatch
+            } else {
+                TvErrorKind::Rejected
+            };
+            Err(TvError::new(tv_operation, kind, detail))
         }
     }
 }
 
 impl<L: BscpylgtvCommandLauncher> TvClient for BscpylgtvCommandClient<L> {
-    fn get_input(&self, tv_ip: Ipv4Addr) -> Result<String, TvError> {
-        let output = self.run_command(tv_ip, "get_input", &[])?;
-        last_non_empty_line(output.stdout()).ok_or(TvError::InvalidOutput {
-            command: "get_input",
-            output,
-            message: "expected a non-empty line in stdout",
+    fn current_input(&self) -> Result<CurrentInput, TvError> {
+        let output = self.run_command(TvOperation::ReadInput, "get_input", &[])?;
+        last_non_empty_line(output.stdout())
+            .map(CurrentInput::from_raw)
+            .ok_or_else(|| {
+                TvError::new(
+                    TvOperation::ReadInput,
+                    TvErrorKind::InvalidResponse,
+                    invalid_command_output_detail(
+                        "get_input",
+                        &output,
+                        "expected a non-empty line in stdout",
+                    ),
+                )
+            })
+    }
+
+    fn oled_brightness(&self) -> Result<OledBrightness, TvError> {
+        let output =
+            self.run_command(TvOperation::ReadOledBrightness, "get_picture_settings", &[])?;
+        parse_backlight(output.stdout()).ok_or_else(|| {
+            TvError::new(
+                TvOperation::ReadOledBrightness,
+                TvErrorKind::InvalidResponse,
+                invalid_command_output_detail(
+                    "get_picture_settings",
+                    &output,
+                    "expected a backlight value in stdout",
+                ),
+            )
         })
     }
 
-    fn get_oled_brightness(&self, tv_ip: Ipv4Addr) -> Result<OledBrightness, TvError> {
-        let output = self.run_command(tv_ip, "get_picture_settings", &[])?;
-        parse_backlight(output.stdout()).ok_or(TvError::InvalidOutput {
-            command: "get_picture_settings",
-            output,
-            message: "expected a backlight value in stdout",
-        })
+    fn set_input(&self, input: HdmiInput) -> Result<(), TvError> {
+        self.run_command(TvOperation::SetInput, "set_input", &[input.as_str()])
+            .map(|_| ())
     }
 
-    fn set_input(&self, tv_ip: Ipv4Addr, input: HdmiInput) -> Result<CommandOutput, TvError> {
-        self.run_command(tv_ip, "set_input", &[input.as_str()])
-    }
-
-    fn set_oled_brightness(
-        &self,
-        tv_ip: Ipv4Addr,
-        brightness: OledBrightness,
-    ) -> Result<CommandOutput, TvError> {
+    fn set_oled_brightness(&self, brightness: OledBrightness) -> Result<(), TvError> {
         let backlight = format!("{{\"backlight\": {brightness}}}");
-        self.run_command(tv_ip, "set_settings", &["picture", backlight.as_str()])
+        self.run_command(
+            TvOperation::SetOledBrightness,
+            "set_settings",
+            &["picture", backlight.as_str()],
+        )
+        .map(|_| ())
     }
 
-    fn power_off(&self, tv_ip: Ipv4Addr) -> Result<CommandOutput, TvError> {
-        self.run_command(tv_ip, "power_off", &[])
+    fn power_off(&self) -> Result<(), TvError> {
+        self.run_command(TvOperation::PowerOff, "power_off", &[])
+            .map(|_| ())
     }
 
-    fn turn_screen_off(&self, tv_ip: Ipv4Addr) -> Result<CommandOutput, TvError> {
-        self.run_command(tv_ip, "turn_screen_off", &[])
+    fn blank_screen(&self) -> Result<(), TvError> {
+        self.run_command(TvOperation::BlankScreen, "turn_screen_off", &[])
+            .map(|_| ())
     }
 
-    fn turn_screen_on(&self, tv_ip: Ipv4Addr) -> Result<CommandOutput, TvError> {
-        self.run_command(tv_ip, "turn_screen_on", &[])
+    fn unblank_screen(&self) -> Result<(), TvError> {
+        self.run_command(TvOperation::UnblankScreen, "turn_screen_on", &[])
+            .map(|_| ())
     }
+}
+
+fn invalid_command_output_detail(
+    command: &'static str,
+    output: &CommandOutput,
+    message: &'static str,
+) -> String {
+    let mut detail = format!("invalid output from `{command}`: {message}");
+    let combined = output.combined_output();
+    if !combined.trim().is_empty() {
+        detail.push_str(": ");
+        detail.push_str(combined.trim_end());
+    }
+    detail
 }
 
 fn last_non_empty_line(output: &str) -> Option<String> {
@@ -824,10 +1020,11 @@ mod tests {
     }
 
     use super::{
-        build_user_scoped_launch_plan, current_euid, BscpylgtvCommandClient,
+        build_tv_client, build_user_scoped_launch_plan, current_euid, BscpylgtvCommandClient,
         BscpylgtvCommandLauncher, BscpylgtvInvocation, BscpylgtvLaunchResult, CommandOutput,
-        CurrentInput, OledBrightness, TvClient, TvDevice, TvError,
-        UserScopedBscpylgtvCommandLauncher, UserScopedLaunchPlan, DEFAULT_BSCPYLGTV_COMMAND_PATH,
+        CurrentInput, OledBrightness, SelectedTvClient, TvClient, TvClientBuildOptions, TvDevice,
+        TvErrorKind, TvOperation, UserScopedBscpylgtvCommandLauncher, UserScopedLaunchPlan,
+        DEFAULT_BSCPYLGTV_COMMAND_PATH,
     };
     use crate::auth::{BscpylgtvAuthContext, SystemUser};
     use crate::config::{HdmiInput, MacAddress};
@@ -838,7 +1035,7 @@ mod tests {
     use std::path::Path;
     use std::rc::Rc;
     use std::time::Duration;
-    use support::{ExecutableScript, MockBscpylgtv};
+    use support::{ExecutableScript, MockBscpylgtv, TestConfigFile};
 
     #[test]
     fn oled_brightness_accepts_boundary_values() {
@@ -865,7 +1062,8 @@ mod tests {
 
     #[test]
     fn default_client_uses_expected_command_path() {
-        let client = BscpylgtvCommandClient::default();
+        let client =
+            BscpylgtvCommandClient::new(ip("192.168.1.42"), DEFAULT_BSCPYLGTV_COMMAND_PATH);
         assert_eq!(
             client.command_path(),
             Path::new(DEFAULT_BSCPYLGTV_COMMAND_PATH)
@@ -881,16 +1079,29 @@ mod tests {
     }
 
     #[test]
+    fn centralized_factory_can_build_both_internal_implementations() {
+        let config = TestConfigFile::new("tv-client-factory");
+        config.write_sample("HDMI_2");
+        let tv_ip = ip("192.0.2.42");
+
+        let production = build_tv_client(config.path(), tv_ip, TvClientBuildOptions::production())
+            .expect("build production TV client");
+        assert!(matches!(production, SelectedTvClient::Bscpylgtv(_)));
+
+        let webos = build_tv_client(config.path(), tv_ip, TvClientBuildOptions::webos())
+            .expect("build internal webOS TV client");
+        assert!(matches!(webos, SelectedTvClient::WebOs(_)));
+    }
+
+    #[test]
     fn get_input_uses_last_non_empty_stdout_line() {
         let mock = MockBscpylgtv::new("tv-get-input");
         mock.queue_success("get_input", "\nignored\ncom.webos.app.hdmi2\n");
 
-        let client = client_for_mock(&mock);
-        let input = client
-            .get_input(ip("192.168.1.42"))
-            .expect("get_input should succeed");
+        let client = client_for_mock(&mock, ip("192.168.1.42"));
+        let input = client.current_input().expect("get_input should succeed");
 
-        assert_eq!(input, "com.webos.app.hdmi2");
+        assert_eq!(input, CurrentInput::Hdmi(HdmiInput::Hdmi2));
         assert_eq!(
             mock.calls()
                 .into_iter()
@@ -909,28 +1120,22 @@ mod tests {
         let mock = MockBscpylgtv::new("tv-get-input-empty");
         mock.queue_success("get_input", "");
 
-        let client = client_for_mock(&mock);
+        let client = client_for_mock(&mock, ip("192.168.1.42"));
         let err = client
-            .get_input(ip("192.168.1.42"))
+            .current_input()
             .expect_err("empty output should fail");
 
-        match err {
-            TvError::InvalidOutput {
-                command, message, ..
-            } => {
-                assert_eq!(command, "get_input");
-                assert_eq!(message, "expected a non-empty line in stdout");
-            }
-            other => panic!("expected invalid output error, got {other:?}"),
-        }
+        assert_eq!(err.operation(), TvOperation::ReadInput);
+        assert_eq!(err.kind(), TvErrorKind::InvalidResponse);
+        assert!(err.detail().contains("expected a non-empty line in stdout"));
     }
 
     #[test]
     fn set_input_passes_expected_arguments() {
         let mock = MockBscpylgtv::new("tv-set-input");
-        let client = client_for_mock(&mock);
+        let client = client_for_mock(&mock, ip("10.0.0.5"));
         client
-            .set_input(ip("10.0.0.5"), HdmiInput::Hdmi3)
+            .set_input(HdmiInput::Hdmi3)
             .expect("set_input should succeed");
 
         assert_eq!(
@@ -949,9 +1154,9 @@ mod tests {
     #[test]
     fn set_oled_brightness_passes_expected_arguments() {
         let mock = MockBscpylgtv::new("tv-set-brightness");
-        let client = client_for_mock(&mock);
+        let client = client_for_mock(&mock, ip("10.0.0.5"));
         client
-            .set_oled_brightness(ip("10.0.0.5"), brightness(65))
+            .set_oled_brightness(brightness(65))
             .expect("set_oled_brightness should succeed");
 
         assert_eq!(
@@ -972,10 +1177,10 @@ mod tests {
     fn get_oled_brightness_reads_backlight_from_picture_settings() {
         let mock = MockBscpylgtv::new("tv-get-brightness");
         mock.set_backlight(72);
-        let client = client_for_mock(&mock);
+        let client = client_for_mock(&mock, ip("10.0.0.5"));
 
         let brightness = client
-            .get_oled_brightness(ip("10.0.0.5"))
+            .oled_brightness()
             .expect("get_oled_brightness should succeed");
 
         assert_eq!(brightness.as_percent(), 72);
@@ -996,21 +1201,17 @@ mod tests {
     fn get_oled_brightness_rejects_missing_backlight_value() {
         let mock = MockBscpylgtv::new("tv-get-brightness-invalid");
         mock.queue_success("get_picture_settings", "{'contrast': 85}\n");
-        let client = client_for_mock(&mock);
+        let client = client_for_mock(&mock, ip("10.0.0.5"));
 
         let err = client
-            .get_oled_brightness(ip("10.0.0.5"))
+            .oled_brightness()
             .expect_err("missing backlight should fail");
 
-        match err {
-            TvError::InvalidOutput {
-                command, message, ..
-            } => {
-                assert_eq!(command, "get_picture_settings");
-                assert_eq!(message, "expected a backlight value in stdout");
-            }
-            other => panic!("expected invalid output error, got {other:?}"),
-        }
+        assert_eq!(err.operation(), TvOperation::ReadOledBrightness);
+        assert_eq!(err.kind(), TvErrorKind::InvalidResponse);
+        assert!(err
+            .detail()
+            .contains("expected a backlight value in stdout"));
     }
 
     #[test]
@@ -1018,7 +1219,7 @@ mod tests {
         let mock = MockBscpylgtv::new("tv-device-current-hdmi");
         mock.set_input("HDMI_4");
 
-        let client = client_for_mock(&mock);
+        let client = client_for_mock(&mock, ip("10.0.0.7"));
         let tv = TvDevice::new(&client, ip("10.0.0.7"));
         let current = tv.input().current().expect("current input should parse");
 
@@ -1030,7 +1231,7 @@ mod tests {
         let mock = MockBscpylgtv::new("tv-device-current-other");
         mock.queue_success("get_input", "com.webos.app.youtube\n");
 
-        let client = client_for_mock(&mock);
+        let client = client_for_mock(&mock, ip("10.0.0.9"));
         let tv = TvDevice::new(&client, ip("10.0.0.9"));
         let current = tv.input().current().expect("current input should parse");
 
@@ -1043,7 +1244,7 @@ mod tests {
     #[test]
     fn tv_screen_blank_uses_domain_facade() {
         let mock = MockBscpylgtv::new("tv-device-screen-blank");
-        let client = client_for_mock(&mock);
+        let client = client_for_mock(&mock, ip("10.0.0.11"));
         let tv = TvDevice::new(&client, ip("10.0.0.11"));
         tv.screen().blank().expect("screen blank should succeed");
 
@@ -1063,7 +1264,7 @@ mod tests {
     #[test]
     fn tv_picture_set_oled_brightness_uses_domain_facade() {
         let mock = MockBscpylgtv::new("tv-device-picture-brightness");
-        let client = client_for_mock(&mock);
+        let client = client_for_mock(&mock, ip("10.0.0.12"));
         let tv = TvDevice::new(&client, ip("10.0.0.12"));
         tv.picture()
             .set_oled_brightness(brightness(40))
@@ -1086,7 +1287,7 @@ mod tests {
     fn tv_picture_reads_oled_brightness_via_domain_facade() {
         let mock = MockBscpylgtv::new("tv-device-picture-read-brightness");
         mock.set_backlight(33);
-        let client = client_for_mock(&mock);
+        let client = client_for_mock(&mock, ip("10.0.0.13"));
         let tv = TvDevice::new(&client, ip("10.0.0.13"));
 
         let brightness = tv
@@ -1110,7 +1311,7 @@ mod tests {
 
     #[test]
     fn tv_power_wake_uses_wake_on_lan_sender() {
-        let client = BscpylgtvCommandClient::default();
+        let client = BscpylgtvCommandClient::new(ip("10.0.0.15"), DEFAULT_BSCPYLGTV_COMMAND_PATH);
         let tv = TvDevice::new(&client, ip("10.0.0.15"));
         let sender = RecordingWakeOnLanSender::default();
         let mac = parse_mac("01:23:45:67:89:ab");
@@ -1123,27 +1324,18 @@ mod tests {
     }
 
     #[test]
-    fn command_failures_preserve_status_and_output() {
+    fn command_failures_preserve_diagnostics_without_exposing_command_output() {
         let mock = MockBscpylgtv::new("tv-command-failure");
         mock.queue_error("turn_screen_on", 7, "failure stderr\n");
-        let client = client_for_mock(&mock);
+        let client = client_for_mock(&mock, ip("10.0.0.8"));
         let err = client
-            .turn_screen_on(ip("10.0.0.8"))
+            .unblank_screen()
             .expect_err("turn_screen_on should fail");
 
-        match err {
-            TvError::CommandFailed {
-                command,
-                status,
-                output,
-            } => {
-                assert_eq!(command, "turn_screen_on");
-                assert_eq!(status, Some(7));
-                assert_eq!(output.stdout(), "");
-                assert_eq!(output.stderr(), "failure stderr\n");
-            }
-            other => panic!("expected command failure, got {other:?}"),
-        }
+        assert_eq!(err.operation(), TvOperation::UnblankScreen);
+        assert_eq!(err.kind(), TvErrorKind::Rejected);
+        assert!(err.detail().contains("failed with status 7"));
+        assert!(err.detail().contains("failure stderr"));
     }
 
     #[test]
@@ -1153,38 +1345,30 @@ mod tests {
             "slow-bscpylgtvcommand",
             "#!/bin/sh\nsleep 5\n",
         );
-        let client = BscpylgtvCommandClient::new(script.path())
+        let client = BscpylgtvCommandClient::new(ip("10.0.0.8"), script.path())
             .with_command_timeout(Duration::from_millis(100));
 
         let err = client
-            .get_input(ip("10.0.0.8"))
+            .current_input()
             .expect_err("slow command should time out");
 
-        match err {
-            TvError::Io { command, source } => {
-                assert_eq!(command, "get_input");
-                assert_eq!(source.kind(), io::ErrorKind::TimedOut);
-                assert!(
-                    source.to_string().contains("timed out after"),
-                    "io error was: {source}"
-                );
-            }
-            other => panic!("expected timeout io error, got {other:?}"),
-        }
+        assert_eq!(err.operation(), TvOperation::ReadInput);
+        assert_eq!(err.kind(), TvErrorKind::Transport);
+        assert!(err.detail().contains("timed out after"));
     }
 
     #[test]
     fn invocation_places_key_file_override_before_tv_ip() {
         let auth_context =
             BscpylgtvAuthContext::new().with_key_file_path("/tmp/lg-buddy/.aiopylgtv.sqlite");
-        let client = BscpylgtvCommandClient::with_args("/usr/bin/mock-bscpylgtv", ["--verbose"])
-            .with_auth_context(auth_context);
-
-        let invocation = client.build_invocation(
+        let client = BscpylgtvCommandClient::with_args(
             ip("192.168.1.42"),
-            "set_input",
-            &[HdmiInput::Hdmi2.as_str()],
-        );
+            "/usr/bin/mock-bscpylgtv",
+            ["--verbose"],
+        )
+        .with_auth_context(auth_context);
+
+        let invocation = client.build_invocation("set_input", &[HdmiInput::Hdmi2.as_str()]);
 
         assert_eq!(invocation.program(), Path::new("/usr/bin/mock-bscpylgtv"));
         assert_eq!(
@@ -1207,12 +1391,12 @@ mod tests {
         let auth_context = BscpylgtvAuthContext::new()
             .with_owner(SystemUser::new("vas", 1000, 1000, "/home/vas"))
             .with_key_file_path("/home/vas/.local/state/lg-buddy/.aiopylgtv.sqlite");
-        let client = BscpylgtvCommandClient::new("/usr/bin/mock-bscpylgtv")
+        let client = BscpylgtvCommandClient::new(ip("10.0.0.8"), "/usr/bin/mock-bscpylgtv")
             .with_auth_context(auth_context)
             .with_launcher(launcher.clone());
 
         client
-            .turn_screen_on(ip("10.0.0.8"))
+            .unblank_screen()
             .expect("custom launcher should succeed");
 
         assert_eq!(
@@ -1233,13 +1417,11 @@ mod tests {
     #[test]
     fn command_timeout_is_attached_to_launcher_invocation() {
         let launcher = RecordingLauncher::default();
-        let client = BscpylgtvCommandClient::new("/usr/bin/mock-bscpylgtv")
+        let client = BscpylgtvCommandClient::new(ip("10.0.0.8"), "/usr/bin/mock-bscpylgtv")
             .with_command_timeout(Duration::from_secs(3))
             .with_launcher(launcher.clone());
 
-        client
-            .power_off(ip("10.0.0.8"))
-            .expect("custom launcher should succeed");
+        client.power_off().expect("custom launcher should succeed");
 
         let calls = launcher.calls();
         assert_eq!(calls.len(), 1);
@@ -1248,26 +1430,22 @@ mod tests {
 
     #[test]
     fn direct_launcher_rejects_user_switch_requests_without_an_explicit_launcher() {
-        let client = BscpylgtvCommandClient::new("/usr/bin/mock-bscpylgtv").with_auth_context(
-            BscpylgtvAuthContext::new().with_owner(SystemUser::new("vas", 1000, 1000, "/home/vas")),
-        );
+        let client = BscpylgtvCommandClient::new(ip("10.0.0.8"), "/usr/bin/mock-bscpylgtv")
+            .with_auth_context(BscpylgtvAuthContext::new().with_owner(SystemUser::new(
+                "vas",
+                1000,
+                1000,
+                "/home/vas",
+            )));
         let err = client
-            .turn_screen_on(ip("10.0.0.8"))
+            .unblank_screen()
             .expect_err("direct launcher should reject owner-user requests");
 
-        match err {
-            TvError::Io { command, source } => {
-                assert_eq!(command, "turn_screen_on");
-                assert_eq!(source.kind(), io::ErrorKind::Unsupported);
-                assert!(
-                    source
-                        .to_string()
-                        .contains("cannot run `bscpylgtvcommand` as user `vas`"),
-                    "io error was: {source}"
-                );
-            }
-            other => panic!("expected io error, got {other:?}"),
-        }
+        assert_eq!(err.operation(), TvOperation::UnblankScreen);
+        assert_eq!(err.kind(), TvErrorKind::Transport);
+        assert!(err
+            .detail()
+            .contains("cannot run `bscpylgtvcommand` as user `vas`"));
     }
 
     #[test]
@@ -1455,8 +1633,8 @@ mod tests {
         value.parse().expect("parse mac address")
     }
 
-    fn client_for_mock(mock: &MockBscpylgtv) -> BscpylgtvCommandClient {
-        BscpylgtvCommandClient::with_args(mock.command_path(), mock.command_args())
+    fn client_for_mock(mock: &MockBscpylgtv, tv_ip: Ipv4Addr) -> BscpylgtvCommandClient {
+        BscpylgtvCommandClient::with_args(tv_ip, mock.command_path(), mock.command_args())
     }
 
     #[derive(Default)]

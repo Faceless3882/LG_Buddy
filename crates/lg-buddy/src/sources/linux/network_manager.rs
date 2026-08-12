@@ -532,7 +532,11 @@ mod tests {
     }
 
     fn client_for_mock(mock: &MockBscpylgtv) -> BscpylgtvCommandClient {
-        BscpylgtvCommandClient::with_args(mock.command_path(), mock.command_args())
+        BscpylgtvCommandClient::with_args(
+            std::net::Ipv4Addr::new(192, 0, 2, 42),
+            mock.command_path(),
+            mock.command_args(),
+        )
     }
 
     fn rendered(output: &[u8]) -> String {

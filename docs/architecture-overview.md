@@ -122,6 +122,7 @@ flowchart LR
 
     subgraph TVBoundary["TV Control Boundary"]
         BSCPY["bscpylgtvcommand"]
+        WEBOS["native webOS session"]
         LGTV["LG TV"]
     end
 
@@ -174,7 +175,8 @@ flowchart LR
     SCREEN --> WOL
     LIFECYCLE --> WOL
 
-    TV --> BSCPY --> LGTV
+    TV -->|"production-selected"| BSCPY --> LGTV
+    TV -.->|"internal / test"| WEBOS --> LGTV
     WOL -->|"magic packet"| LGTV
 ```
 
@@ -232,8 +234,12 @@ The intended split is:
   - ownership marker management
 - `tv.rs`
   - TV transport abstraction
-  - subprocess-backed `bscpylgtvcommand` client
-  - typed facade for input, screen, and power operations
+  - profile-bound `bscpylgtvcommand` adapter
+  - adapter-neutral errors and selected-client construction
+  - typed facade for input, screen, power, and brightness operations
+- `web_os/adapter.rs`
+  - profile-bound native webOS adapter
+  - lazy authenticated session ownership, serialization, reuse, and invalidation
 - `wol.rs`
   - native Wake-on-LAN packet generation and UDP send
 - `backend.rs`
@@ -485,13 +491,20 @@ The TV layer is intentionally split into two levels:
 - low-level transport trait: `TvClient`
 - higher-level domain facade: `TvDevice`
 
-`TvClient` models the transport operations that the current backend can actually perform:
+`TvClient` models adapter-neutral operations for one configured TV profile. The
+target address and implementation-specific credential context are bound when a
+client is constructed; policy cannot redirect a client by passing an address to
+an operation.
 
-- `get_input`
+The current contract covers:
+
+- `current_input`
 - `set_input`
+- `oled_brightness`
+- `set_oled_brightness`
 - `power_off`
-- `turn_screen_off`
-- `turn_screen_on`
+- `blank_screen`
+- `unblank_screen`
 
 `TvDevice` provides a more readable surface to policy code:
 
@@ -501,8 +514,14 @@ The TV layer is intentionally split into two levels:
 - `tv.screen().unblank()`
 - `tv.power().off()`
 - `tv.power().wake(...)`
+- `tv.picture().oled_brightness()`
+- `tv.picture().set_oled_brightness(...)`
 
-This keeps the subprocess client simple while giving command logic a typed domain API.
+Successful effectful operations return no transport-specific output. Failures
+are normalized into typed TV errors, including the screen-unblank substate
+mismatch that policy uses to select its full-wake fallback. Wake-on-LAN keeps
+the configured network identity at `TvDevice`; adapter operations do not accept
+targeting data.
 
 ### Transitional Backend
 
@@ -510,11 +529,20 @@ The current production-side TV backend is still `bscpylgtvcommand`.
 
 The Rust runtime talks to it through `BscpylgtvCommandClient`, which:
 
+- belongs to one configured TV address
 - shells out to the configured command path
-- preserves stdout, stderr, and exit status on failure
-- parses `get_input` output into a typed `CurrentInput`
+- keeps subprocess output and exit status inside the legacy adapter
+- maps reads and failures into the shared domain contract
 
-This is a transitional integration boundary. It keeps the runtime architecture independent from the current Python CLI without requiring a native WebOS client yet.
+`SelectedTvClient` is the internal delegation point for the legacy and native
+implementations. `WebOsTvClient` owns one lazily authenticated websocket
+session behind a mutex, reuses it while healthy, and discards it after transport
+or framing failure. It never replays an effectful operation after an ambiguous
+failure; a later policy operation may establish a new session.
+
+Production construction deliberately selects the legacy variant. The native
+variant is available for internal and scripted-server validation, but there is
+no end-user selection or configuration change at this stage.
 
 ## State Model
 

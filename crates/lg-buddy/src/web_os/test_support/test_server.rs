@@ -62,6 +62,7 @@ pub(in crate::web_os) enum WebOsTestScenario {
     RegistrationMissingClientKey,
     PowerStatePermissionDenied,
     BacklightWriteAcknowledgedWithoutChange,
+    CloseAfterFirstInputWrite,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -286,6 +287,7 @@ struct WebOsTestRuntime {
     tv: WebOsTestTv,
     scenario: WebOsTestScenario,
     connection_count: u64,
+    ambiguous_input_write_injected: bool,
 }
 
 pub(in crate::web_os) struct WebOsTestServer {
@@ -353,6 +355,7 @@ impl WebOsTestServer {
             tv: WebOsTestTv::new(power_state, input),
             scenario,
             connection_count: 0,
+            ambiguous_input_write_injected: false,
         }));
         let active_connection = Arc::new(Mutex::new(None));
         let stop = Arc::new(AtomicBool::new(false));
@@ -505,28 +508,48 @@ fn serve_connection<S>(
         let keep_open = match scenario {
             WebOsTestScenario::StatefulTv
             | WebOsTestScenario::PowerStatePermissionDenied
-            | WebOsTestScenario::BacklightWriteAcknowledgedWithoutChange => {
-                let response = {
-                    let mut runtime = runtime.lock().expect("webOS test server state");
-                    if scenario == WebOsTestScenario::PowerStatePermissionDenied
-                        && request["uri"] == GET_POWER_STATE_URI
+            | WebOsTestScenario::BacklightWriteAcknowledgedWithoutChange
+            | WebOsTestScenario::CloseAfterFirstInputWrite => {
+                let response =
                     {
-                        webos_error_without_payload(
-                            request["id"].as_str().expect("webOS request ID"),
-                            "-401 not permitted",
-                        )
-                    } else {
-                        runtime.tv.handle_request(
+                        let mut runtime = runtime.lock().expect("webOS test server state");
+                        if scenario == WebOsTestScenario::PowerStatePermissionDenied
+                            && request["uri"] == GET_POWER_STATE_URI
+                        {
+                            Some(webos_error_without_payload(
+                                request["id"].as_str().expect("webOS request ID"),
+                                "-401 not permitted",
+                            ))
+                        } else if scenario == WebOsTestScenario::CloseAfterFirstInputWrite
+                            && request["uri"] == SET_INPUT_URI
+                            && !runtime.ambiguous_input_write_injected
+                        {
+                            runtime.tv.handle_request(
+                                &request,
+                                permissions
+                                    .as_ref()
+                                    .expect("webOS request sent before registration"),
+                                true,
+                            );
+                            runtime.ambiguous_input_write_injected = true;
+                            None
+                        } else {
+                            Some(runtime.tv.handle_request(
                             &request,
                             permissions
                                 .as_ref()
                                 .expect("webOS request sent before registration"),
                             scenario != WebOsTestScenario::BacklightWriteAcknowledgedWithoutChange,
-                        )
+                        ))
+                        }
+                    };
+                match response {
+                    Some(response) => {
+                        send_json(&mut socket, response);
+                        true
                     }
-                };
-                send_json(&mut socket, response);
-                true
+                    None => false,
+                }
             }
             _ => handle_protocol_scenario(&mut socket, scenario, &request),
         };
@@ -581,16 +604,15 @@ where
     match scenario {
         WebOsTestScenario::StatefulTv
         | WebOsTestScenario::PowerStatePermissionDenied
-        | WebOsTestScenario::BacklightWriteAcknowledgedWithoutChange => {
-            match payload["client-key"].as_str() {
-                Some(token) => send_json(socket, registration_response(request_id, token)),
-                None if payload["client-key"].is_null() => {
-                    send_json(socket, pairing_prompt_response(request_id));
-                    send_json(socket, registration_response(request_id, TEST_ACCESS_TOKEN));
-                }
-                None => panic!("registration access token is neither a string nor null"),
+        | WebOsTestScenario::BacklightWriteAcknowledgedWithoutChange
+        | WebOsTestScenario::CloseAfterFirstInputWrite => match payload["client-key"].as_str() {
+            Some(token) => send_json(socket, registration_response(request_id, token)),
+            None if payload["client-key"].is_null() => {
+                send_json(socket, pairing_prompt_response(request_id));
+                send_json(socket, registration_response(request_id, TEST_ACCESS_TOKEN));
             }
-        }
+            None => panic!("registration access token is neither a string nor null"),
+        },
         WebOsTestScenario::StoredTokenReplacement => {
             payload["client-key"]
                 .as_str()
@@ -705,7 +727,8 @@ where
         | WebOsTestScenario::RegistrationTimeout
         | WebOsTestScenario::RegistrationMissingClientKey
         | WebOsTestScenario::PowerStatePermissionDenied
-        | WebOsTestScenario::BacklightWriteAcknowledgedWithoutChange => {
+        | WebOsTestScenario::BacklightWriteAcknowledgedWithoutChange
+        | WebOsTestScenario::CloseAfterFirstInputWrite => {
             panic!("scenario `{scenario:?}` requires registered stateful handling")
         }
     }
@@ -847,13 +870,13 @@ fn webos_error_without_payload(request_id: &str, error: &str) -> Value {
     })
 }
 
-struct TestAccessTokenStore {
+pub(in crate::web_os) struct TestAccessTokenStore {
     path: PathBuf,
     store: PlatformAccessTokenStore,
 }
 
 impl TestAccessTokenStore {
-    fn new() -> Self {
+    pub(in crate::web_os) fn new() -> Self {
         let sequence = TEST_DIR_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
             "lg-buddy-webos-test-server-{}-{sequence}",
@@ -877,7 +900,7 @@ impl TestAccessTokenStore {
         Self { path, store }
     }
 
-    fn store(&self) -> &PlatformAccessTokenStore {
+    pub(in crate::web_os) fn store(&self) -> &PlatformAccessTokenStore {
         &self.store
     }
 }

@@ -27,7 +27,6 @@ pub use dev::{DevCommand, DevError, DevParseError, WebOsControlProbeCommand};
 pub use sources::desktop::{gnome, swayidle};
 pub use sources::linux::{logind, network_manager};
 
-use crate::auth::AuthContextError;
 use crate::backend::{
     configured_backend_from_env_or_config, detect_backend_from_system, BackendDetectionError,
     BackendSelectionError,
@@ -42,7 +41,7 @@ use crate::notifications::NotificationError;
 use crate::session::runner::{run_lifecycle_monitor, run_monitor};
 use crate::settings::{run_settings_command, SettingsCommand, SettingsError, SettingsParseError};
 use crate::state::StateDirError;
-use crate::tv::{OledBrightness, OledBrightnessParseError};
+use crate::tv::{OledBrightness, OledBrightnessParseError, TvClientBuildError};
 use crate::updates::{run_updates_command, UpdatesCommand, UpdatesError, UpdatesParseError};
 use std::fmt;
 use std::io::{self, Write};
@@ -156,7 +155,7 @@ impl fmt::Display for ParseError {
 pub enum RunError {
     Io(io::Error),
     Policy(String),
-    AuthContext(AuthContextError),
+    TvClientBuild(TvClientBuildError),
     ConfigPath(ConfigPathError),
     Config(ConfigError),
     StateDir(StateDirError),
@@ -176,7 +175,7 @@ impl fmt::Display for RunError {
         match self {
             Self::Io(err) => write!(f, "{err}"),
             Self::Policy(err) => write!(f, "{err}"),
-            Self::AuthContext(err) => write!(f, "{err}"),
+            Self::TvClientBuild(err) => write!(f, "{err}"),
             Self::ConfigPath(err) => write!(f, "{err}"),
             Self::Config(err) => write!(f, "{err}"),
             Self::StateDir(err) => write!(f, "{err}"),
@@ -201,7 +200,7 @@ impl std::error::Error for RunError {
         match self {
             Self::Io(err) => Some(err),
             Self::Policy(_) => None,
-            Self::AuthContext(err) => Some(err),
+            Self::TvClientBuild(err) => Some(err),
             Self::ConfigPath(err) => Some(err),
             Self::Config(err) => Some(err),
             Self::StateDir(err) => Some(err),
@@ -218,6 +217,12 @@ impl std::error::Error for RunError {
 impl From<io::Error> for RunError {
     fn from(value: io::Error) -> Self {
         Self::Io(value)
+    }
+}
+
+impl From<TvClientBuildError> for RunError {
+    fn from(value: TvClientBuildError) -> Self {
+        Self::TvClientBuild(value)
     }
 }
 

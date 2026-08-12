@@ -149,7 +149,7 @@ For the tagged GitHub release process, see [release-process.md](release-process.
 | `crates/lg-buddy/src/sources/desktop/gnome.rs` | GNOME backend integration |
 | `crates/lg-buddy/src/sources/desktop/swayidle.rs` | `swayidle` backend integration |
 | `crates/lg-buddy/src/tv.rs` | TV transport boundary and facade |
-| `crates/lg-buddy/src/web_os/` | Native webOS client, domain operations, and test support |
+| `crates/lg-buddy/src/web_os/` | Native webOS client, profile-bound TV adapter, domain operations, and test support |
 | `crates/lg-buddy/src/wol.rs` | Native Wake-on-LAN support |
 | `configure.sh` | Interactive configuration tool |
 | `install.sh` | Installer for an existing binary |
