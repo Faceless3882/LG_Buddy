@@ -16,7 +16,7 @@ use adapters::{reader_specs_for_device, ActivityObservation, ActivityReader};
 pub(crate) use device_events::{
     open_system_gamepad_device_event_monitor, SystemGamepadDeviceEventMonitor,
 };
-use devices::discover_gamepad_devices;
+use devices::{discover_gamepad_devices, DeviceDiscovery};
 use reader::GamepadDeviceReader;
 use registry::ActivityRegistry;
 
@@ -219,6 +219,15 @@ fn refresh_gamepad_activity_source_from_dir(
     now: Instant,
 ) -> GamepadActivityRefresh {
     let discovery = discover_gamepad_devices(input_dir);
+    refresh_gamepad_activity_source(source, input_dir, discovery, now)
+}
+
+fn refresh_gamepad_activity_source(
+    source: &mut SystemGamepadActivitySource,
+    input_dir: &Path,
+    discovery: DeviceDiscovery,
+    now: Instant,
+) -> GamepadActivityRefresh {
     let mut diagnostics = Vec::new();
 
     if let Some(input_dir_error) = discovery.input_dir_error {
@@ -496,14 +505,15 @@ pub(crate) fn is_controller_axis_code(code: u16) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::devices::{DeviceDiscovery, DeviceInspectFailure};
     use super::registry::ActivityRegistry;
     use super::{
         is_controller_axis_code, is_controller_button_code, open_system_gamepad_activity_source,
-        refresh_gamepad_activity_source_from_dir, ActivityPolicy, DeviceId, RawGamepadEvent,
-        RawGamepadEventKind, SystemGamepadActivitySource,
+        refresh_gamepad_activity_source, refresh_gamepad_activity_source_from_dir, ActivityPolicy,
+        DeviceId, RawGamepadEvent, RawGamepadEventKind, SystemGamepadActivitySource,
     };
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::thread;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -581,11 +591,7 @@ mod tests {
 
     #[test]
     fn refresh_keeps_registry_state_for_devices_that_failed_inspection() {
-        let root = temp_dir("refresh-keeps-inspect-failures");
-        let input_dir = root.join("dev/input");
-        fs::create_dir_all(&input_dir).expect("create input dir");
-        let device_path = input_dir.join("event23");
-        fs::File::create(&device_path).expect("create unreadable evdev placeholder");
+        let device_path = PathBuf::from("/test/dev/input/event23");
 
         let device_id = DeviceId::new(device_path.display().to_string());
         let mut registry = ActivityRegistry::new(ActivityPolicy::default());
@@ -605,14 +611,20 @@ mod tests {
             registry,
         };
 
-        let refresh =
-            refresh_gamepad_activity_source_from_dir(&mut source, &input_dir, Instant::now());
+        let refresh = refresh_gamepad_activity_source(
+            &mut source,
+            Path::new("/test/dev/input"),
+            DeviceDiscovery {
+                devices: Vec::new(),
+                inspect_failures: vec![DeviceInspectFailure::new(device_path, "permission denied")],
+                input_dir_error: None,
+            },
+            Instant::now(),
+        );
 
         assert!(refresh.retry_requested);
         assert!(!refresh.diagnostics.is_empty());
         assert!(source.registry.has_device(&device_id));
-
-        fs::remove_dir_all(root).expect("remove temp dir");
     }
 
     #[test]

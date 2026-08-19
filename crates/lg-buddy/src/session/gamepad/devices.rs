@@ -33,6 +33,13 @@ pub(crate) struct DeviceInspectFailure {
 }
 
 impl DeviceInspectFailure {
+    pub(super) fn new(path: PathBuf, error: impl Into<String>) -> Self {
+        Self {
+            path,
+            error: error.into(),
+        }
+    }
+
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }
@@ -120,10 +127,7 @@ fn discover_gamepad_devices_from_dirs(
                 }
             }
             Err(err) => {
-                inspect_failures.push(DeviceInspectFailure {
-                    path,
-                    error: inspect_error_message(&err),
-                });
+                inspect_failures.push(DeviceInspectFailure::new(path, inspect_error_message(&err)));
             }
         }
     }
