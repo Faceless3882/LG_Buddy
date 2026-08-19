@@ -357,9 +357,11 @@ rm -f "$VALID_PLATFORM_CONFIG" "$INVALID_PLATFORM_CONFIG" "$INVALID_PLATFORM_OUT
 # profile-scoped native credential. Do this before the existing uninstall and
 # fresh-install coverage below, without removing the user configuration.
 NATIVE_ACCESS_TOKEN_FILE="$(dirname "$CONFIG_FILE")/tvs/primary/access-token.json"
+NATIVE_PROFILE_DIR="$(dirname "$NATIVE_ACCESS_TOKEN_FILE")"
+NATIVE_PROFILES_DIR="$(dirname "$NATIVE_PROFILE_DIR")"
 NATIVE_ACCESS_TOKEN_SNAPSHOT="$WORK_DIR/native-access-token.snapshot"
 NATIVE_ACCESS_TOKEN_CONTENT='{"access_token":"release-smoke-native-token"}'
-mkdir -p "$(dirname "$NATIVE_ACCESS_TOKEN_FILE")"
+mkdir -p "$NATIVE_PROFILE_DIR"
 printf '%s\n' "$NATIVE_ACCESS_TOKEN_CONTENT" >"$NATIVE_ACCESS_TOKEN_FILE"
 chmod 600 "$NATIVE_ACCESS_TOKEN_FILE"
 cp "$NATIVE_ACCESS_TOKEN_FILE" "$NATIVE_ACCESS_TOKEN_SNAPSHOT"
@@ -448,6 +450,18 @@ export LG_BUDDY_REMOVE_CONFIG="1"
 }
 [ ! -e "$CONFIG_FILE" ] || {
     echo "User config still present after uninstall: $CONFIG_FILE"
+    exit 1
+}
+[ ! -e "$NATIVE_ACCESS_TOKEN_FILE" ] || {
+    echo "Native access token still present after uninstall: $NATIVE_ACCESS_TOKEN_FILE"
+    exit 1
+}
+[ ! -e "$NATIVE_PROFILE_DIR" ] || {
+    echo "Native TV profile still present after uninstall: $NATIVE_PROFILE_DIR"
+    exit 1
+}
+[ ! -e "$NATIVE_PROFILES_DIR" ] || {
+    echo "Native TV profiles directory still present after uninstall: $NATIVE_PROFILES_DIR"
     exit 1
 }
 
