@@ -46,6 +46,31 @@ fn mock_tv_client(world: &mut LgBuddyWorld) {
     world.create_mock_tv();
 }
 
+#[given(regex = r#"a native webOS TV on input (HDMI_[23]) with brightness (\d+)"#)]
+fn native_webos_tv(world: &mut LgBuddyWorld, input: String, brightness: u8) {
+    world.create_native_webos_tv(&input, brightness);
+}
+
+#[given(regex = r#"the existing config selects TV platform \"(bscpylgtv|lg_webos)\""#)]
+fn existing_tv_platform(world: &mut LgBuddyWorld, platform: String) {
+    world.select_tv_platform(&platform);
+}
+
+#[given("a valid native TV access token is stored")]
+fn valid_native_access_token(world: &mut LgBuddyWorld) {
+    world.store_valid_native_access_token();
+}
+
+#[given("a stale native TV access token is stored")]
+fn stale_native_access_token(world: &mut LgBuddyWorld) {
+    world.store_native_access_token("stale-cucumber-access-token");
+}
+
+#[given("the native webOS TV rejects pairing")]
+fn native_webos_tv_rejects_pairing(world: &mut LgBuddyWorld) {
+    world.reject_native_pairing();
+}
+
 #[given(regex = r#"the TV auth key file override is "([^"]+)""#)]
 fn tv_auth_key_file_override(world: &mut LgBuddyWorld, path: String) {
     world.set_auth_key_file_override(&path);
@@ -377,70 +402,99 @@ fn system_marker_absent(world: &mut LgBuddyWorld) {
 
 #[then(regex = r#"the TV input is (HDMI_[1-4])"#)]
 fn tv_input_is(world: &mut LgBuddyWorld, input: String) {
-    assert_eq!(world.tv().state_snapshot().input, input);
+    world.assert_tv_input(&input);
 }
 
 #[then(regex = r#"the TV brightness is (\d+)"#)]
 fn tv_brightness_is(world: &mut LgBuddyWorld, value: u8) {
-    assert_eq!(world.tv().state_snapshot().backlight, value);
+    world.assert_tv_brightness(value);
 }
 
 #[then("the TV is powered off")]
 fn tv_is_powered_off(world: &mut LgBuddyWorld) {
-    assert!(!world.tv().state_snapshot().power_on);
+    world.assert_tv_powered_on(false);
 }
 
 #[then("the TV is powered on")]
 fn tv_is_powered_on(world: &mut LgBuddyWorld) {
-    assert!(world.tv().state_snapshot().power_on);
+    world.assert_tv_powered_on(true);
 }
 
 #[then("the TV screen is blanked")]
 fn tv_screen_is_blanked(world: &mut LgBuddyWorld) {
-    assert!(!world.tv().state_snapshot().screen_on);
+    world.assert_tv_screen_on(false);
 }
 
 #[then("the TV screen is visible")]
 fn tv_screen_is_visible(world: &mut LgBuddyWorld) {
-    assert!(world.tv().state_snapshot().screen_on);
+    world.assert_tv_screen_on(true);
 }
 
 #[then(regex = r#"^the TV client received "([^"]+)"$"#)]
 fn tv_client_received(world: &mut LgBuddyWorld, command: String) {
+    let calls = world.tv_call_names();
     assert!(
-        world
-            .tv()
-            .calls()
-            .iter()
-            .any(|call| call.command == command),
-        "calls were: {:?}",
-        world.tv().calls()
+        calls.iter().any(|call| call == &command),
+        "calls were: {calls:?}"
     );
 }
 
 #[then(regex = r#"^the TV client received "([^"]+)" exactly (\d+) times$"#)]
 fn tv_client_received_exactly(world: &mut LgBuddyWorld, command: String, expected: usize) {
-    let actual = world
-        .tv()
-        .calls()
-        .iter()
-        .filter(|call| call.command == command)
-        .count();
+    let calls = world.tv_call_names();
+    let actual = calls.iter().filter(|call| *call == &command).count();
 
-    assert_eq!(actual, expected, "calls were: {:?}", world.tv().calls());
+    assert_eq!(actual, expected, "calls were: {calls:?}");
 }
 
 #[then(regex = r#"^the TV client did not receive "([^"]+)"$"#)]
 fn tv_client_did_not_receive(world: &mut LgBuddyWorld, command: String) {
+    let calls = world.tv_call_names();
     assert!(
-        world
-            .tv()
-            .calls()
-            .iter()
-            .all(|call| call.command != command),
-        "calls were: {:?}",
-        world.tv().calls()
+        calls.iter().all(|call| call != &command),
+        "calls were: {calls:?}"
     );
+}
+
+#[then("a valid native TV access token is stored")]
+fn valid_native_access_token_is_stored(world: &mut LgBuddyWorld) {
+    world.assert_valid_native_access_token();
+}
+
+#[then("no native TV access token is stored")]
+fn no_native_access_token_is_stored(world: &mut LgBuddyWorld) {
+    world.assert_no_native_access_token();
+}
+
+#[then(regex = r#"the native TV access token is \"([^\"]+)\""#)]
+fn native_access_token_is(world: &mut LgBuddyWorld, access_token: String) {
+    world.assert_native_access_token(&access_token);
+}
+
+#[then(regex = r#"the native TV connection count is (\d+)"#)]
+fn native_connection_count_is(world: &mut LgBuddyWorld, expected: u64) {
+    assert_eq!(world.webos_snapshot().connection_count, expected);
+}
+
+#[then(regex = r#"the native TV pairing prompt count is (\d+)"#)]
+fn native_pairing_prompt_count_is(world: &mut LgBuddyWorld, expected: u64) {
+    assert_eq!(world.webos_snapshot().pairing_prompt_count, expected);
+}
+
+#[then(regex = r#"the native TV registration tokens are \"([^\"]*)\""#)]
+fn native_registration_tokens_are(world: &mut LgBuddyWorld, expected: String) {
+    let expected = if expected.is_empty() {
+        Vec::new()
+    } else {
+        expected
+            .split(',')
+            .map(|token| match token.trim() {
+                "none" => None,
+                token => Some(token.to_string()),
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(world.webos_snapshot().registration_tokens, expected);
 }
 
 #[then("the TV helper uses the expected auth context")]

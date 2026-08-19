@@ -14,7 +14,7 @@ use crate::auth::{
     resolve_bscpylgtv_auth_context_from_env, resolve_config_owner, AuthContextError,
     BscpylgtvAuthContext, SystemUser,
 };
-use crate::config::{HdmiInput, MacAddress};
+use crate::config::{HdmiInput, MacAddress, TvPlatform};
 use crate::platform_access_token::{PlatformAccessTokenStore, PlatformAccessTokenStoreError};
 use crate::web_os::{WebOsEndpoint, WebOsTvClient};
 use crate::wol::{WakeOnLanError, WakeOnLanSender};
@@ -213,21 +213,13 @@ pub trait TvClient {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TvClientImplementation {
-    Bscpylgtv,
-    WebOs,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TvClientBuildOptions {
-    implementation: TvClientImplementation,
     legacy_command_timeout: Option<Duration>,
 }
 
 impl TvClientBuildOptions {
     pub(crate) fn production() -> Self {
         Self {
-            implementation: TvClientImplementation::Bscpylgtv,
             legacy_command_timeout: None,
         }
     }
@@ -235,14 +227,6 @@ impl TvClientBuildOptions {
     pub(crate) fn with_legacy_command_timeout(mut self, timeout: Duration) -> Self {
         self.legacy_command_timeout = Some(timeout);
         self
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn webos() -> Self {
-        Self {
-            implementation: TvClientImplementation::WebOs,
-            legacy_command_timeout: None,
-        }
     }
 }
 
@@ -329,10 +313,11 @@ impl TvClient for SelectedTvClient {
 pub(crate) fn build_tv_client(
     config_path: &Path,
     tv_ip: Ipv4Addr,
+    platform: TvPlatform,
     options: TvClientBuildOptions,
 ) -> Result<SelectedTvClient, TvClientBuildError> {
-    match options.implementation {
-        TvClientImplementation::Bscpylgtv => {
+    match platform {
+        TvPlatform::Bscpylgtv => {
             let auth_context = resolve_bscpylgtv_auth_context_from_env(config_path)
                 .map_err(TvClientBuildError::AuthContext)?;
             let mut client = BscpylgtvCommandClient::from_env(tv_ip)
@@ -343,7 +328,7 @@ pub(crate) fn build_tv_client(
             }
             Ok(SelectedTvClient::Bscpylgtv(client))
         }
-        TvClientImplementation::WebOs => {
+        TvPlatform::LgWebOs => {
             let owner =
                 resolve_config_owner(config_path).map_err(TvClientBuildError::AuthContext)?;
             let token_store = PlatformAccessTokenStore::for_primary_profile(config_path, owner)
@@ -1027,7 +1012,7 @@ mod tests {
         DEFAULT_BSCPYLGTV_COMMAND_PATH,
     };
     use crate::auth::{BscpylgtvAuthContext, SystemUser};
-    use crate::config::{HdmiInput, MacAddress};
+    use crate::config::{HdmiInput, MacAddress, TvPlatform};
     use crate::wol::{WakeOnLanError, WakeOnLanSender};
     use std::cell::RefCell;
     use std::io;
@@ -1079,17 +1064,27 @@ mod tests {
     }
 
     #[test]
-    fn centralized_factory_can_build_both_internal_implementations() {
+    fn centralized_factory_maps_each_platform_to_its_client() {
         let config = TestConfigFile::new("tv-client-factory");
         config.write_sample("HDMI_2");
         let tv_ip = ip("192.0.2.42");
 
-        let production = build_tv_client(config.path(), tv_ip, TvClientBuildOptions::production())
-            .expect("build production TV client");
-        assert!(matches!(production, SelectedTvClient::Bscpylgtv(_)));
+        let bscpylgtv = build_tv_client(
+            config.path(),
+            tv_ip,
+            TvPlatform::Bscpylgtv,
+            TvClientBuildOptions::production(),
+        )
+        .expect("build bscpylgtv TV client");
+        assert!(matches!(bscpylgtv, SelectedTvClient::Bscpylgtv(_)));
 
-        let webos = build_tv_client(config.path(), tv_ip, TvClientBuildOptions::webos())
-            .expect("build internal webOS TV client");
+        let webos = build_tv_client(
+            config.path(),
+            tv_ip,
+            TvPlatform::LgWebOs,
+            TvClientBuildOptions::production(),
+        )
+        .expect("build native webOS TV client");
         assert!(matches!(webos, SelectedTvClient::WebOs(_)));
     }
 

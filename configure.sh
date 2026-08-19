@@ -86,6 +86,7 @@ normalize_restore_policy() {
 current_tv_ip=""
 current_tv_mac=""
 current_input="HDMI_1"
+current_tv_platform="$LG_BUDDY_DEFAULT_TV_PLATFORM"
 current_screen_backend="$LG_BUDDY_DEFAULT_SCREEN_BACKEND"
 current_screen_idle_blank="$LG_BUDDY_DEFAULT_SCREEN_IDLE_BLANK"
 current_screen_idle_timeout="$LG_BUDDY_DEFAULT_IDLE_TIMEOUT"
@@ -98,6 +99,7 @@ if lg_buddy_load_config >/dev/null 2>&1; then
     current_tv_ip="$tv_ip"
     current_tv_mac="$tv_mac"
     current_input="$input"
+    current_tv_platform="$tv_platform"
     current_screen_backend="$screen_backend"
     current_screen_idle_blank="$screen_idle_blank"
     current_screen_idle_timeout="$screen_idle_timeout"
@@ -106,6 +108,12 @@ if lg_buddy_load_config >/dev/null 2>&1; then
     current_update_auto_check="$updates_auto_check"
     current_update_channel="$updates_channel"
     echo "Loaded existing configuration from $LG_BUDDY_CONFIG_FILE"
+else
+    config_load_status=$?
+    if [ "$config_load_status" -eq 2 ]; then
+        echo "Existing configuration contains an invalid TV platform; fix tvs_primary_platform before rerunning configure.sh."
+        exit 1
+    fi
 fi
 
 if [ "${LG_BUDDY_NONINTERACTIVE:-0}" = "1" ]; then
@@ -330,6 +338,7 @@ echo "Configuration to apply:"
 echo "  TV IP:               $tv_ip"
 echo "  TV MAC:              $tv_mac"
 echo "  PC Input:            $input"
+echo "  TV Platform:         $current_tv_platform"
 echo "  Screen Idle Blank:   $screen_idle_blank"
 echo "  Screen Backend:      $screen_backend"
 echo "  Screen Idle Timeout: $screen_idle_timeout"
@@ -358,6 +367,7 @@ cat >"$CONFIG_FILE" <<EOF
 tvs_primary_ip=$tv_ip
 tvs_primary_mac=$tv_mac
 tvs_primary_input=$input
+tvs_primary_platform=$current_tv_platform
 screen_idle_blank=$screen_idle_blank
 screen_backend=$screen_backend
 screen_idle_timeout=$screen_idle_timeout

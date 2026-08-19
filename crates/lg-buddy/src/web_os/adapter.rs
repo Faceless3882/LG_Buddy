@@ -81,12 +81,11 @@ impl WebOsTvClient {
             return Ok(());
         }
 
-        let client = WebOsClient::connect_authenticated(
+        let client = WebOsClient::connect_authenticated_with_stored_token(
             self.endpoint,
             self.connect_timeout,
             self.response_timeout,
             &self.token_store,
-            |_| {},
         )
         .map_err(|error| authenticated_client_failure(error).into_tv_error(operation))?;
         *session = Some(client);
@@ -243,6 +242,9 @@ fn authenticated_client_failure(error: WebOsAuthenticatedClientError) -> WebOsAd
             client_failure_with_detail(source, detail)
         }
         WebOsAuthenticatedClientError::Authentication { source } => match source {
+            PlatformAccessTokenAcquisitionError::MissingStoredToken => {
+                WebOsAdapterFailure::new(TvErrorKind::Authentication, detail, false)
+            }
             PlatformAccessTokenAcquisitionError::Registration { source } => match source {
                 super::WebOsClientRegistrationError::Transport { source } => {
                     client_failure_with_detail(source, detail)
@@ -465,10 +467,44 @@ mod tests {
         TestAccessTokenStore, WebOsTestInput, WebOsTestScenario, WebOsTestServer,
     };
     use crate::web_os::WebOsPowerState;
+    use std::fs;
     use std::time::Duration;
 
     const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
     const RESPONSE_TIMEOUT: Duration = Duration::from_millis(500);
+
+    #[test]
+    fn missing_runtime_token_returns_actionable_authentication_error() {
+        let server = WebOsTestServer::active(WebOsTestInput::Hdmi3);
+        let token_fixture = TestAccessTokenStore::new();
+        fs::remove_file(token_fixture.store().token_path()).expect("remove stored token");
+        let client = client_for_server(&server, &token_fixture);
+
+        let error = client
+            .current_input()
+            .expect_err("background authentication must not initiate pairing");
+
+        assert_eq!(error.kind(), TvErrorKind::Authentication);
+        assert!(error
+            .detail()
+            .contains("pair the TV from foreground settings"));
+        server.finish();
+    }
+
+    #[test]
+    fn rejected_runtime_token_returns_actionable_authentication_error() {
+        let server = WebOsTestServer::for_scenario(WebOsTestScenario::StoredTokenPairingPrompt);
+        let token_fixture = TestAccessTokenStore::new();
+        let client = client_for_server(&server, &token_fixture);
+
+        let error = client
+            .current_input()
+            .expect_err("stale runtime token must not initiate pairing");
+
+        assert_eq!(error.kind(), TvErrorKind::Authentication);
+        assert!(error.detail().contains("foreground pairing"));
+        server.finish();
+    }
 
     #[test]
     fn complete_tv_contract_reuses_one_authenticated_session() {

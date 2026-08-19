@@ -49,11 +49,12 @@ error. Mutation commands may still overwrite or unset the bad value so users can
 repair the file through the structured interface.
 
 The current public settings interface exposes one TV through `tv.ip`, `tv.mac`,
-and `tv.input`. New writes store those values as `tvs_primary_ip`,
-`tvs_primary_mac`, and `tvs_primary_input`. The profile-shaped storage is only an
-extensibility point; LG Buddy does not currently expose multiple TVs or TV
-profile selection. Existing single-TV keys `tv_ip`, `tv_mac`, and `input` remain
-readable for compatibility.
+`tv.input`, and `tv.platform`. New writes store those values as
+`tvs_primary_ip`, `tvs_primary_mac`, `tvs_primary_input`, and
+`tvs_primary_platform`. The profile-shaped storage is only an extensibility
+point; LG Buddy does not currently expose multiple TVs or TV profile selection.
+Existing single-TV keys `tv_ip`, `tv_mac`, and `input` remain readable for
+compatibility.
 
 New behavior should use a config key when users may reasonably want to keep a
 non-default choice across reinstalls or upgrades. Prefer enum-shaped values over
@@ -76,6 +77,7 @@ Good shapes:
 tvs_primary_ip=192.168.1.100
 tvs_primary_mac=aa:bb:cc:dd:ee:ff
 tvs_primary_input=HDMI_2
+tvs_primary_platform=bscpylgtv
 screen_restore_policy=conservative
 screen_idle_blank=enabled
 system_sleep_wake_policy=enabled
@@ -104,6 +106,17 @@ a user has opted out through config, the installer should honor that persisted
 choice.
 
 ## Current Examples
+
+`tvs_primary_platform` selects the control platform for the active TV profile:
+
+- `bscpylgtv` remains the default, including for existing profiles where the
+  key is absent
+- `lg_webos` is the experimental native Rust platform and must be selected
+  explicitly with `lg-buddy settings set tv.platform lg_webos`
+- native selection is saved only after foreground credential and TV-state
+  preflight succeeds; background services do not initiate pairing
+- this is the only platform selector; there is no separate backend, adapter,
+  or migration override
 
 `screen_restore_policy` follows this model:
 

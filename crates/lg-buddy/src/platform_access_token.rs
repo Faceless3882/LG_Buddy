@@ -159,6 +159,7 @@ impl Error for PlatformAccessTokenStoreError {
 
 #[derive(Debug)]
 pub enum PlatformAccessTokenAcquisitionError {
+    MissingStoredToken,
     Store {
         source: PlatformAccessTokenStoreError,
     },
@@ -170,6 +171,10 @@ pub enum PlatformAccessTokenAcquisitionError {
 impl fmt::Display for PlatformAccessTokenAcquisitionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::MissingStoredToken => write!(
+                f,
+                "no stored platform access token is available; pair the TV from foreground settings by running `lg-buddy settings set tv.platform lg_webos`"
+            ),
             Self::Store { source } => write!(f, "platform access-token storage failed: {source}"),
             Self::Registration { source } => {
                 write!(f, "platform access-token registration failed: {source}")
@@ -181,6 +186,7 @@ impl fmt::Display for PlatformAccessTokenAcquisitionError {
 impl Error for PlatformAccessTokenAcquisitionError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::MissingStoredToken => None,
             Self::Store { source } => Some(source),
             Self::Registration { source } => Some(source),
         }
@@ -248,6 +254,14 @@ impl PlatformAccessTokenStore {
         Ok(Some(token))
     }
 
+    pub(crate) fn load_stored(
+        &self,
+    ) -> Result<PlatformAccessToken, PlatformAccessTokenAcquisitionError> {
+        self.load()
+            .map_err(|source| PlatformAccessTokenAcquisitionError::Store { source })?
+            .ok_or(PlatformAccessTokenAcquisitionError::MissingStoredToken)
+    }
+
     pub fn persist(
         &self,
         token: &PlatformAccessToken,
@@ -292,18 +306,25 @@ impl PlatformAccessTokenStore {
                     })?;
                 Ok(token)
             }
-            None => {
-                let token = registration
-                    .register(None, on_auth_event)
-                    .map_err(|source| PlatformAccessTokenAcquisitionError::Registration {
-                        source,
-                    })?;
-                self.persist(&token)
-                    .map_err(|source| PlatformAccessTokenAcquisitionError::Store { source })?;
-                on_auth_event(WebOsAuthenticationEvent::AccessTokenPersisted);
-                Ok(token)
-            }
+            None => self.acquire_and_persist(registration, on_auth_event),
         }
+    }
+
+    pub(crate) fn acquire_and_persist<F>(
+        &self,
+        registration: &mut WebOsClientRegistration<'_>,
+        on_auth_event: &mut F,
+    ) -> Result<PlatformAccessToken, PlatformAccessTokenAcquisitionError>
+    where
+        F: FnMut(WebOsAuthenticationEvent),
+    {
+        let token = registration
+            .register(None, on_auth_event)
+            .map_err(|source| PlatformAccessTokenAcquisitionError::Registration { source })?;
+        self.persist(&token)
+            .map_err(|source| PlatformAccessTokenAcquisitionError::Store { source })?;
+        on_auth_event(WebOsAuthenticationEvent::AccessTokenPersisted);
+        Ok(token)
     }
 }
 
@@ -548,8 +569,9 @@ fn set_file_owner(
 #[cfg(test)]
 mod tests {
     use super::{
-        token_temp_path, PlatformAccessToken, PlatformAccessTokenError, PlatformAccessTokenStore,
-        PlatformAccessTokenStoreError, PlatformAccessTokenStoreOperation, TEMP_FILE_ATTEMPTS,
+        token_temp_path, PlatformAccessToken, PlatformAccessTokenAcquisitionError,
+        PlatformAccessTokenError, PlatformAccessTokenStore, PlatformAccessTokenStoreError,
+        PlatformAccessTokenStoreOperation, TEMP_FILE_ATTEMPTS,
     };
     use crate::auth::SystemUser;
     use std::fs;
@@ -658,6 +680,27 @@ mod tests {
         .expect("derive platform access-token store");
 
         assert_eq!(store.load().expect("load missing token"), None);
+    }
+
+    #[test]
+    fn stored_token_load_reports_actionable_missing_credential() {
+        let dir = TestDir::new("missing-stored-token");
+        let store = PlatformAccessTokenStore::for_primary_profile(
+            &dir.config_path(),
+            current_user(dir.path()),
+        )
+        .expect("derive platform access-token store");
+
+        let error = store
+            .load_stored()
+            .expect_err("runtime authentication must require a stored token");
+        assert!(matches!(
+            error,
+            PlatformAccessTokenAcquisitionError::MissingStoredToken
+        ));
+        assert!(error
+            .to_string()
+            .contains("pair the TV from foreground settings"));
     }
 
     #[test]

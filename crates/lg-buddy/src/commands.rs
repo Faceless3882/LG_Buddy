@@ -260,6 +260,7 @@ pub fn run_sleep_pre_for_event<W: Write>(
     let tv_client = build_tv_client(
         &config_path,
         config.tv_ip,
+        config.tv_platform,
         TvClientBuildOptions::production()
             .with_legacy_command_timeout(SYSTEM_PRE_SLEEP_TV_COMMAND_TIMEOUT),
     )?;
@@ -283,6 +284,7 @@ pub fn run_sleep<W: Write>(writer: &mut W) -> Result<(), RunError> {
     let tv_client = build_tv_client(
         &config_path,
         config.tv_ip,
+        config.tv_platform,
         TvClientBuildOptions::production(),
     )?;
     let detector = JournalctlSleepDetector::default();
@@ -302,6 +304,7 @@ pub fn run_nm_pre_down<W: Write>(writer: &mut W) -> Result<(), RunError> {
     let tv_client = build_tv_client(
         &config_path,
         config.tv_ip,
+        config.tv_platform,
         TvClientBuildOptions::production()
             .with_legacy_command_timeout(SYSTEM_PRE_SLEEP_TV_COMMAND_TIMEOUT),
     )?;
@@ -350,6 +353,7 @@ pub fn run_brightness<W: Write>(
             let tv_client = build_tv_client(
                 &config_path,
                 config.tv_ip,
+                config.tv_platform,
                 TvClientBuildOptions::production(),
             )?;
             run_brightness_command_with(writer, &config, command, &tv_client)
@@ -364,6 +368,7 @@ pub fn run_startup<W: Write>(writer: &mut W, mode: StartupMode) -> Result<(), Ru
     let tv_client = build_tv_client(
         &config_path,
         config.tv_ip,
+        config.tv_platform,
         TvClientBuildOptions::production(),
     )?;
     let wol_sender = UdpWakeOnLanSender::default();
@@ -388,6 +393,7 @@ pub fn run_system_resume<W: Write>(writer: &mut W) -> Result<(), RunError> {
     let tv_client = build_tv_client(
         &config_path,
         config.tv_ip,
+        config.tv_platform,
         TvClientBuildOptions::production(),
     )?;
     let wol_sender = UdpWakeOnLanSender::default();
@@ -458,6 +464,7 @@ pub fn run_shutdown<W: Write>(writer: &mut W) -> Result<(), RunError> {
     let tv_client = build_tv_client(
         &config_path,
         config.tv_ip,
+        config.tv_platform,
         TvClientBuildOptions::production(),
     )?;
     let reboot_detector = SystemctlRebootDetector::default();
@@ -1837,6 +1844,7 @@ mod tests {
                 .parse::<MacAddress>()
                 .expect("parse mac"),
             input,
+            tv_platform: crate::config::TvPlatform::Bscpylgtv,
             screen_backend: ScreenBackend::Auto,
             screen_idle_blank: ScreenIdleBlankPolicy::Enabled,
             screen_idle_timeout: 300,

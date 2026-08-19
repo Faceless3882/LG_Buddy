@@ -8,6 +8,7 @@ else
     LG_BUDDY_INSTALL_DIR="/usr/lib/lg-buddy"
 fi
 LG_BUDDY_POINTER_FILE="${LG_BUDDY_INSTALL_DIR}/config-path"
+LG_BUDDY_DEFAULT_TV_PLATFORM="bscpylgtv"
 LG_BUDDY_DEFAULT_SCREEN_BACKEND="auto"
 LG_BUDDY_DEFAULT_SCREEN_IDLE_BLANK="enabled"
 LG_BUDDY_DEFAULT_IDLE_TIMEOUT=300
@@ -171,6 +172,13 @@ lg_buddy_load_config() {
     tv_ip="$(lg_buddy_config_get_valid_any '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' "" "$LG_BUDDY_CONFIG_FILE" "tvs_primary_ip" "tv_ip")"
     tv_mac="$(lg_buddy_config_get_valid_any '^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$' "" "$LG_BUDDY_CONFIG_FILE" "tvs_primary_mac" "tv_mac")"
     input="$(lg_buddy_config_get_valid_any '^HDMI_[1-4]$' "" "$LG_BUDDY_CONFIG_FILE" "tvs_primary_input" "input")"
+    tv_platform="$(lg_buddy_config_get_raw "tvs_primary_platform" "$LG_BUDDY_CONFIG_FILE")"
+    if [ -z "$tv_platform" ]; then
+        tv_platform="$LG_BUDDY_DEFAULT_TV_PLATFORM"
+    elif ! [[ "$tv_platform" =~ ^(bscpylgtv|lg_webos)$ ]]; then
+        echo "LG Buddy: invalid tv platform '$tv_platform'; expected bscpylgtv or lg_webos."
+        return 2
+    fi
     screen_backend="$(lg_buddy_config_get_valid "screen_backend" '^(auto|gnome|swayidle)$' "$LG_BUDDY_DEFAULT_SCREEN_BACKEND" "$LG_BUDDY_CONFIG_FILE")"
     screen_idle_blank="$(lg_buddy_config_get_valid "screen_idle_blank" '^(enabled|disabled)$' "$LG_BUDDY_DEFAULT_SCREEN_IDLE_BLANK" "$LG_BUDDY_CONFIG_FILE")"
     screen_idle_timeout="$(lg_buddy_config_get_valid "screen_idle_timeout" '^[0-9]+$' "$LG_BUDDY_DEFAULT_IDLE_TIMEOUT" "$LG_BUDDY_CONFIG_FILE")"

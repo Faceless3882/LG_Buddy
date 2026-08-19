@@ -2,6 +2,7 @@ use crate::support::{
     ExecutableScript, MockBscpylgtv, MockNmOnline, MockSessionBusIdleMonitor, MockSwayidle,
     RuntimeStateLayout, TestConfigFile, TestEnv,
 };
+use crate::web_os::{MockWebOsTv, MockWebOsTvSnapshot, VALID_WEBOS_ACCESS_TOKEN};
 use cucumber::World;
 use lg_buddy::auth::resolve_bscpylgtv_auth_context_from_env;
 use std::fmt;
@@ -15,6 +16,7 @@ pub struct LgBuddyWorld {
     config: Option<TestConfigFile>,
     runtime: Option<RuntimeStateLayout>,
     tv: Option<MockBscpylgtv>,
+    webos_tv: Option<MockWebOsTv>,
     session_bus_idle_monitor: Option<MockSessionBusIdleMonitor>,
     nm_online: Option<MockNmOnline>,
     swayidle: Option<MockSwayidle>,
@@ -37,6 +39,7 @@ impl fmt::Debug for LgBuddyWorld {
             .field("config", &self.config.is_some())
             .field("runtime", &self.runtime.is_some())
             .field("tv", &self.tv.is_some())
+            .field("webos_tv", &self.webos_tv.is_some())
             .field(
                 "session_bus_idle_monitor",
                 &self.session_bus_idle_monitor.is_some(),
@@ -177,6 +180,71 @@ exit 1\n",
         self.tv = Some(tv);
     }
 
+    pub fn create_native_webos_tv(&mut self, input: &str, backlight: u8) {
+        self.config().set_value("tvs_primary_ip", "127.0.0.1");
+        let tv = MockWebOsTv::new(input);
+        assert_eq!(
+            tv.snapshot().backlight,
+            backlight,
+            "native WebOS initial brightness must match the hardware-backed TV model"
+        );
+        self.webos_tv = Some(tv);
+    }
+
+    pub fn select_tv_platform(&self, platform: &str) {
+        self.config().set_value("tvs_primary_platform", platform);
+    }
+
+    pub fn store_native_access_token(&self, access_token: &str) {
+        if access_token != VALID_WEBOS_ACCESS_TOKEN {
+            self.webos_tv().require_stale_token_pairing();
+        }
+        let token = lg_buddy::platform_access_token::PlatformAccessToken::new(access_token)
+            .expect("valid native access token fixture");
+        self.native_access_token_store()
+            .persist(&token)
+            .expect("persist native access token fixture");
+    }
+
+    pub fn store_valid_native_access_token(&self) {
+        self.store_native_access_token(VALID_WEBOS_ACCESS_TOKEN);
+    }
+
+    pub fn reject_native_pairing(&self) {
+        self.webos_tv().reject_pairing();
+    }
+
+    pub fn assert_native_access_token(&self, expected: &str) {
+        let stored = self
+            .native_access_token_store()
+            .load()
+            .expect("load native access token")
+            .expect("native access token should exist");
+        assert_eq!(stored.as_secret_str(), expected);
+    }
+
+    pub fn assert_valid_native_access_token(&self) {
+        self.assert_native_access_token(VALID_WEBOS_ACCESS_TOKEN);
+    }
+
+    pub fn assert_no_native_access_token(&self) {
+        assert!(
+            self.native_access_token_store()
+                .load()
+                .expect("load native access token")
+                .is_none(),
+            "native access token unexpectedly exists"
+        );
+    }
+
+    pub fn webos_tv(&self) -> &MockWebOsTv {
+        self.webos_tv.as_ref().expect("native webOS TV configured")
+    }
+
+    pub fn webos_snapshot(&self) -> MockWebOsTvSnapshot {
+        self.webos_tv().snapshot()
+    }
+
     pub fn tv(&self) -> &MockBscpylgtv {
         self.tv.as_ref().expect("mock TV configured")
     }
@@ -194,6 +262,9 @@ exit 1\n",
     }
 
     pub fn command_result(&self) -> &CommandExecution {
+        if let Some(tv) = &self.webos_tv {
+            tv.assert_healthy();
+        }
         self.command_result
             .as_ref()
             .expect("command result should be present")
@@ -468,6 +539,62 @@ exit 1\n",
             stdout: String::from_utf8(output.stdout).expect("utf8 command output"),
             stderr: String::from_utf8(output.stderr).expect("utf8 command stderr"),
         });
+    }
+
+    pub fn assert_tv_input(&self, expected: &str) {
+        if let Some(tv) = &self.webos_tv {
+            assert_eq!(tv.snapshot().input, expected);
+        } else {
+            assert_eq!(self.tv().state_snapshot().input, expected);
+        }
+    }
+
+    pub fn assert_tv_brightness(&self, expected: u8) {
+        if let Some(tv) = &self.webos_tv {
+            assert_eq!(tv.snapshot().backlight, expected);
+        } else {
+            assert_eq!(self.tv().state_snapshot().backlight, expected);
+        }
+    }
+
+    pub fn assert_tv_powered_on(&self, expected: bool) {
+        if let Some(tv) = &self.webos_tv {
+            assert_eq!(tv.snapshot().power_on, expected);
+        } else {
+            assert_eq!(self.tv().state_snapshot().power_on, expected);
+        }
+    }
+
+    pub fn assert_tv_screen_on(&self, expected: bool) {
+        if let Some(tv) = &self.webos_tv {
+            assert_eq!(tv.snapshot().screen_on, expected);
+        } else {
+            assert_eq!(self.tv().state_snapshot().screen_on, expected);
+        }
+    }
+
+    pub fn tv_call_names(&self) -> Vec<String> {
+        assert!(
+            self.webos_tv.is_none(),
+            "native Cucumber scenarios must assert product outcomes, not mock call labels"
+        );
+        self.tv()
+            .calls()
+            .into_iter()
+            .map(|call| call.command)
+            .collect()
+    }
+
+    fn native_access_token_store(
+        &self,
+    ) -> lg_buddy::platform_access_token::PlatformAccessTokenStore {
+        let owner = lg_buddy::auth::resolve_config_owner(self.config().path())
+            .expect("resolve native access token owner");
+        lg_buddy::platform_access_token::PlatformAccessTokenStore::for_primary_profile(
+            self.config().path(),
+            owner,
+        )
+        .expect("construct native access token store")
     }
 
     fn prepend_path_script(&mut self, script: ExecutableScript) {

@@ -6,10 +6,17 @@ use std::io;
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
+use std::time::Duration;
 
+use crate::auth::resolve_config_owner;
 use crate::config::{
     parse_config_entries, resolve_config_path, resolve_config_path_from_env, ConfigPathError,
-    ConfigPathSources, MacAddress, DEFAULT_IDLE_TIMEOUT, MAX_IDLE_TIMEOUT,
+    ConfigPathSources, MacAddress, TvPlatform, DEFAULT_IDLE_TIMEOUT, MAX_IDLE_TIMEOUT,
+};
+use crate::platform_access_token::PlatformAccessTokenStore;
+use crate::web_os::{
+    WebOsAuthenticatedClientError, WebOsAuthenticationEvent, WebOsClient, WebOsEndpoint,
+    WebOsPowerStateError,
 };
 
 const SETTINGS_SUBCOMMANDS: &[&str] = &["list", "describe", "get", "set", "unset"];
@@ -38,6 +45,7 @@ const SCREEN_RESTORE_POLICY_ALIASES: &[SettingAlias] = &[SettingAlias {
 }];
 
 const TV_INPUT_VALUES: &[&str] = &["HDMI_1", "HDMI_2", "HDMI_3", "HDMI_4"];
+const TV_PLATFORM_VALUES: &[&str] = &["bscpylgtv", "lg_webos"];
 const SCREEN_BACKEND_VALUES: &[&str] = &["auto", "gnome", "swayidle"];
 const SCREEN_IDLE_BLANK_VALUES: &[&str] = &["enabled", "disabled"];
 const SCREEN_RESTORE_POLICY_VALUES: &[&str] = &["conservative", "aggressive"];
@@ -81,6 +89,20 @@ const SETTING_DEFINITIONS: &[SettingDefinition] = &[
         operations: READ_SET_OPERATIONS,
         apply_strategy: ApplyStrategy::NoRuntimeApplyRequired,
         description: "HDMI input used by the primary configured TV.",
+    },
+    SettingDefinition {
+        key: "tv.platform",
+        storage_key: "tvs_primary_platform",
+        fallback_storage_keys: EMPTY_STORAGE_KEYS,
+        value_type: SettingType::Enum(EnumSettingType {
+            values: TV_PLATFORM_VALUES,
+            aliases: EMPTY_ALIASES,
+        }),
+        default_value: Some(SettingValue::Enum("bscpylgtv")),
+        mutability: SettingMutability::ReadWrite,
+        operations: READ_WRITE_OPERATIONS,
+        apply_strategy: ApplyStrategy::NoRuntimeApplyRequired,
+        description: "Control platform for the primary configured TV.",
     },
     SettingDefinition {
         key: "screen.backend",
@@ -990,25 +1012,133 @@ fn settings_enable_outcome(
     }
 }
 
+pub trait PlatformPreflight {
+    fn preflight(
+        &self,
+        platform: TvPlatform,
+        config_path: &Path,
+        tv_ip: Ipv4Addr,
+        writer: &mut dyn io::Write,
+    ) -> Result<(), String>;
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WebOsPlatformPreflight;
+
+impl PlatformPreflight for WebOsPlatformPreflight {
+    fn preflight(
+        &self,
+        platform: TvPlatform,
+        config_path: &Path,
+        tv_ip: Ipv4Addr,
+        writer: &mut dyn io::Write,
+    ) -> Result<(), String> {
+        if platform != TvPlatform::LgWebOs {
+            return Ok(());
+        }
+
+        let owner = resolve_config_owner(config_path).map_err(|error| error.to_string())?;
+        let token_store = PlatformAccessTokenStore::for_primary_profile(config_path, owner)
+            .map_err(|error| error.to_string())?;
+
+        let mut auth_write_error = None;
+        let mut client = {
+            let mut on_auth_event = |event| {
+                if auth_write_error.is_none() {
+                    auth_write_error =
+                        write_native_auth_event(writer, token_store.token_path(), event)
+                            .err()
+                            .map(|error| error.to_string());
+                }
+            };
+
+            WebOsClient::connect_authenticated(
+                WebOsEndpoint::wss(tv_ip),
+                Duration::from_secs(3),
+                Duration::from_secs(60),
+                &token_store,
+                &mut on_auth_event,
+            )
+            .map_err(|error: WebOsAuthenticatedClientError| error.to_string())?
+        };
+
+        if let Some(error) = auth_write_error {
+            return Err(format!("could not report native pairing progress: {error}"));
+        }
+
+        let power_state = client
+            .power_state()
+            .map_err(|error: WebOsPowerStateError| error.to_string())?;
+
+        writeln!(
+            writer,
+            "LG Buddy native webOS preflight succeeded: power_state={power_state}"
+        )
+        .map_err(|error| error.to_string())?;
+        writer.flush().map_err(|error| error.to_string())
+    }
+}
+
+fn write_native_auth_event(
+    writer: &mut dyn io::Write,
+    token_path: &Path,
+    event: WebOsAuthenticationEvent,
+) -> io::Result<()> {
+    match event {
+        WebOsAuthenticationEvent::UsingStoredAccessToken => {
+            writeln!(
+                writer,
+                "LG Buddy native webOS preflight: using stored access token."
+            )?;
+        }
+        WebOsAuthenticationEvent::PairingPrompt => {
+            writeln!(
+                writer,
+                "LG Buddy native webOS preflight: pairing required; accept the prompt on the TV."
+            )?;
+        }
+        WebOsAuthenticationEvent::AccessTokenPersisted => {
+            writeln!(
+                writer,
+                "LG Buddy native webOS preflight: stored access token at {}",
+                token_path.display()
+            )?;
+        }
+    }
+    writer.flush()
+}
+
 #[derive(Debug)]
-pub struct SettingsCommandRunner<C = SystemdUserServiceController> {
+pub struct SettingsCommandRunner<C = SystemdUserServiceController, P = WebOsPlatformPreflight> {
     store: SettingsStore,
     formatter: SettingsFormatter,
     applier: SettingsApplier<C>,
+    preflight: P,
 }
 
-impl SettingsCommandRunner<SystemdUserServiceController> {
+impl SettingsCommandRunner<SystemdUserServiceController, WebOsPlatformPreflight> {
     pub fn new(store: SettingsStore) -> Self {
         Self::with_applier(store, SettingsApplier::from_env())
     }
 }
 
-impl<C: ServiceController> SettingsCommandRunner<C> {
+impl<C: ServiceController> SettingsCommandRunner<C, WebOsPlatformPreflight> {
     pub fn with_applier(store: SettingsStore, applier: SettingsApplier<C>) -> Self {
+        Self::with_applier_and_preflight(store, applier, WebOsPlatformPreflight)
+    }
+}
+
+impl<C: ServiceController, P: PlatformPreflight> SettingsCommandRunner<C, P> {
+    pub fn with_applier_and_preflight(
+        store: SettingsStore,
+        applier: SettingsApplier<C>,
+        preflight: P,
+    ) -> Self {
         Self {
             store,
             formatter: SettingsFormatter,
             applier,
+            preflight,
         }
     }
 
@@ -1038,6 +1168,7 @@ impl<C: ServiceController> SettingsCommandRunner<C> {
             }
             SettingsCommand::Set { key, value } => {
                 let mutation = SettingsMutation::set(&self.store, &key, &value)?;
+                self.preflight_if_required(&mutation, writer)?;
                 let change = persist_settings_mutation(self.store.path(), mutation)?;
                 let apply = self.apply_after_persist(&change)?;
                 self.formatter.write_change(writer, &change, &apply)
@@ -1049,6 +1180,35 @@ impl<C: ServiceController> SettingsCommandRunner<C> {
                 self.formatter.write_change(writer, &change, &apply)
             }
         }
+    }
+
+    fn preflight_if_required<W: io::Write>(
+        &self,
+        mutation: &SettingsMutation,
+        writer: &mut W,
+    ) -> Result<(), SettingsError> {
+        if mutation.action() != SettingsMutationAction::Set
+            || mutation.key_name() != "tv.platform"
+            || mutation.new_value()?.as_enum() != Some(TvPlatform::LgWebOs.as_str())
+        {
+            return Ok(());
+        }
+
+        let tv_ip = match self.store.effective_by_name("tv.ip")?.required_value()? {
+            SettingValue::Ipv4(value) => value,
+            _ => {
+                return Err(SettingsError::MissingRequiredSetting {
+                    key: "tv.ip".to_string(),
+                });
+            }
+        };
+
+        self.preflight
+            .preflight(TvPlatform::LgWebOs, self.store.path(), tv_ip, writer)
+            .map_err(|message| SettingsError::PlatformPreflight {
+                key: mutation.key_name().to_string(),
+                message,
+            })
     }
 
     fn apply_after_persist(
@@ -1965,6 +2125,10 @@ pub enum SettingsError {
     Apply {
         message: String,
     },
+    PlatformPreflight {
+        key: String,
+        message: String,
+    },
     ApplyAfterPersist {
         key: String,
         path: PathBuf,
@@ -2010,6 +2174,10 @@ impl fmt::Display for SettingsError {
                 )
             }
             Self::Apply { message } => write!(f, "{message}"),
+            Self::PlatformPreflight { key, message } => write!(
+                f,
+                "could not enable platform setting `{key}` because native preflight failed: {message}"
+            ),
             Self::ApplyAfterPersist { key, path, message } => write!(
                 f,
                 "setting `{key}` was saved to `{}` but could not be applied: {message}. Restart LG Buddy or rerun the command after fixing the apply error.",
@@ -2050,6 +2218,7 @@ impl std::error::Error for SettingsError {
             Self::ReadConfig { .. }
             | Self::WriteConfig { .. }
             | Self::Apply { .. }
+            | Self::PlatformPreflight { .. }
             | Self::ApplyAfterPersist { .. }
             | Self::WriteOutput(_)
             | Self::InvalidKey { .. }
@@ -2224,12 +2393,12 @@ fn validate_storage_key(value: &str) -> Result<(), &'static str> {
 mod tests {
     use super::{
         format_effective_value, ApplyStrategy, ConfigEnvReader, ConfigPathResolver,
-        ServiceController, SettingKey, SettingMutability, SettingOperation, SettingSource,
-        SettingType, SettingValue, SettingsApplier, SettingsCommand, SettingsCommandRunner,
-        SettingsError, SettingsParseError, SettingsStore, UserServiceState, UserUnitEnableOutcome,
-        SETTINGS_REGISTRY,
+        PlatformPreflight, ServiceController, SettingKey, SettingMutability, SettingOperation,
+        SettingSource, SettingType, SettingValue, SettingsApplier, SettingsCommand,
+        SettingsCommandRunner, SettingsError, SettingsParseError, SettingsStore, UserServiceState,
+        UserUnitEnableOutcome, SETTINGS_REGISTRY,
     };
-    use crate::config::{ConfigPathSources, MAX_IDLE_TIMEOUT};
+    use crate::config::{ConfigPathSources, TvPlatform, MAX_IDLE_TIMEOUT};
     use std::cell::Cell;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -2255,6 +2424,7 @@ mod tests {
                 "tv.ip",
                 "tv.mac",
                 "tv.input",
+                "tv.platform",
                 "screen.backend",
                 "screen.idle_blank",
                 "screen.idle_timeout",
@@ -2280,6 +2450,7 @@ mod tests {
                 ("tv.ip", "tvs_primary_ip"),
                 ("tv.mac", "tvs_primary_mac"),
                 ("tv.input", "tvs_primary_input"),
+                ("tv.platform", "tvs_primary_platform"),
                 ("screen.backend", "screen_backend"),
                 ("screen.idle_blank", "screen_idle_blank"),
                 ("screen.idle_timeout", "screen_idle_timeout"),
@@ -2305,6 +2476,7 @@ mod tests {
                 "tv.ip | storage=tvs_primary_ip | fallbacks=tv_ip | type=ipv4 | default=required | mutability=read-write | ops=get,describe,set | apply=no-runtime-apply-required | description=IPv4 address of the primary configured TV.",
                 "tv.mac | storage=tvs_primary_mac | fallbacks=tv_mac | type=mac-address | default=required | mutability=read-write | ops=get,describe,set | apply=no-runtime-apply-required | description=MAC address of the primary configured TV for Wake-on-LAN.",
                 "tv.input | storage=tvs_primary_input | fallbacks=input | type=enum values=HDMI_1,HDMI_2,HDMI_3,HDMI_4 aliases=(none) | default=required | mutability=read-write | ops=get,describe,set | apply=no-runtime-apply-required | description=HDMI input used by the primary configured TV.",
+                "tv.platform | storage=tvs_primary_platform | fallbacks=(none) | type=enum values=bscpylgtv,lg_webos aliases=(none) | default=bscpylgtv | mutability=read-write | ops=get,describe,set,unset | apply=no-runtime-apply-required | description=Control platform for the primary configured TV.",
                 "screen.backend | storage=screen_backend | fallbacks=(none) | type=enum values=auto,gnome,swayidle aliases=(none) | default=auto | mutability=read-write | ops=get,describe,set,unset | apply=restart-user-screen-service | description=Screen backend selection for user-session blanking and restore behavior.",
                 "screen.idle_blank | storage=screen_idle_blank | fallbacks=(none) | type=enum values=enabled,disabled aliases=(none) | default=enabled | mutability=read-write | ops=get,describe,set,unset | apply=restart-user-screen-service | description=Idle-driven blanking and restore behavior for the configured screen.",
                 "screen.idle_timeout | storage=screen_idle_timeout | fallbacks=(none) | type=integer range=1..=86400 | default=300 | mutability=read-write | ops=get,describe,set,unset | apply=restart-user-screen-service | description=Idle timeout in seconds before LG Buddy blanks the configured screen.",
@@ -2395,6 +2567,7 @@ mod tests {
 tv.ip=<missing> (missing, read-write, ops: get,describe,set)
 tv.mac=<missing> (missing, read-write, ops: get,describe,set)
 tv.input=<missing> (missing, read-write, ops: get,describe,set)
+tv.platform=bscpylgtv (default, read-write, ops: get,describe,set,unset)
 screen.backend=gnome (config.env, read-write, ops: get,describe,set,unset)
 screen.idle_blank=enabled (default, read-write, ops: get,describe,set,unset)
 screen.idle_timeout=300 (default, read-write, ops: get,describe,set,unset)
@@ -2499,6 +2672,18 @@ tv.input
   allowed values: HDMI_1, HDMI_2, HDMI_3, HDMI_4
   apply: no-runtime-apply-required
   description: HDMI input used by the primary configured TV.
+
+tv.platform
+  storage key: tvs_primary_platform
+  type: enum
+  current: bscpylgtv
+  source: default
+  default: bscpylgtv
+  mutability: read-write
+  supported operations: get, describe, set, unset
+  allowed values: bscpylgtv, lg_webos
+  apply: no-runtime-apply-required
+  description: Control platform for the primary configured TV.
 
 screen.backend
   storage key: screen_backend
@@ -3428,6 +3613,7 @@ tvs_primary_ip=192.0.2.43
                 "tv.ip",
                 "tv.mac",
                 "tv.input",
+                "tv.platform",
                 "screen.backend",
                 "screen.idle_blank",
                 "screen.idle_timeout",
@@ -3443,6 +3629,7 @@ tvs_primary_ip=192.0.2.43
                 "<missing>",
                 "<missing>",
                 "<missing>",
+                "bscpylgtv",
                 "gnome",
                 "enabled",
                 "300",
@@ -3458,6 +3645,7 @@ tvs_primary_ip=192.0.2.43
                 SettingSource::Missing,
                 SettingSource::Missing,
                 SettingSource::Missing,
+                SettingSource::Default,
                 SettingSource::ConfigEnv,
                 SettingSource::Default,
                 SettingSource::Default,
@@ -3573,6 +3761,128 @@ tvs_primary_ip=192.0.2.43
             input.parse_value("AV_1"),
             Err(SettingsError::InvalidValue { .. })
         ));
+    }
+
+    #[test]
+    fn tv_platform_values_are_validated() {
+        let platform = SETTINGS_REGISTRY.get_by_name("tv.platform").unwrap();
+
+        assert_eq!(
+            platform.parse_value("bscpylgtv"),
+            Ok(SettingValue::Enum("bscpylgtv"))
+        );
+        assert_eq!(
+            platform.parse_value("lg_webos"),
+            Ok(SettingValue::Enum("lg_webos"))
+        );
+        assert!(matches!(
+            platform.parse_value("native"),
+            Err(SettingsError::InvalidValue { .. })
+        ));
+    }
+
+    #[test]
+    fn settings_runner_requires_successful_native_preflight_before_persisting() {
+        let path = unique_test_path("platform-preflight");
+        fs::write(&path, "tv_ip=192.0.2.42\ntvs_primary_platform=bscpylgtv\n").unwrap();
+        let store = SettingsStore::load(&path).unwrap();
+        let preflight = FakePlatformPreflight::succeeding();
+        let calls = preflight.calls.clone();
+        let runner = SettingsCommandRunner::with_applier_and_preflight(
+            store,
+            SettingsApplier::new(FakeServiceController::missing()),
+            preflight,
+        );
+        let mut output = Vec::new();
+
+        runner
+            .run(
+                SettingsCommand::Set {
+                    key: "tv.platform".to_string(),
+                    value: "lg_webos".to_string(),
+                },
+                &mut output,
+            )
+            .unwrap();
+
+        assert_eq!(calls.get(), 1);
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "tv_ip=192.0.2.42\ntvs_primary_platform=lg_webos\n"
+        );
+        assert!(String::from_utf8(output)
+            .unwrap()
+            .contains("native preflight succeeded"));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn failed_native_preflight_leaves_platform_unchanged() {
+        let path = unique_test_path("platform-preflight-failure");
+        fs::write(&path, "tv_ip=192.0.2.42\ntvs_primary_platform=bscpylgtv\n").unwrap();
+        let store = SettingsStore::load(&path).unwrap();
+        let preflight = FakePlatformPreflight::failing();
+        let calls = preflight.calls.clone();
+        let runner = SettingsCommandRunner::with_applier_and_preflight(
+            store,
+            SettingsApplier::new(FakeServiceController::missing()),
+            preflight,
+        );
+        let mut output = Vec::new();
+
+        let error = runner
+            .run(
+                SettingsCommand::Set {
+                    key: "tv.platform".to_string(),
+                    value: "lg_webos".to_string(),
+                },
+                &mut output,
+            )
+            .expect_err("failed native preflight should block persistence");
+
+        assert_eq!(calls.get(), 1);
+        assert!(matches!(error, SettingsError::PlatformPreflight { .. }));
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "tv_ip=192.0.2.42\ntvs_primary_platform=bscpylgtv\n"
+        );
+        assert!(output.is_empty());
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn switching_to_bscpylgtv_skips_native_preflight() {
+        let path = unique_test_path("platform-legacy");
+        fs::write(&path, "tv_ip=192.0.2.42\ntvs_primary_platform=lg_webos\n").unwrap();
+        let store = SettingsStore::load(&path).unwrap();
+        let preflight = FakePlatformPreflight::failing();
+        let calls = preflight.calls.clone();
+        let runner = SettingsCommandRunner::with_applier_and_preflight(
+            store,
+            SettingsApplier::new(FakeServiceController::missing()),
+            preflight,
+        );
+        let mut output = Vec::new();
+
+        runner
+            .run(
+                SettingsCommand::Set {
+                    key: "tv.platform".to_string(),
+                    value: "bscpylgtv".to_string(),
+                },
+                &mut output,
+            )
+            .unwrap();
+
+        assert_eq!(calls.get(), 0);
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "tv_ip=192.0.2.42\ntvs_primary_platform=bscpylgtv\n"
+        );
+
+        let _ = fs::remove_file(path);
     }
 
     #[test]
@@ -3767,6 +4077,48 @@ tvs_primary_ip=192.0.2.43
             .map(|operation| operation.as_str())
             .collect::<Vec<_>>()
             .join(",")
+    }
+
+    #[derive(Debug, Clone)]
+    struct FakePlatformPreflight {
+        calls: Rc<Cell<usize>>,
+        result: Result<(), &'static str>,
+    }
+
+    impl FakePlatformPreflight {
+        fn succeeding() -> Self {
+            Self {
+                calls: Rc::new(Cell::new(0)),
+                result: Ok(()),
+            }
+        }
+
+        fn failing() -> Self {
+            Self {
+                calls: Rc::new(Cell::new(0)),
+                result: Err("TV rejected native authentication"),
+            }
+        }
+    }
+
+    impl PlatformPreflight for FakePlatformPreflight {
+        fn preflight(
+            &self,
+            platform: TvPlatform,
+            _config_path: &Path,
+            _tv_ip: std::net::Ipv4Addr,
+            writer: &mut dyn std::io::Write,
+        ) -> Result<(), String> {
+            assert_eq!(platform, TvPlatform::LgWebOs);
+            self.calls.set(self.calls.get() + 1);
+            if self.result.is_ok() {
+                writeln!(writer, "native preflight succeeded")
+                    .map_err(|error| error.to_string())?;
+                Ok(())
+            } else {
+                self.result.map_err(str::to_string)
+            }
+        }
     }
 
     #[derive(Debug, Clone)]

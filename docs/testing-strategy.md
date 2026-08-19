@@ -139,6 +139,10 @@ It is useful when we want to express scenarios like:
 - when the user returns after LG Buddy blanked the TV, LG Buddy restores the screen
 - when aggressive restore policy is enabled, wake/activity can restore even without a marker
 - when GNOME is available, backend detection resolves to `gnome`
+- when the user opts into `lg_webos`, foreground pairing stores the credential
+  and later TV commands authenticate without pairing again
+- when native credentials are missing or stale, background commands fail with
+  foreground-pairing guidance without creating or replacing credentials
 
 It is not the right place for:
 
@@ -183,10 +187,19 @@ Examples:
 
 ### Native webOS boundary
 
-The native webOS client uses one stateful test server for complete webOS frames,
+The native webOS client tests use one stateful server for complete webOS frames,
 device state, and protocol-fault scenarios. Characterization tests keep its TV
-behavior aligned with observed hardware evidence, while higher-level LG Buddy
-tests consume the same server without duplicating webOS response fixtures.
+behavior aligned with observed hardware evidence.
+
+Cucumber adds the process-level product boundary. It runs the real `lg-buddy`
+binary against the same stateful server over TLS on the standard webOS port.
+The server enforces the observed registration permissions, signed brightness
+write envelope, request payloads, and device state transitions while recording
+authentication history and pairing prompts. The scenarios cover opt-in and
+credential outcomes plus representative brightness, screen, input, and power
+operations; detailed transport faults remain in the native client tests.
+The process-level fixture binds `127.0.0.1:3001`, matching the production TV
+endpoint, so that port must be free while the serial Cucumber suite runs.
 
 The evidence workflow, response ownership rules, and semantic scenario model
 are documented in
@@ -259,7 +272,10 @@ These should not dominate the Rust test suite, but they still matter because ins
 
 The release-bundle smoke test covers the current installed lifecycle topology:
 the logind lifecycle service remains installed, the NetworkManager pre-down hook
-remains installed, and legacy systemd sleep hooks are absent.
+remains installed, and legacy systemd sleep hooks are absent. It also verifies
+that a missing TV platform remains `bscpylgtv`, explicit platform values survive
+reconfiguration, and `lg_webos` routes to the stored-credential-only native path
+and reports a missing credential without initiating background pairing.
 
 ## Current Practical Gaps
 

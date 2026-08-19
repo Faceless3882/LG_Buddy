@@ -2820,6 +2820,7 @@ mod tests {
                 .parse::<MacAddress>()
                 .expect("parse mac"),
             input,
+            tv_platform: crate::config::TvPlatform::Bscpylgtv,
             screen_backend: ScreenBackend::Auto,
             screen_idle_blank: ScreenIdleBlankPolicy::Enabled,
             screen_idle_timeout: 300,
