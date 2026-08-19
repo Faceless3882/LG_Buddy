@@ -11,28 +11,48 @@ use std::fmt;
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WebOsPairingPolicy {
+    PairIfNeeded,
+    StoredTokenOnly,
+}
+
 pub struct WebOsTvClient {
     endpoint: WebOsEndpoint,
     connect_timeout: Duration,
     response_timeout: Duration,
     token_store: PlatformAccessTokenStore,
+    pairing_policy: WebOsPairingPolicy,
     session: Mutex<Option<WebOsClient>>,
 }
 
 impl WebOsTvClient {
-    pub fn new(
+    pub(crate) fn new(
         endpoint: WebOsEndpoint,
         connect_timeout: Duration,
         response_timeout: Duration,
         token_store: PlatformAccessTokenStore,
+        pairing_policy: WebOsPairingPolicy,
     ) -> Self {
         Self {
             endpoint,
             connect_timeout,
             response_timeout,
             token_store,
+            pairing_policy,
             session: Mutex::new(None),
         }
+    }
+
+    pub(crate) fn has_stored_access_token(
+        &self,
+    ) -> Result<bool, crate::platform_access_token::PlatformAccessTokenStoreError> {
+        self.token_store.load().map(|token| token.is_some())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn response_timeout(&self) -> Duration {
+        self.response_timeout
     }
 
     fn with_session<T>(
@@ -81,13 +101,23 @@ impl WebOsTvClient {
             return Ok(());
         }
 
-        let client = WebOsClient::connect_authenticated(
-            self.endpoint,
-            self.connect_timeout,
-            self.response_timeout,
-            &self.token_store,
-            |_| {},
-        )
+        let client = match self.pairing_policy {
+            WebOsPairingPolicy::PairIfNeeded => WebOsClient::connect_authenticated(
+                self.endpoint,
+                self.connect_timeout,
+                self.response_timeout,
+                &self.token_store,
+                |_| {},
+            ),
+            WebOsPairingPolicy::StoredTokenOnly => {
+                WebOsClient::connect_authenticated_with_stored_token(
+                    self.endpoint,
+                    self.connect_timeout,
+                    self.response_timeout,
+                    &self.token_store,
+                )
+            }
+        }
         .map_err(|error| authenticated_client_failure(error).into_tv_error(operation))?;
         *session = Some(client);
         Ok(())
@@ -243,6 +273,9 @@ fn authenticated_client_failure(error: WebOsAuthenticatedClientError) -> WebOsAd
             client_failure_with_detail(source, detail)
         }
         WebOsAuthenticatedClientError::Authentication { source } => match source {
+            PlatformAccessTokenAcquisitionError::MissingStoredToken => {
+                WebOsAdapterFailure::new(TvErrorKind::Authentication, detail, false)
+            }
             PlatformAccessTokenAcquisitionError::Registration { source } => match source {
                 super::WebOsClientRegistrationError::Transport { source } => {
                     client_failure_with_detail(source, detail)
@@ -451,6 +484,7 @@ impl fmt::Debug for WebOsTvClient {
             .field("connect_timeout", &self.connect_timeout)
             .field("response_timeout", &self.response_timeout)
             .field("token_store", &self.token_store)
+            .field("pairing_policy", &self.pairing_policy)
             .field("session", &"<redacted>")
             .finish()
     }
@@ -458,17 +492,106 @@ impl fmt::Debug for WebOsTvClient {
 
 #[cfg(test)]
 mod tests {
-    use super::WebOsTvClient;
+    use super::{WebOsPairingPolicy, WebOsTvClient};
     use crate::config::HdmiInput;
     use crate::tv::{CurrentInput, OledBrightness, SelectedTvClient, TvClient, TvErrorKind};
     use crate::web_os::test_support::{
         TestAccessTokenStore, WebOsTestInput, WebOsTestScenario, WebOsTestServer,
     };
     use crate::web_os::WebOsPowerState;
+    use std::fs;
     use std::time::Duration;
 
     const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
     const RESPONSE_TIMEOUT: Duration = Duration::from_millis(500);
+
+    #[test]
+    fn ordinary_operation_pairs_and_persists_a_missing_token() {
+        let server = WebOsTestServer::active(WebOsTestInput::Hdmi3);
+        let token_fixture = TestAccessTokenStore::new();
+        fs::remove_file(token_fixture.store().token_path()).expect("remove stored token");
+        let client = client_for_server(&server, &token_fixture);
+
+        let input = client
+            .current_input()
+            .expect("ordinary operation should pair");
+
+        assert_eq!(input, CurrentInput::Hdmi(HdmiInput::Hdmi3));
+        assert_eq!(
+            token_fixture.store().load().expect("load acquired token"),
+            Some(server.access_token())
+        );
+        assert_eq!(server.snapshot().connection_count, 1);
+        server.finish();
+    }
+
+    #[test]
+    fn ordinary_operation_repairs_a_rejected_token() {
+        let server = WebOsTestServer::for_scenario(WebOsTestScenario::StoredTokenPairingPrompt);
+        let token_fixture = TestAccessTokenStore::new();
+        let client = client_for_server(&server, &token_fixture);
+
+        let input = client
+            .current_input()
+            .expect("ordinary operation should repair stale token");
+
+        assert_eq!(input, CurrentInput::Hdmi(HdmiInput::Hdmi3));
+        assert_eq!(
+            token_fixture.store().load().expect("load repaired token"),
+            Some(server.access_token())
+        );
+        assert_eq!(server.snapshot().connection_count, 2);
+        server.finish();
+    }
+
+    #[test]
+    fn stored_token_only_operation_returns_immediately_when_token_is_missing() {
+        let server = WebOsTestServer::active(WebOsTestInput::Hdmi3);
+        let token_fixture = TestAccessTokenStore::new();
+        fs::remove_file(token_fixture.store().token_path()).expect("remove stored token");
+        let client = client_for_server_with_policy(
+            &server,
+            &token_fixture,
+            WebOsPairingPolicy::StoredTokenOnly,
+        );
+
+        let error = client
+            .current_input()
+            .expect_err("stored-token-only operation must not pair");
+
+        assert_eq!(error.kind(), TvErrorKind::Authentication);
+        assert_eq!(server.snapshot().connection_count, 0);
+        assert!(!token_fixture.store().token_path().exists());
+        server.finish();
+    }
+
+    #[test]
+    fn stored_token_only_operation_does_not_repair_a_rejected_token() {
+        let server = WebOsTestServer::for_scenario(WebOsTestScenario::StoredTokenPairingPrompt);
+        let token_fixture = TestAccessTokenStore::new();
+        let original = token_fixture
+            .store()
+            .load()
+            .expect("load original token")
+            .expect("original token");
+        let client = client_for_server_with_policy(
+            &server,
+            &token_fixture,
+            WebOsPairingPolicy::StoredTokenOnly,
+        );
+
+        let error = client
+            .current_input()
+            .expect_err("stored-token-only operation must not repair stale token");
+
+        assert_eq!(error.kind(), TvErrorKind::Authentication);
+        assert_eq!(
+            token_fixture.store().load().expect("reload original token"),
+            Some(original)
+        );
+        assert_eq!(server.snapshot().connection_count, 1);
+        server.finish();
+    }
 
     #[test]
     fn complete_tv_contract_reuses_one_authenticated_session() {
@@ -588,11 +711,20 @@ mod tests {
         server: &WebOsTestServer,
         token_fixture: &TestAccessTokenStore,
     ) -> WebOsTvClient {
+        client_for_server_with_policy(server, token_fixture, WebOsPairingPolicy::PairIfNeeded)
+    }
+
+    fn client_for_server_with_policy(
+        server: &WebOsTestServer,
+        token_fixture: &TestAccessTokenStore,
+        pairing_policy: WebOsPairingPolicy,
+    ) -> WebOsTvClient {
         WebOsTvClient::new(
             server.endpoint(),
             CONNECT_TIMEOUT,
             RESPONSE_TIMEOUT,
             token_fixture.store().clone(),
+            pairing_policy,
         )
     }
 

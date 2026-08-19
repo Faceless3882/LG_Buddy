@@ -8,6 +8,7 @@ Feature: Settings CLI
     And stdout contains "tv.ip=192.0.2.42 (config.env, read-write, ops: get,describe,set)"
     And stdout contains "tv.mac=aa:bb:cc:dd:ee:ff (config.env, read-write, ops: get,describe,set)"
     And stdout contains "tv.input=HDMI_2 (config.env, read-write, ops: get,describe,set)"
+    And stdout contains "tv.platform=bscpylgtv (default, read-write, ops: get,describe,set,unset)"
     And stdout contains "screen.backend=auto (config.env, read-write, ops: get,describe,set,unset)"
     And stdout contains "screen.idle_blank=enabled (default, read-write, ops: get,describe,set,unset)"
     And stdout contains "screen.restore_policy=conservative (default, read-write, ops: get,describe,set,unset)"
@@ -23,6 +24,23 @@ Feature: Settings CLI
     And stdout contains "storage key: tvs_primary_input"
     And stdout contains "default: required"
     And stdout contains "supported operations: get, describe, set"
+
+  Scenario: settings describe exposes the sole TV platform selector
+    Given a temporary LG Buddy config using input HDMI_2
+    When I run the command "settings describe tv.platform"
+    Then the command succeeds
+    And stdout contains "storage key: tvs_primary_platform"
+    And stdout contains "default: bscpylgtv"
+    And stdout contains "supported operations: get, describe, set, unset"
+    And stdout contains "allowed values: bscpylgtv, lg_webos"
+
+  Scenario: settings rejects an invalid TV platform without altering config
+    Given a temporary LG Buddy config using input HDMI_2
+    And the current config is remembered
+    When I run the command "settings set tv.platform native"
+    Then the command fails
+    And stderr contains "invalid value for setting `tv.platform`"
+    And config.env is unchanged
 
   Scenario: settings describe shows lifecycle policy operations
     Given a temporary LG Buddy config using input HDMI_2

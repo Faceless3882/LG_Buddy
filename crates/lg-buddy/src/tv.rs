@@ -14,9 +14,9 @@ use crate::auth::{
     resolve_bscpylgtv_auth_context_from_env, resolve_config_owner, AuthContextError,
     BscpylgtvAuthContext, SystemUser,
 };
-use crate::config::{HdmiInput, MacAddress};
+use crate::config::{HdmiInput, MacAddress, TvPlatform};
 use crate::platform_access_token::{PlatformAccessTokenStore, PlatformAccessTokenStoreError};
-use crate::web_os::{WebOsEndpoint, WebOsTvClient};
+use crate::web_os::{WebOsEndpoint, WebOsPairingPolicy, WebOsTvClient};
 use crate::wol::{WakeOnLanError, WakeOnLanSender};
 
 pub const DEFAULT_BSCPYLGTV_COMMAND_PATH: &str = "/usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand";
@@ -24,6 +24,7 @@ pub const OLED_BRIGHTNESS_MIN: u8 = 0;
 pub const OLED_BRIGHTNESS_MAX: u8 = 100;
 const DEFAULT_WEBOS_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const DEFAULT_WEBOS_RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
+const DEFAULT_WEBOS_UNATTENDED_RESPONSE_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CommandOutput {
@@ -213,36 +214,27 @@ pub trait TvClient {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TvClientImplementation {
-    Bscpylgtv,
-    WebOs,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TvClientBuildOptions {
-    implementation: TvClientImplementation,
-    legacy_command_timeout: Option<Duration>,
+    command_timeout: Option<Duration>,
+    webos_pairing_policy: WebOsPairingPolicy,
 }
 
 impl TvClientBuildOptions {
     pub(crate) fn production() -> Self {
         Self {
-            implementation: TvClientImplementation::Bscpylgtv,
-            legacy_command_timeout: None,
+            command_timeout: None,
+            webos_pairing_policy: WebOsPairingPolicy::PairIfNeeded,
         }
     }
 
-    pub(crate) fn with_legacy_command_timeout(mut self, timeout: Duration) -> Self {
-        self.legacy_command_timeout = Some(timeout);
+    pub(crate) fn with_command_timeout(mut self, timeout: Duration) -> Self {
+        self.command_timeout = Some(timeout);
         self
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn webos() -> Self {
-        Self {
-            implementation: TvClientImplementation::WebOs,
-            legacy_command_timeout: None,
-        }
+    pub(crate) fn stored_token_only(mut self) -> Self {
+        self.webos_pairing_policy = WebOsPairingPolicy::StoredTokenOnly;
+        self
     }
 }
 
@@ -326,33 +318,55 @@ impl TvClient for SelectedTvClient {
     }
 }
 
+impl SelectedTvClient {
+    pub(crate) fn can_authenticate_unattended(&self) -> Result<bool, TvClientBuildError> {
+        match self {
+            Self::Bscpylgtv(_) => Ok(true),
+            Self::WebOs(client) => client
+                .has_stored_access_token()
+                .map_err(TvClientBuildError::TokenStore),
+        }
+    }
+}
+
 pub(crate) fn build_tv_client(
     config_path: &Path,
     tv_ip: Ipv4Addr,
+    platform: TvPlatform,
     options: TvClientBuildOptions,
 ) -> Result<SelectedTvClient, TvClientBuildError> {
-    match options.implementation {
-        TvClientImplementation::Bscpylgtv => {
+    match platform {
+        TvPlatform::Bscpylgtv => {
             let auth_context = resolve_bscpylgtv_auth_context_from_env(config_path)
                 .map_err(TvClientBuildError::AuthContext)?;
             let mut client = BscpylgtvCommandClient::from_env(tv_ip)
                 .with_auth_context(auth_context)
                 .with_launcher(UserScopedBscpylgtvCommandLauncher);
-            if let Some(timeout) = options.legacy_command_timeout {
+            if let Some(timeout) = options.command_timeout {
                 client = client.with_command_timeout(timeout);
             }
             Ok(SelectedTvClient::Bscpylgtv(client))
         }
-        TvClientImplementation::WebOs => {
+        TvPlatform::LgWebOs => {
             let owner =
                 resolve_config_owner(config_path).map_err(TvClientBuildError::AuthContext)?;
             let token_store = PlatformAccessTokenStore::for_primary_profile(config_path, owner)
                 .map_err(TvClientBuildError::TokenStore)?;
+            let response_timeout =
+                options
+                    .command_timeout
+                    .unwrap_or(match options.webos_pairing_policy {
+                        WebOsPairingPolicy::PairIfNeeded => DEFAULT_WEBOS_RESPONSE_TIMEOUT,
+                        WebOsPairingPolicy::StoredTokenOnly => {
+                            DEFAULT_WEBOS_UNATTENDED_RESPONSE_TIMEOUT
+                        }
+                    });
             Ok(SelectedTvClient::WebOs(Box::new(WebOsTvClient::new(
                 WebOsEndpoint::wss(tv_ip),
                 DEFAULT_WEBOS_CONNECT_TIMEOUT,
-                DEFAULT_WEBOS_RESPONSE_TIMEOUT,
+                response_timeout,
                 token_store,
+                options.webos_pairing_policy,
             ))))
         }
     }
@@ -1027,7 +1041,7 @@ mod tests {
         DEFAULT_BSCPYLGTV_COMMAND_PATH,
     };
     use crate::auth::{BscpylgtvAuthContext, SystemUser};
-    use crate::config::{HdmiInput, MacAddress};
+    use crate::config::{HdmiInput, MacAddress, TvPlatform};
     use crate::wol::{WakeOnLanError, WakeOnLanSender};
     use std::cell::RefCell;
     use std::io;
@@ -1079,18 +1093,48 @@ mod tests {
     }
 
     #[test]
-    fn centralized_factory_can_build_both_internal_implementations() {
+    fn centralized_factory_maps_each_platform_to_its_client() {
         let config = TestConfigFile::new("tv-client-factory");
         config.write_sample("HDMI_2");
         let tv_ip = ip("192.0.2.42");
 
-        let production = build_tv_client(config.path(), tv_ip, TvClientBuildOptions::production())
-            .expect("build production TV client");
-        assert!(matches!(production, SelectedTvClient::Bscpylgtv(_)));
+        let bscpylgtv = build_tv_client(
+            config.path(),
+            tv_ip,
+            TvPlatform::Bscpylgtv,
+            TvClientBuildOptions::production(),
+        )
+        .expect("build bscpylgtv TV client");
+        assert!(matches!(bscpylgtv, SelectedTvClient::Bscpylgtv(_)));
 
-        let webos = build_tv_client(config.path(), tv_ip, TvClientBuildOptions::webos())
-            .expect("build internal webOS TV client");
+        let webos = build_tv_client(
+            config.path(),
+            tv_ip,
+            TvPlatform::LgWebOs,
+            TvClientBuildOptions::production(),
+        )
+        .expect("build native webOS TV client");
         assert!(matches!(webos, SelectedTvClient::WebOs(_)));
+    }
+
+    #[test]
+    fn centralized_factory_applies_command_timeout_to_native_responses() {
+        let config = TestConfigFile::new("tv-client-native-timeout");
+        config.write_sample("HDMI_2");
+        let command_timeout = Duration::from_secs(3);
+
+        let webos = build_tv_client(
+            config.path(),
+            ip("192.0.2.42"),
+            TvPlatform::LgWebOs,
+            TvClientBuildOptions::production().with_command_timeout(command_timeout),
+        )
+        .expect("build native webOS TV client");
+
+        let SelectedTvClient::WebOs(client) = webos else {
+            panic!("lg_webos should select the native webOS client");
+        };
+        assert_eq!(client.response_timeout(), command_timeout);
     }
 
     #[test]
@@ -1354,7 +1398,11 @@ mod tests {
 
         assert_eq!(err.operation(), TvOperation::ReadInput);
         assert_eq!(err.kind(), TvErrorKind::Transport);
-        assert!(err.detail().contains("timed out after"));
+        assert!(
+            err.detail().contains("timed out after"),
+            "unexpected error detail: {}",
+            err.detail()
+        );
     }
 
     #[test]

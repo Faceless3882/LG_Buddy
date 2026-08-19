@@ -21,7 +21,7 @@ with `v` followed by a digit, such as `v1.0.0` or `v1.0.0-beta.1`.
    - `docs/`
    - `README.md`
    - `LICENSE`
-4. Smoke tests the generated release bundle by unpacking it, running a non-interactive install into a temporary root, checking the lifecycle service plus NetworkManager pre-down hook topology, and then uninstalling from that temporary install.
+4. Smoke tests the generated release bundle by unpacking it, running a non-interactive install into a temporary root, checking both TV platform modes and the lifecycle service plus NetworkManager pre-down hook topology, and then uninstalling from that temporary install.
 5. Generates and verifies `sha256sums.txt` for the release archive.
 6. Publishes the release assets through `scripts/publish-release-assets.sh`.
 

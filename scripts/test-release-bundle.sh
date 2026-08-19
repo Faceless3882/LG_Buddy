@@ -226,6 +226,7 @@ fi
 grep -q '^tvs_primary_ip=192.168.1.10$' "$CONFIG_FILE"
 grep -q '^tvs_primary_mac=aa:bb:cc:dd:ee:ff$' "$CONFIG_FILE"
 grep -q '^tvs_primary_input=HDMI_2$' "$CONFIG_FILE"
+grep -q '^tvs_primary_platform=bscpylgtv$' "$CONFIG_FILE"
 grep -q '^screen_idle_blank=enabled$' "$CONFIG_FILE"
 grep -q '^screen_backend=auto$' "$CONFIG_FILE"
 grep -q '^system_sleep_wake_policy=enabled$' "$CONFIG_FILE"
@@ -251,6 +252,22 @@ printf '%s\n' "$INSTALLED_VERSION_OUTPUT" | grep -q "^version: "
 printf '%s\n' "$INSTALLED_VERSION_OUTPUT" | grep -q "^channel: "
 printf '%s\n' "$INSTALLED_VERSION_OUTPUT" | grep -q "^commit: "
 
+# Existing profiles without the platform key remain on bscpylgtv. Materialize
+# that choice through settings, then use a controlled raw-config fixture to
+# prove an unpaired native shutdown skips immediately without contacting a TV.
+sed -i '/^tvs_primary_platform=/d' "$CONFIG_FILE"
+"$INSTALLED_BINARY" settings get tv.platform | grep -q '^bscpylgtv$'
+"$INSTALLED_BINARY" settings set tv.platform bscpylgtv
+grep -q '^tvs_primary_platform=bscpylgtv$' "$CONFIG_FILE"
+
+sed -i 's/^tvs_primary_platform=bscpylgtv$/tvs_primary_platform=lg_webos/' "$CONFIG_FILE"
+"$INSTALLED_BINARY" settings get tv.platform | grep -q '^lg_webos$'
+NATIVE_PLATFORM_OUTPUT="$("$INSTALLED_BINARY" shutdown 2>&1)"
+printf '%s\n' "$NATIVE_PLATFORM_OUTPUT" | grep -F -q 'No stored native TV credential; skipping unattended TV control.'
+
+"$INSTALLED_BINARY" settings set tv.platform bscpylgtv
+grep -q '^tvs_primary_platform=bscpylgtv$' "$CONFIG_FILE"
+
 "$INSTALLED_BINARY" settings set screen.backend gnome
 "$INSTALLED_BINARY" settings set screen.idle_timeout 900
 "$INSTALLED_BINARY" settings set screen.idle_timeout 90000
@@ -271,8 +288,14 @@ grep -q '^screen_restore_policy=aggressive$' "$CONFIG_FILE"
 grep -q '^tvs_primary_ip=192.168.1.12$' "$CONFIG_FILE"
 grep -q '^tvs_primary_mac=22:33:44:55:66:77$' "$CONFIG_FILE"
 grep -q '^tvs_primary_input=HDMI_4$' "$CONFIG_FILE"
+grep -q '^tvs_primary_platform=bscpylgtv$' "$CONFIG_FILE"
 grep -q '^updates_auto_check=disabled$' "$CONFIG_FILE"
 grep -q '^updates_channel=prerelease$' "$CONFIG_FILE"
+
+# Configure should read inline-commented platform values with the same value
+# semantics as the Rust config parser, then persist the sanitized choice.
+sed -i 's/^tvs_primary_platform=bscpylgtv$/  tvs_primary_platform = bscpylgtv # legacy/' "$CONFIG_FILE"
+printf '%s\n' 'tvs_primary_platform =  lg_webos # experimental' >>"$CONFIG_FILE"
 
 (
     unset LG_BUDDY_SCREEN_BACKEND
@@ -289,6 +312,7 @@ grep -q '^updates_channel=prerelease$' "$CONFIG_FILE"
 grep -q '^tvs_primary_ip=192.168.1.11$' "$CONFIG_FILE"
 grep -q '^tvs_primary_mac=11:22:33:44:55:66$' "$CONFIG_FILE"
 grep -q '^tvs_primary_input=HDMI_3$' "$CONFIG_FILE"
+grep -q '^tvs_primary_platform=lg_webos$' "$CONFIG_FILE"
 grep -q '^screen_backend=gnome$' "$CONFIG_FILE"
 grep -q '^screen_idle_blank=disabled$' "$CONFIG_FILE"
 grep -q '^screen_idle_timeout=900$' "$CONFIG_FILE"
@@ -296,6 +320,70 @@ grep -q '^screen_restore_policy=aggressive$' "$CONFIG_FILE"
 grep -q '^system_sleep_wake_policy=enabled$' "$CONFIG_FILE"
 grep -q '^updates_auto_check=disabled$' "$CONFIG_FILE"
 grep -q '^updates_channel=prerelease$' "$CONFIG_FILE"
+
+VALID_PLATFORM_CONFIG="$WORK_DIR/config-valid-platform.snapshot"
+cp "$CONFIG_FILE" "$VALID_PLATFORM_CONFIG"
+for invalid_platform_line in \
+    '  tvs_primary_platform = # explicit empty' \
+    'tvs_primary_platform=not-a-platform'
+do
+    cp "$VALID_PLATFORM_CONFIG" "$CONFIG_FILE"
+    sed -i "s/^tvs_primary_platform=lg_webos$/${invalid_platform_line}/" "$CONFIG_FILE"
+    INVALID_PLATFORM_CONFIG="$WORK_DIR/config-invalid-platform.snapshot"
+    INVALID_PLATFORM_OUTPUT="$WORK_DIR/config-invalid-platform.output"
+    cp "$CONFIG_FILE" "$INVALID_PLATFORM_CONFIG"
+    if (
+        cd "$BUNDLE_DIR"
+        ./configure.sh >"$INVALID_PLATFORM_OUTPUT" 2>&1
+    ); then
+        echo "configure.sh unexpectedly accepted invalid TV platform: $invalid_platform_line"
+        exit 1
+    fi
+    cmp -s "$INVALID_PLATFORM_CONFIG" "$CONFIG_FILE" || {
+        echo "configure.sh rewrote invalid TV platform config: $invalid_platform_line"
+        exit 1
+    }
+    grep -F -q 'invalid TV platform' "$INVALID_PLATFORM_OUTPUT"
+done
+cp "$VALID_PLATFORM_CONFIG" "$CONFIG_FILE"
+rm -f "$VALID_PLATFORM_CONFIG" "$INVALID_PLATFORM_CONFIG" "$INVALID_PLATFORM_OUTPUT"
+
+# A real in-place install must preserve an opted-in platform and its
+# profile-scoped native credential. Do this before the existing uninstall and
+# fresh-install coverage below, without removing the user configuration.
+NATIVE_ACCESS_TOKEN_FILE="$(dirname "$CONFIG_FILE")/tvs/primary/access-token.json"
+NATIVE_PROFILE_DIR="$(dirname "$NATIVE_ACCESS_TOKEN_FILE")"
+NATIVE_PROFILES_DIR="$(dirname "$NATIVE_PROFILE_DIR")"
+NATIVE_ACCESS_TOKEN_SNAPSHOT="$WORK_DIR/native-access-token.snapshot"
+NATIVE_ACCESS_TOKEN_CONTENT='{"access_token":"release-smoke-native-token"}'
+mkdir -p "$NATIVE_PROFILE_DIR"
+printf '%s\n' "$NATIVE_ACCESS_TOKEN_CONTENT" >"$NATIVE_ACCESS_TOKEN_FILE"
+chmod 600 "$NATIVE_ACCESS_TOKEN_FILE"
+cp "$NATIVE_ACCESS_TOKEN_FILE" "$NATIVE_ACCESS_TOKEN_SNAPSHOT"
+"$INSTALLED_BINARY" settings get tv.platform | grep -q '^lg_webos$'
+
+(
+    unset LG_BUDDY_TV_IP
+    unset LG_BUDDY_TV_MAC
+    unset LG_BUDDY_INPUT
+    unset LG_BUDDY_SCREEN_BACKEND
+    unset LG_BUDDY_SCREEN_IDLE_TIMEOUT
+    unset LG_BUDDY_SCREEN_RESTORE_POLICY
+    unset LG_BUDDY_SYSTEM_SLEEP_WAKE_POLICY
+    unset LG_BUDDY_DISABLE_SLEEP_WAKE
+    cd "$BUNDLE_DIR"
+    ./install.sh
+)
+
+assert_file "$CONFIG_FILE"
+grep -q '^tvs_primary_platform=lg_webos$' "$CONFIG_FILE"
+"$INSTALLED_BINARY" settings get tv.platform | grep -q '^lg_webos$'
+assert_file "$NATIVE_ACCESS_TOKEN_FILE"
+cmp -s "$NATIVE_ACCESS_TOKEN_SNAPSHOT" "$NATIVE_ACCESS_TOKEN_FILE" || {
+    echo "In-place install changed the stored native access token."
+    exit 1
+}
+rm -f "$NATIVE_ACCESS_TOKEN_SNAPSHOT"
 
 export LG_BUDDY_REMOVE_CONFIG="1"
 (
@@ -357,6 +445,18 @@ export LG_BUDDY_REMOVE_CONFIG="1"
 }
 [ ! -e "$CONFIG_FILE" ] || {
     echo "User config still present after uninstall: $CONFIG_FILE"
+    exit 1
+}
+[ ! -e "$NATIVE_ACCESS_TOKEN_FILE" ] || {
+    echo "Native access token still present after uninstall: $NATIVE_ACCESS_TOKEN_FILE"
+    exit 1
+}
+[ ! -e "$NATIVE_PROFILE_DIR" ] || {
+    echo "Native TV profile still present after uninstall: $NATIVE_PROFILE_DIR"
+    exit 1
+}
+[ ! -e "$NATIVE_PROFILES_DIR" ] || {
+    echo "Native TV profiles directory still present after uninstall: $NATIVE_PROFILES_DIR"
     exit 1
 }
 

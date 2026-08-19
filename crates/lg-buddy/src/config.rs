@@ -150,6 +150,41 @@ pub enum SystemSleepWakePolicy {
     Disabled,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TvPlatform {
+    Bscpylgtv,
+    LgWebOs,
+}
+
+impl TvPlatform {
+    pub const DEFAULT: Self = Self::Bscpylgtv;
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Bscpylgtv => "bscpylgtv",
+            Self::LgWebOs => "lg_webos",
+        }
+    }
+}
+
+impl fmt::Display for TvPlatform {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for TvPlatform {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "bscpylgtv" => Ok(Self::Bscpylgtv),
+            "lg_webos" => Ok(Self::LgWebOs),
+            _ => Err(()),
+        }
+    }
+}
+
 impl SystemSleepWakePolicy {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -270,6 +305,7 @@ pub struct Config {
     pub tv_ip: Ipv4Addr,
     pub tv_mac: MacAddress,
     pub input: HdmiInput,
+    pub tv_platform: TvPlatform,
     pub screen_backend: ScreenBackend,
     pub screen_idle_timeout: u64,
     pub screen_restore_policy: ScreenRestorePolicy,
@@ -450,6 +486,17 @@ pub fn parse_config(contents: &str) -> Result<Config, ConfigError> {
                 })
         })?;
 
+    let tv_platform = match entries.get("tvs_primary_platform") {
+        None => TvPlatform::DEFAULT,
+        Some(value) => value
+            .parse::<TvPlatform>()
+            .map_err(|_| ConfigError::InvalidValue {
+                key: "tvs_primary_platform",
+                value: value.clone(),
+                expected: "one of bscpylgtv, lg_webos",
+            })?,
+    };
+
     let screen_backend = entries
         .get("screen_backend")
         .and_then(|value| value.parse::<ScreenBackend>().ok())
@@ -479,6 +526,7 @@ pub fn parse_config(contents: &str) -> Result<Config, ConfigError> {
         tv_ip,
         tv_mac,
         input,
+        tv_platform,
         screen_backend,
         screen_idle_timeout,
         screen_restore_policy,
@@ -532,7 +580,8 @@ mod tests {
     use super::{
         parse_config, parse_home_from_passwd_entries, resolve_config_path, Config, ConfigError,
         ConfigPathError, ConfigPathSources, HdmiInput, ScreenBackend, ScreenIdleBlankPolicy,
-        ScreenRestorePolicy, SystemSleepWakePolicy, DEFAULT_IDLE_TIMEOUT, MAX_IDLE_TIMEOUT,
+        ScreenRestorePolicy, SystemSleepWakePolicy, TvPlatform, DEFAULT_IDLE_TIMEOUT,
+        MAX_IDLE_TIMEOUT,
     };
     use std::path::Path;
 
@@ -630,6 +679,7 @@ vas:x:1000:1000:vas:/home/vas:/bin/bash\n";
             tvs_primary_ip=192.168.1.42
             tvs_primary_mac=aa:bb:cc:dd:ee:ff
             tvs_primary_input=HDMI_2
+            tvs_primary_platform=lg_webos
             screen_backend=gnome
             screen_idle_timeout=450
             screen_restore_policy=aggressive
@@ -642,6 +692,7 @@ vas:x:1000:1000:vas:/home/vas:/bin/bash\n";
         assert_eq!(config.tv_ip.to_string(), "192.168.1.42");
         assert_eq!(config.tv_mac.to_string(), "aa:bb:cc:dd:ee:ff");
         assert_eq!(config.input, HdmiInput::Hdmi2);
+        assert_eq!(config.tv_platform, TvPlatform::LgWebOs);
         assert_eq!(config.screen_backend, ScreenBackend::Gnome);
         assert_eq!(config.screen_idle_timeout, 450);
         assert_eq!(
@@ -727,6 +778,7 @@ vas:x:1000:1000:vas:/home/vas:/bin/bash\n";
                 tv_ip: "192.168.1.42".parse().expect("ipv4"),
                 tv_mac: "aa:bb:cc:dd:ee:ff".parse().expect("mac"),
                 input: HdmiInput::Hdmi1,
+                tv_platform: TvPlatform::Bscpylgtv,
                 screen_backend: ScreenBackend::Auto,
                 screen_idle_timeout: DEFAULT_IDLE_TIMEOUT,
                 screen_restore_policy: ScreenRestorePolicy::MarkerOnly,
@@ -812,6 +864,38 @@ vas:x:1000:1000:vas:/home/vas:/bin/bash\n";
         assert_eq!(
             config.system_sleep_wake_policy,
             SystemSleepWakePolicy::Enabled
+        );
+    }
+
+    #[test]
+    fn parse_defaults_missing_tv_platform_to_bscpylgtv() {
+        let config = parse_config(
+            "\
+            tv_ip=192.168.1.42
+            tv_mac=aa:bb:cc:dd:ee:ff
+            input=HDMI_1
+            ",
+        )
+        .expect("parse config with compatibility platform default");
+
+        assert_eq!(config.tv_platform, TvPlatform::Bscpylgtv);
+    }
+
+    #[test]
+    fn parse_rejects_invalid_explicit_tv_platform() {
+        let err = parse_config(
+            "\
+            tv_ip=192.168.1.42
+            tv_mac=aa:bb:cc:dd:ee:ff
+            input=HDMI_1
+            tvs_primary_platform=not-a-platform
+            ",
+        )
+        .expect_err("invalid explicit platform should fail");
+
+        assert_eq!(
+            err.to_string(),
+            "invalid value for `tvs_primary_platform`: `not-a-platform`; expected one of bscpylgtv, lg_webos"
         );
     }
 

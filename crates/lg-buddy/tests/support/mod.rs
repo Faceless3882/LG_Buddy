@@ -1119,6 +1119,27 @@ impl TestConfigFile {
         self.write_contents(&contents);
     }
 
+    pub fn set_value(&self, key: &str, value: &str) {
+        let contents = fs::read_to_string(&self.path).expect("read temp config");
+        let prefix = format!("{key}=");
+        let mut found = false;
+        let mut updated = contents
+            .lines()
+            .map(|line| {
+                if line.starts_with(&prefix) {
+                    found = true;
+                    format!("{key}={value}")
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect::<Vec<_>>();
+        if !found {
+            updated.push(format!("{key}={value}"));
+        }
+        self.write_contents(&format!("{}\n", updated.join("\n")));
+    }
+
     pub fn write_sample(&self, input: &str) {
         self.write_contents(&sample_config_contents(input));
     }

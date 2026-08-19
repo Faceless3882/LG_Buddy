@@ -67,6 +67,7 @@ fi
 
 CONFIG_FILE="${CONFIG_FILE:-${LG_BUDDY_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/lg-buddy/config.env}}"
 CONFIG_DIR="$(dirname "$CONFIG_FILE")"
+TV_PROFILES_DIR="${CONFIG_DIR}/tvs"
 
 echo "Disabling & removing services..."
 echo "(This might turn off your TV)"
@@ -145,6 +146,7 @@ if [ -f "$CONFIG_FILE" ]; then
     case "$REMOVE_CONFIG" in
         [Yy]*|1|true|TRUE|True|yes|YES|Yes)
             rm -f "$CONFIG_FILE"
+            rm -rf "$TV_PROFILES_DIR"
             rmdir "$CONFIG_DIR" 2>/dev/null || true
             echo "Removed user configuration."
             ;;

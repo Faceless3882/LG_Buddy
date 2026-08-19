@@ -97,9 +97,9 @@ chmod +x ./install.sh
 ./install.sh
 ```
 
-The installer will prompt for your TV IP, MAC address, HDMI input, and session idle blanking details, then install the required services. System sleep/wake handling uses the lifecycle service plus NetworkManager pre-down gate as cooperating suspend sources unless you opt out in `config.env`.
+The installer will prompt for your TV IP, MAC address, HDMI input, TV control platform, and session idle blanking details, then install the required services. If you choose the native `lg_webos` platform, accept the pairing prompt on the TV during setup. System sleep/wake handling uses the lifecycle service plus NetworkManager pre-down gate as cooperating suspend sources unless you opt out in `config.env`.
 
-On first use, you may need to accept a pairing prompt on the TV:
+With the default `bscpylgtv` platform, you may instead see the pairing prompt on first use:
 
 <https://github.com/chros73/bscpylgtv/blob/master/docs/guides/first_use.md>
 
@@ -109,6 +109,7 @@ LG Buddy is mostly automatic after installation.
 
 - To inspect settings, run `lg-buddy settings list`
 - To change supported settings, use `lg-buddy settings set <key> <value>`
+- To inspect the active TV platform, run `lg-buddy settings get tv.platform`
 - To see the active desktop idle backend, run `lg-buddy detect-backend`
 - To inspect TV brightness, run `lg-buddy brightness get`
 - To set TV brightness directly, run `lg-buddy brightness set <0-100>`
@@ -127,6 +128,7 @@ the same file that manual editing and `configure.sh` use:
 ```bash
 lg-buddy settings describe tv.input
 lg-buddy settings set tv.input HDMI_2
+lg-buddy settings get tv.platform
 lg-buddy settings set screen.idle_blank disabled
 lg-buddy settings describe screen.restore_policy
 lg-buddy settings set screen.idle_timeout 600
@@ -143,6 +145,7 @@ Settings can also be edited directly in `config.env`:
 tvs_primary_ip=192.168.1.100
 tvs_primary_mac=aa:bb:cc:dd:ee:ff
 tvs_primary_input=HDMI_2
+tvs_primary_platform=bscpylgtv
 screen_idle_blank=enabled
 screen_backend=auto
 screen_idle_timeout=300
@@ -155,6 +158,24 @@ updates_channel=stable
 `tv_ip`, `tv_mac`, and `input` are still accepted as legacy single-TV keys, but
 new writes use the `tvs_primary_*` shape so the storage can grow later without
 changing the current single-TV settings interface.
+
+The TV platform defaults to `bscpylgtv`, including when
+`tvs_primary_platform` is absent from an existing profile. The experimental
+native Rust webOS platform is an explicit opt-in:
+
+```bash
+lg-buddy settings set tv.platform lg_webos
+```
+
+Before saving that selection, LG Buddy connects in the foreground, reuses or
+acquires the profile's native credential, and verifies it with a safe TV state
+read. Accept any pairing prompt on the TV. If pairing or verification fails,
+the previous platform remains selected. Background services never initiate
+pairing. Switch back with `lg-buddy settings set tv.platform bscpylgtv`.
+
+Use the settings command for native opt-in rather than editing
+`tvs_primary_platform` directly, because a direct edit bypasses credential
+preflight.
 
 If a direct `config.env` edit leaves a value malformed, `lg-buddy settings list`
 and `describe` show it as invalid instead of silently treating it as default or

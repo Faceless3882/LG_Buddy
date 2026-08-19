@@ -63,6 +63,7 @@ pub(in crate::web_os) enum WebOsTestScenario {
     PowerStatePermissionDenied,
     BacklightWriteAcknowledgedWithoutChange,
     CloseAfterFirstInputWrite,
+    StallFirstRequest,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,7 +106,10 @@ impl WebOsTestInput {
 pub(in crate::web_os) struct WebOsTestTvSnapshot {
     pub(in crate::web_os) power_state: WebOsPowerState,
     pub(in crate::web_os) input: WebOsTestInput,
+    pub(in crate::web_os) backlight: Value,
     pub(in crate::web_os) connection_count: u64,
+    pub(in crate::web_os) pairing_prompt_count: u64,
+    pub(in crate::web_os) registration_tokens: Vec<Option<String>>,
 }
 
 struct WebOsTestTv {
@@ -287,7 +291,10 @@ struct WebOsTestRuntime {
     tv: WebOsTestTv,
     scenario: WebOsTestScenario,
     connection_count: u64,
+    pairing_prompt_count: u64,
+    registration_tokens: Vec<Option<String>>,
     ambiguous_input_write_injected: bool,
+    stalled_request_injected: bool,
 }
 
 pub(in crate::web_os) struct WebOsTestServer {
@@ -336,13 +343,44 @@ impl WebOsTestServer {
         )
     }
 
+    #[allow(dead_code)]
+    pub(in crate::web_os) fn active_tls_at(
+        input: WebOsTestInput,
+        address: std::net::SocketAddr,
+    ) -> Self {
+        Self::spawn_at(
+            WebOsPowerState::Active,
+            input,
+            WebOsTestScenario::StatefulTv,
+            WebOsTestTransport::Tls,
+            address,
+        )
+    }
+
     fn spawn(
         power_state: WebOsPowerState,
         input: WebOsTestInput,
         scenario: WebOsTestScenario,
         transport: WebOsTestTransport,
     ) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind webOS test server");
+        Self::spawn_at(
+            power_state,
+            input,
+            scenario,
+            transport,
+            "127.0.0.1:0".parse().expect("webOS test bind address"),
+        )
+    }
+
+    fn spawn_at(
+        power_state: WebOsPowerState,
+        input: WebOsTestInput,
+        scenario: WebOsTestScenario,
+        transport: WebOsTestTransport,
+        bind_address: std::net::SocketAddr,
+    ) -> Self {
+        let listener = TcpListener::bind(bind_address)
+            .unwrap_or_else(|error| panic!("bind webOS test server at {bind_address}: {error}"));
         listener
             .set_nonblocking(true)
             .expect("configure webOS test listener");
@@ -355,7 +393,10 @@ impl WebOsTestServer {
             tv: WebOsTestTv::new(power_state, input),
             scenario,
             connection_count: 0,
+            pairing_prompt_count: 0,
+            registration_tokens: Vec::new(),
             ambiguous_input_write_injected: false,
+            stalled_request_injected: false,
         }));
         let active_connection = Arc::new(Mutex::new(None));
         let stop = Arc::new(AtomicBool::new(false));
@@ -420,12 +461,31 @@ impl WebOsTestServer {
         PlatformAccessToken::new(TEST_ACCESS_TOKEN).expect("webOS test access token")
     }
 
+    #[allow(dead_code)]
+    pub(in crate::web_os) fn set_scenario(&self, scenario: WebOsTestScenario) {
+        self.runtime
+            .lock()
+            .expect("webOS test server state")
+            .scenario = scenario;
+    }
+
+    #[allow(dead_code)]
+    pub(in crate::web_os) fn assert_healthy(&self) {
+        assert!(
+            !self.handle.as_ref().is_some_and(JoinHandle::is_finished),
+            "webOS test server stopped unexpectedly"
+        );
+    }
+
     pub(in crate::web_os) fn snapshot(&self) -> WebOsTestTvSnapshot {
         let runtime = self.runtime.lock().expect("webOS test TV state");
         WebOsTestTvSnapshot {
             power_state: runtime.tv.power_state.clone(),
             input: runtime.tv.input,
+            backlight: runtime.tv.backlight.clone(),
             connection_count: runtime.connection_count,
+            pairing_prompt_count: runtime.pairing_prompt_count,
+            registration_tokens: runtime.registration_tokens.clone(),
         }
     }
 
@@ -505,11 +565,29 @@ fn serve_connection<S>(
         }
 
         let scenario = runtime.lock().expect("webOS test server state").scenario;
+        if scenario == WebOsTestScenario::StallFirstRequest {
+            let should_stall = {
+                let mut runtime = runtime.lock().expect("webOS test server state");
+                if runtime.stalled_request_injected {
+                    false
+                } else {
+                    runtime.stalled_request_injected = true;
+                    true
+                }
+            };
+            if should_stall {
+                let _ = read_json(&mut socket, stop);
+                return;
+            }
+        }
+
         let keep_open = match scenario {
             WebOsTestScenario::StatefulTv
+            | WebOsTestScenario::StoredTokenPairingPrompt
             | WebOsTestScenario::PowerStatePermissionDenied
             | WebOsTestScenario::BacklightWriteAcknowledgedWithoutChange
-            | WebOsTestScenario::CloseAfterFirstInputWrite => {
+            | WebOsTestScenario::CloseAfterFirstInputWrite
+            | WebOsTestScenario::StallFirstRequest => {
                 let response =
                     {
                         let mut runtime = runtime.lock().expect("webOS test server state");
@@ -600,14 +678,26 @@ where
         top_level,
         write_settings_authorized,
     });
+    let presented_token = match payload.get("client-key") {
+        Some(Value::String(token)) => Some(token.clone()),
+        Some(Value::Null) => None,
+        other => panic!("registration client key is neither a string nor null: {other:?}"),
+    };
+    runtime
+        .lock()
+        .expect("webOS test server state")
+        .registration_tokens
+        .push(presented_token);
 
     match scenario {
         WebOsTestScenario::StatefulTv
         | WebOsTestScenario::PowerStatePermissionDenied
         | WebOsTestScenario::BacklightWriteAcknowledgedWithoutChange
-        | WebOsTestScenario::CloseAfterFirstInputWrite => match payload["client-key"].as_str() {
+        | WebOsTestScenario::CloseAfterFirstInputWrite
+        | WebOsTestScenario::StallFirstRequest => match payload["client-key"].as_str() {
             Some(token) => send_json(socket, registration_response(request_id, token)),
             None if payload["client-key"].is_null() => {
+                record_pairing_prompt(runtime);
                 send_json(socket, pairing_prompt_response(request_id));
                 send_json(socket, registration_response(request_id, TEST_ACCESS_TOKEN));
             }
@@ -622,12 +712,18 @@ where
                 registration_response(request_id, TEST_REPLACEMENT_ACCESS_TOKEN),
             );
         }
-        WebOsTestScenario::StoredTokenPairingPrompt => {
-            payload["client-key"]
-                .as_str()
-                .expect("stored-token pairing scenario requires a client key");
-            send_json(socket, pairing_prompt_response(request_id));
-        }
+        WebOsTestScenario::StoredTokenPairingPrompt => match payload["client-key"].as_str() {
+            Some(_) => {
+                record_pairing_prompt(runtime);
+                send_json(socket, pairing_prompt_response(request_id));
+            }
+            None if payload["client-key"].is_null() => {
+                record_pairing_prompt(runtime);
+                send_json(socket, pairing_prompt_response(request_id));
+                send_json(socket, registration_response(request_id, TEST_ACCESS_TOKEN));
+            }
+            None => panic!("registration access token is neither a string nor null"),
+        },
         WebOsTestScenario::PairingRejected => {
             assert!(payload["client-key"].is_null());
             send_json(
@@ -728,7 +824,8 @@ where
         | WebOsTestScenario::RegistrationMissingClientKey
         | WebOsTestScenario::PowerStatePermissionDenied
         | WebOsTestScenario::BacklightWriteAcknowledgedWithoutChange
-        | WebOsTestScenario::CloseAfterFirstInputWrite => {
+        | WebOsTestScenario::CloseAfterFirstInputWrite
+        | WebOsTestScenario::StallFirstRequest => {
             panic!("scenario `{scenario:?}` requires registered stateful handling")
         }
     }
@@ -747,6 +844,16 @@ where
             Ok(Message::Close(_)) => return None,
             Ok(other) => panic!("expected webOS text request, got {other:?}"),
             Err(WebSocketError::Io(_)) if stop.load(Ordering::Acquire) => return None,
+            Err(WebSocketError::Io(error))
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::UnexpectedEof
+                        | io::ErrorKind::ConnectionReset
+                        | io::ErrorKind::BrokenPipe
+                ) =>
+            {
+                return None
+            }
             Err(WebSocketError::ConnectionClosed | WebSocketError::AlreadyClosed) => return None,
             Err(WebSocketError::Protocol(ProtocolError::ResetWithoutClosingHandshake)) => {
                 return None
@@ -814,9 +921,19 @@ fn has_observed_write_settings_envelope(manifest: &serde_json::Map<String, Value
 
 fn write_settings_signed_envelope() -> &'static Value {
     WRITE_SETTINGS_SIGNED_ENVELOPE.get_or_init(|| {
-        serde_json::from_str(include_str!("write_settings_signed_envelope.json"))
-            .expect("parse observed WRITE_SETTINGS registration envelope")
+        serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/web_os/test_support/write_settings_signed_envelope.json"
+        )))
+        .expect("parse observed WRITE_SETTINGS registration envelope")
     })
+}
+
+fn record_pairing_prompt(runtime: &Arc<Mutex<WebOsTestRuntime>>) {
+    runtime
+        .lock()
+        .expect("webOS test server state")
+        .pairing_prompt_count += 1;
 }
 
 fn require_top_level_permission(permissions: &WebOsTestPermissions, permission: &str, uri: &str) {
@@ -912,6 +1029,7 @@ impl Drop for TestAccessTokenStore {
 }
 
 #[cfg(test)]
+#[allow(dead_code, unused_imports)]
 mod tests {
     use super::{
         write_settings_signed_envelope, WebOsTestInput, WebOsTestScenario, WebOsTestServer,

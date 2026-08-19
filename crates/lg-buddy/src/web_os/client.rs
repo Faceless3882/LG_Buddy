@@ -47,15 +47,16 @@ impl WebOsEndpoint {
         Self::wss_at(SocketAddr::new(IpAddr::V4(ip), WEBOS_WSS_PORT))
     }
 
-    #[cfg(test)]
-    pub(super) fn ws_at(address: SocketAddr) -> Self {
+    #[doc(hidden)]
+    pub fn ws_at(address: SocketAddr) -> Self {
         Self {
             address,
             transport: WebOsTransport::Ws,
         }
     }
 
-    pub(super) fn wss_at(address: SocketAddr) -> Self {
+    #[doc(hidden)]
+    pub fn wss_at(address: SocketAddr) -> Self {
         Self {
             address,
             transport: WebOsTransport::Wss,
@@ -84,6 +85,32 @@ pub struct WebOsClient {
 }
 
 impl WebOsClient {
+    /// Connects and authenticates using the stored token only.
+    ///
+    /// This is the authentication path for background operations. It loads
+    /// the token before connecting and never attempts pairing when the token
+    /// is missing or stale.
+    pub fn connect_authenticated_with_stored_token(
+        endpoint: WebOsEndpoint,
+        connect_timeout: Duration,
+        response_timeout: Duration,
+        token_store: &PlatformAccessTokenStore,
+    ) -> Result<Self, WebOsAuthenticatedClientError> {
+        let token = token_store
+            .load_stored()
+            .map_err(|source| WebOsAuthenticatedClientError::Authentication { source })?;
+        let mut client = Self::connect(endpoint, connect_timeout, response_timeout)
+            .map_err(|source| WebOsAuthenticatedClientError::Connect { source })?;
+        let mut registration = client.registration();
+        registration
+            .register(Some(&token), &mut |_| {})
+            .map_err(|source| WebOsAuthenticatedClientError::Authentication {
+                source: PlatformAccessTokenAcquisitionError::Registration { source },
+            })?;
+
+        Ok(client)
+    }
+
     pub fn connect_authenticated<F>(
         endpoint: WebOsEndpoint,
         connect_timeout: Duration,
@@ -96,12 +123,29 @@ impl WebOsClient {
     {
         let mut client = Self::connect(endpoint, connect_timeout, response_timeout)
             .map_err(|source| WebOsAuthenticatedClientError::Connect { source })?;
-        let mut registration = client.registration();
-        token_store
-            .get_or_acquire(&mut registration, &mut on_auth_event)
-            .map_err(|source| WebOsAuthenticatedClientError::Authentication { source })?;
+        let authentication = {
+            let mut registration = client.registration();
+            token_store.get_or_acquire(&mut registration, &mut on_auth_event)
+        };
 
-        Ok(client)
+        match authentication {
+            Ok(_) => Ok(client),
+            Err(PlatformAccessTokenAcquisitionError::Registration {
+                source: WebOsClientRegistrationError::StoredTokenRequiresPairing,
+            }) => {
+                // Foreground preflight may repair a stale credential, but it
+                // must retire the rejected connection before pairing again.
+                drop(client);
+                let mut client = Self::connect(endpoint, connect_timeout, response_timeout)
+                    .map_err(|source| WebOsAuthenticatedClientError::Connect { source })?;
+                let mut registration = client.registration();
+                token_store
+                    .acquire_and_persist(&mut registration, &mut on_auth_event)
+                    .map_err(|source| WebOsAuthenticatedClientError::Authentication { source })?;
+                Ok(client)
+            }
+            Err(source) => Err(WebOsAuthenticatedClientError::Authentication { source }),
+        }
     }
 
     fn connect(
@@ -355,7 +399,7 @@ impl fmt::Display for WebOsClientRegistrationError {
             Self::StoredTokenRequiresPairing => {
                 write!(
                     f,
-                    "webOS rejected the stored access token and requested pairing"
+                    "webOS rejected the stored access token and requires pairing"
                 )
             }
         }
@@ -791,6 +835,29 @@ mod tests {
         server.finish();
     }
 
+    #[test]
+    fn stored_token_authentication_requires_a_credential_without_pairing() {
+        let dir = TestDir::new("missing-runtime-token");
+        let store = token_store(&dir);
+        let server = WebOsTestServer::active(WebOsTestInput::Hdmi3);
+
+        let result = WebOsClient::connect_authenticated_with_stored_token(
+            server.endpoint(),
+            CONNECT_TIMEOUT,
+            RESPONSE_TIMEOUT,
+            &store,
+        );
+
+        assert!(matches!(
+            result,
+            Err(WebOsAuthenticatedClientError::Authentication {
+                source: PlatformAccessTokenAcquisitionError::MissingStoredToken,
+            })
+        ));
+        assert!(!store.token_path().exists());
+        server.finish();
+    }
+
     // Real-TV first-pairing acceptance target:
     // https://github.com/Staphylococcus/LG_Buddy/issues/47
     #[test]
@@ -825,7 +892,7 @@ mod tests {
     }
 
     #[test]
-    fn stored_token_pairing_request_is_typed_and_preserves_token() {
+    fn foreground_authentication_repairs_rejected_stored_token() {
         let dir = TestDir::new("rejected-stored-token");
         let store = token_store(&dir);
         let original = token("rejected-client-key");
@@ -833,12 +900,45 @@ mod tests {
         let server = WebOsTestServer::for_scenario(WebOsTestScenario::StoredTokenPairingPrompt);
         let mut events = Vec::new();
 
-        let result = WebOsClient::connect_authenticated(
+        let _client = WebOsClient::connect_authenticated(
             server.endpoint(),
             CONNECT_TIMEOUT,
             RESPONSE_TIMEOUT,
             &store,
             |event| events.push(event),
+        )
+        .expect("foreground authentication should repair a stale token");
+
+        assert_eq!(
+            events,
+            vec![
+                WebOsAuthenticationEvent::UsingStoredAccessToken,
+                WebOsAuthenticationEvent::PairingPrompt,
+                WebOsAuthenticationEvent::AccessTokenPersisted,
+            ]
+        );
+        assert_eq!(
+            store.load().expect("reload stored token"),
+            Some(server.access_token())
+        );
+        assert_ne!(store.load().expect("reload stored token"), Some(original));
+        assert_eq!(server.snapshot().connection_count, 2);
+        server.finish();
+    }
+
+    #[test]
+    fn stored_token_runtime_authentication_rejects_pairing_prompt() {
+        let dir = TestDir::new("rejected-runtime-token");
+        let store = token_store(&dir);
+        let original = token("rejected-runtime-client-key");
+        store.persist(&original).expect("persist stored token");
+        let server = WebOsTestServer::for_scenario(WebOsTestScenario::StoredTokenPairingPrompt);
+
+        let result = WebOsClient::connect_authenticated_with_stored_token(
+            server.endpoint(),
+            CONNECT_TIMEOUT,
+            RESPONSE_TIMEOUT,
+            &store,
         );
 
         assert!(matches!(
@@ -849,10 +949,6 @@ mod tests {
                 },
             })
         ));
-        assert_eq!(
-            events,
-            vec![WebOsAuthenticationEvent::UsingStoredAccessToken]
-        );
         assert_eq!(store.load().expect("reload stored token"), Some(original));
         server.finish();
     }

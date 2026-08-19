@@ -180,6 +180,7 @@ pub(crate) fn run_screen_off_from_env_for_event<W: Write>(
     let tv_client = build_tv_client(
         &config_path,
         config.tv_ip,
+        config.tv_platform,
         TvClientBuildOptions::production(),
     )?;
     let mut phase_provider = LogindRuntimePhaseProvider::from_system_bus();
@@ -218,6 +219,7 @@ pub(crate) fn run_screen_on_from_env_for_event<W: Write>(
     let tv_client = build_tv_client(
         &config_path,
         config.tv_ip,
+        config.tv_platform,
         TvClientBuildOptions::production(),
     )?;
     let wol_sender = UdpWakeOnLanSender::default();
@@ -1625,6 +1627,7 @@ mod tests {
                 .parse::<MacAddress>()
                 .expect("parse mac"),
             input,
+            tv_platform: crate::config::TvPlatform::Bscpylgtv,
             screen_backend: ScreenBackend::Auto,
             screen_idle_blank: ScreenIdleBlankPolicy::Enabled,
             screen_idle_timeout: 300,
