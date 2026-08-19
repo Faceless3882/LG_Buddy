@@ -62,6 +62,32 @@ Feature: Native webOS TV platform
     And the native TV registration tokens are "stale-cucumber-access-token,none"
     And the native TV pairing prompt count is 2
 
+  Scenario: Foreground opt-in reuses a valid token before persisting the platform
+    Given a temporary LG Buddy config using input HDMI_2
+    And the existing config selects TV platform "bscpylgtv"
+    And a native webOS TV on input HDMI_2 with brightness 90
+    And a valid native TV access token is stored
+    When I run the command "settings set tv.platform lg_webos"
+    Then the command succeeds
+    And stdout contains "using stored access token"
+    And stdout contains "native webOS preflight succeeded: power_state=Active"
+    And config.env contains "tvs_primary_platform=lg_webos"
+    And a valid native TV access token is stored
+    And the native TV connection count is 1
+    And the native TV registration tokens are "webos-test-access-token"
+    And the native TV pairing prompt count is 0
+
+  Scenario: Unsetting native platform restores the default without preflight
+    Given a temporary LG Buddy config using input HDMI_2
+    And the existing config selects TV platform "lg_webos"
+    When I run the command "settings unset tv.platform"
+    Then the command succeeds
+    And stdout contains "tv.platform unset"
+    And config.env does not contain "tvs_primary_platform="
+    When I run the command "settings get tv.platform"
+    Then the command succeeds
+    And stdout is "bscpylgtv"
+
   Scenario: Rejected foreground pairing leaves the platform and credentials unchanged
     Given a temporary LG Buddy config using input HDMI_2
     And a native webOS TV on input HDMI_2 with brightness 90
@@ -141,4 +167,40 @@ Feature: Native webOS TV platform
     And the system marker exists
     And the TV is powered off
     And the native TV registration tokens are "webos-test-access-token"
+    And the native TV pairing prompt count is 0
+
+  Scenario: Native pre-sleep bounds a stalled TV response and uses the fallback
+    Given a temporary LG Buddy config using input HDMI_2
+    And the existing config selects TV platform "lg_webos"
+    And LG Buddy session runtime is isolated
+    And a native webOS TV on input HDMI_2 with brightness 90
+    And a valid native TV access token is stored
+    And the native webOS TV stalls its first TV response
+    And sleep retry delays are disabled
+    When I run the command "sleep-pre"
+    Then the command succeeds
+    And the command completes within 5 seconds
+    And stdout contains "Could not query TV input. Attempting power_off fallback."
+    And the system marker exists
+    And the TV is powered off
+    And the native TV registration tokens are "webos-test-access-token,webos-test-access-token"
+    And the native TV pairing prompt count is 0
+
+  Scenario: Native NetworkManager pre-down enters the suspend rail through system logind
+    Given a temporary LG Buddy config using input HDMI_2
+    And the existing config selects TV platform "lg_webos"
+    And LG Buddy session runtime is isolated
+    And a native webOS TV on input HDMI_2 with brightness 90
+    And a valid native TV access token is stored
+    And the native webOS TV stalls its first TV response
+    And mock system logind reports PreparingForSleep=true
+    And sleep retry delays are disabled
+    When I run the command "nm-pre-down"
+    Then the command succeeds
+    And the command completes within 5 seconds
+    And stdout contains "logind is preparing for sleep; running pre-sleep TV handling before network teardown."
+    And stdout contains "Could not query TV input. Attempting power_off fallback."
+    And the system marker exists
+    And the TV is powered off
+    And the native TV registration tokens are "webos-test-access-token,webos-test-access-token"
     And the native TV pairing prompt count is 0

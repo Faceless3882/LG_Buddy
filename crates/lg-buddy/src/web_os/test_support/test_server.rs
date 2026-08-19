@@ -63,6 +63,7 @@ pub(in crate::web_os) enum WebOsTestScenario {
     PowerStatePermissionDenied,
     BacklightWriteAcknowledgedWithoutChange,
     CloseAfterFirstInputWrite,
+    StallFirstRequest,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -293,6 +294,7 @@ struct WebOsTestRuntime {
     pairing_prompt_count: u64,
     registration_tokens: Vec<Option<String>>,
     ambiguous_input_write_injected: bool,
+    stalled_request_injected: bool,
 }
 
 pub(in crate::web_os) struct WebOsTestServer {
@@ -394,6 +396,7 @@ impl WebOsTestServer {
             pairing_prompt_count: 0,
             registration_tokens: Vec::new(),
             ambiguous_input_write_injected: false,
+            stalled_request_injected: false,
         }));
         let active_connection = Arc::new(Mutex::new(None));
         let stop = Arc::new(AtomicBool::new(false));
@@ -562,12 +565,29 @@ fn serve_connection<S>(
         }
 
         let scenario = runtime.lock().expect("webOS test server state").scenario;
+        if scenario == WebOsTestScenario::StallFirstRequest {
+            let should_stall = {
+                let mut runtime = runtime.lock().expect("webOS test server state");
+                if runtime.stalled_request_injected {
+                    false
+                } else {
+                    runtime.stalled_request_injected = true;
+                    true
+                }
+            };
+            if should_stall {
+                let _ = read_json(&mut socket, stop);
+                return;
+            }
+        }
+
         let keep_open = match scenario {
             WebOsTestScenario::StatefulTv
             | WebOsTestScenario::StoredTokenPairingPrompt
             | WebOsTestScenario::PowerStatePermissionDenied
             | WebOsTestScenario::BacklightWriteAcknowledgedWithoutChange
-            | WebOsTestScenario::CloseAfterFirstInputWrite => {
+            | WebOsTestScenario::CloseAfterFirstInputWrite
+            | WebOsTestScenario::StallFirstRequest => {
                 let response =
                     {
                         let mut runtime = runtime.lock().expect("webOS test server state");
@@ -673,7 +693,8 @@ where
         WebOsTestScenario::StatefulTv
         | WebOsTestScenario::PowerStatePermissionDenied
         | WebOsTestScenario::BacklightWriteAcknowledgedWithoutChange
-        | WebOsTestScenario::CloseAfterFirstInputWrite => match payload["client-key"].as_str() {
+        | WebOsTestScenario::CloseAfterFirstInputWrite
+        | WebOsTestScenario::StallFirstRequest => match payload["client-key"].as_str() {
             Some(token) => send_json(socket, registration_response(request_id, token)),
             None if payload["client-key"].is_null() => {
                 record_pairing_prompt(runtime);
@@ -803,7 +824,8 @@ where
         | WebOsTestScenario::RegistrationMissingClientKey
         | WebOsTestScenario::PowerStatePermissionDenied
         | WebOsTestScenario::BacklightWriteAcknowledgedWithoutChange
-        | WebOsTestScenario::CloseAfterFirstInputWrite => {
+        | WebOsTestScenario::CloseAfterFirstInputWrite
+        | WebOsTestScenario::StallFirstRequest => {
             panic!("scenario `{scenario:?}` requires registered stateful handling")
         }
     }

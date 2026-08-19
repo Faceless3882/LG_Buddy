@@ -51,6 +51,11 @@ impl MockWebOsTv {
             .set_scenario(WebOsTestScenario::StoredTokenPairingPrompt);
     }
 
+    pub fn stall_first_tv_response(&self) {
+        self.server
+            .set_scenario(WebOsTestScenario::StallFirstRequest);
+    }
+
     pub fn snapshot(&self) -> MockWebOsTvSnapshot {
         self.assert_healthy();
         let snapshot = self.server.snapshot();

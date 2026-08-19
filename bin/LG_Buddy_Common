@@ -71,8 +71,43 @@ lg_buddy_config_get_raw() {
     sed -n "s/^${key}=//p" "$config_file" | tail -n1
 }
 
-lg_buddy_sanitize_config_value() {
-    printf '%s\n' "$1" | sed 's/#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//'
+lg_buddy_config_get_platform() {
+    local config_file="${1:-}"
+
+    [ -r "$config_file" ] || return 1
+
+    awk '
+        function trim(value) {
+            sub(/^[[:space:]]+/, "", value)
+            sub(/[[:space:]]+$/, "", value)
+            return value
+        }
+
+        {
+            line = trim($0)
+            if (line == "" || line ~ /^#/) {
+                next
+            }
+
+            separator = index(line, "=")
+            if (separator == 0 || trim(substr(line, 1, separator - 1)) != "tvs_primary_platform") {
+                next
+            }
+
+            value = substr(line, separator + 1)
+            sub(/#.*/, "", value)
+            last_value = trim(value)
+            found = 1
+        }
+
+        END {
+            if (found) {
+                print last_value
+            } else {
+                exit 1
+            }
+        }
+    ' "$config_file"
 }
 
 lg_buddy_config_get_valid() {
@@ -176,11 +211,21 @@ lg_buddy_load_config() {
     tv_ip="$(lg_buddy_config_get_valid_any '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' "" "$LG_BUDDY_CONFIG_FILE" "tvs_primary_ip" "tv_ip")"
     tv_mac="$(lg_buddy_config_get_valid_any '^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$' "" "$LG_BUDDY_CONFIG_FILE" "tvs_primary_mac" "tv_mac")"
     input="$(lg_buddy_config_get_valid_any '^HDMI_[1-4]$' "" "$LG_BUDDY_CONFIG_FILE" "tvs_primary_input" "input")"
-    tv_platform="$(lg_buddy_config_get_raw "tvs_primary_platform" "$LG_BUDDY_CONFIG_FILE")"
-    tv_platform="$(lg_buddy_sanitize_config_value "$tv_platform")"
-    if [ -z "$tv_platform" ]; then
-        tv_platform="$LG_BUDDY_DEFAULT_TV_PLATFORM"
-    elif ! [[ "$tv_platform" =~ ^(bscpylgtv|lg_webos)$ ]]; then
+    if tv_platform="$(lg_buddy_config_get_platform "$LG_BUDDY_CONFIG_FILE")"; then
+        if [ -z "$tv_platform" ]; then
+            echo "LG Buddy: invalid tv platform '$tv_platform'; expected bscpylgtv or lg_webos."
+            return 2
+        fi
+    else
+        config_platform_status=$?
+        if [ "$config_platform_status" -eq 1 ]; then
+            tv_platform="$LG_BUDDY_DEFAULT_TV_PLATFORM"
+        else
+            return "$config_platform_status"
+        fi
+    fi
+
+    if ! [[ "$tv_platform" =~ ^(bscpylgtv|lg_webos)$ ]]; then
         echo "LG Buddy: invalid tv platform '$tv_platform'; expected bscpylgtv or lg_webos."
         return 2
     fi

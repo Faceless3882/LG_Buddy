@@ -71,6 +71,16 @@ fn native_webos_tv_rejects_pairing(world: &mut LgBuddyWorld) {
     world.reject_native_pairing();
 }
 
+#[given("the native webOS TV stalls its first TV response")]
+fn native_webos_tv_stalls_first_response(world: &mut LgBuddyWorld) {
+    world.stall_native_tv_response();
+}
+
+#[given(regex = r#"mock system logind reports PreparingForSleep=(true|false)"#)]
+fn mock_system_logind_preparing_for_sleep(world: &mut LgBuddyWorld, value: String) {
+    world.configure_system_logind(value == "true");
+}
+
 #[given(regex = r#"the TV auth key file override is "([^"]+)""#)]
 fn tv_auth_key_file_override(world: &mut LgBuddyWorld, path: String) {
     world.set_auth_key_file_override(&path);
@@ -319,6 +329,15 @@ fn command_fails(world: &mut LgBuddyWorld) {
         "command unexpectedly succeeded\nstdout:\n{}\nstderr:\n{}",
         world.command_result().stdout,
         world.command_result().stderr
+    );
+}
+
+#[then(regex = r#"the command completes within (\d+) seconds"#)]
+fn command_completes_within_seconds(world: &mut LgBuddyWorld, seconds: u64) {
+    assert!(
+        world.command_duration() < std::time::Duration::from_secs(seconds),
+        "command took {:?}, expected less than {seconds}s",
+        world.command_duration()
     );
 }
 

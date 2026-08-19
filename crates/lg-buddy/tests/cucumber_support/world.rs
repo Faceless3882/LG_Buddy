@@ -1,6 +1,6 @@
 use crate::support::{
     ExecutableScript, MockBscpylgtv, MockNmOnline, MockSessionBusIdleMonitor, MockSwayidle,
-    RuntimeStateLayout, TestConfigFile, TestEnv,
+    MockSystemLogind, RuntimeStateLayout, TestConfigFile, TestEnv,
 };
 use crate::web_os::{MockWebOsTv, MockWebOsTvSnapshot, VALID_WEBOS_ACCESS_TOKEN};
 use cucumber::World;
@@ -17,6 +17,7 @@ pub struct LgBuddyWorld {
     runtime: Option<RuntimeStateLayout>,
     tv: Option<MockBscpylgtv>,
     webos_tv: Option<MockWebOsTv>,
+    system_logind: Option<MockSystemLogind>,
     session_bus_idle_monitor: Option<MockSessionBusIdleMonitor>,
     nm_online: Option<MockNmOnline>,
     swayidle: Option<MockSwayidle>,
@@ -31,6 +32,7 @@ pub struct CommandExecution {
     pub success: bool,
     pub stdout: String,
     pub stderr: String,
+    pub duration: std::time::Duration,
 }
 
 impl fmt::Debug for LgBuddyWorld {
@@ -40,6 +42,7 @@ impl fmt::Debug for LgBuddyWorld {
             .field("runtime", &self.runtime.is_some())
             .field("tv", &self.tv.is_some())
             .field("webos_tv", &self.webos_tv.is_some())
+            .field("system_logind", &self.system_logind.is_some())
             .field(
                 "session_bus_idle_monitor",
                 &self.session_bus_idle_monitor.is_some(),
@@ -214,6 +217,19 @@ exit 1\n",
         self.webos_tv().reject_pairing();
     }
 
+    pub fn stall_native_tv_response(&self) {
+        self.webos_tv().stall_first_tv_response();
+    }
+
+    pub fn configure_system_logind(&mut self, preparing_for_sleep: bool) {
+        let logind = MockSystemLogind::new("cucumber-system-logind");
+        logind.reset();
+        logind.set_preparing_for_sleep(preparing_for_sleep);
+        self.ensure_env()
+            .set("DBUS_SYSTEM_BUS_ADDRESS", logind.address());
+        self.system_logind = Some(logind);
+    }
+
     pub fn assert_native_access_token(&self, expected: &str) {
         let stored = self
             .native_access_token_store()
@@ -268,6 +284,10 @@ exit 1\n",
         self.command_result
             .as_ref()
             .expect("command result should be present")
+    }
+
+    pub fn command_duration(&self) -> std::time::Duration {
+        self.command_result().duration
     }
 
     pub fn create_session_marker(&self) {
@@ -529,15 +549,18 @@ exit 1\n",
             self.ensure_env()
                 .set("LG_BUDDY_GNOME_MONITOR_TEST_TIMEOUT_SECS", "0.2");
         }
+        let started = std::time::Instant::now();
         let output = ProcessCommand::new(env!("CARGO_BIN_EXE_lg-buddy"))
             .args(args)
             .output()
             .expect("run lg-buddy binary");
+        let duration = started.elapsed();
 
         self.command_result = Some(CommandExecution {
             success: output.status.success(),
             stdout: String::from_utf8(output.stdout).expect("utf8 command output"),
             stderr: String::from_utf8(output.stderr).expect("utf8 command stderr"),
+            duration,
         });
     }
 
