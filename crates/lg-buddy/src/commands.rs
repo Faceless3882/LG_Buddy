@@ -262,7 +262,7 @@ pub fn run_sleep_pre_for_event<W: Write>(
         config.tv_ip,
         config.tv_platform,
         TvClientBuildOptions::production()
-            .with_legacy_command_timeout(SYSTEM_PRE_SLEEP_TV_COMMAND_TIMEOUT),
+            .with_command_timeout(SYSTEM_PRE_SLEEP_TV_COMMAND_TIMEOUT),
     )?;
     let sleeper = ThreadSleeper;
 
@@ -306,7 +306,7 @@ pub fn run_nm_pre_down<W: Write>(writer: &mut W) -> Result<(), RunError> {
         config.tv_ip,
         config.tv_platform,
         TvClientBuildOptions::production()
-            .with_legacy_command_timeout(SYSTEM_PRE_SLEEP_TV_COMMAND_TIMEOUT),
+            .with_command_timeout(SYSTEM_PRE_SLEEP_TV_COMMAND_TIMEOUT),
     )?;
     let sleeper = ThreadSleeper;
     let mut bus = match crate::session_bus::new_system_bus_client() {

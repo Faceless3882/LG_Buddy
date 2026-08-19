@@ -297,6 +297,10 @@ grep -q '^tvs_primary_platform=bscpylgtv$' "$CONFIG_FILE"
 grep -q '^updates_auto_check=disabled$' "$CONFIG_FILE"
 grep -q '^updates_channel=prerelease$' "$CONFIG_FILE"
 
+# Configure should read inline-commented platform values with the same value
+# semantics as the Rust config parser, then persist the sanitized choice.
+sed -i 's/^tvs_primary_platform=bscpylgtv$/tvs_primary_platform=  lg_webos # experimental/' "$CONFIG_FILE"
+
 (
     unset LG_BUDDY_SCREEN_BACKEND
     unset LG_BUDDY_SCREEN_IDLE_TIMEOUT
@@ -312,7 +316,7 @@ grep -q '^updates_channel=prerelease$' "$CONFIG_FILE"
 grep -q '^tvs_primary_ip=192.168.1.11$' "$CONFIG_FILE"
 grep -q '^tvs_primary_mac=11:22:33:44:55:66$' "$CONFIG_FILE"
 grep -q '^tvs_primary_input=HDMI_3$' "$CONFIG_FILE"
-grep -q '^tvs_primary_platform=bscpylgtv$' "$CONFIG_FILE"
+grep -q '^tvs_primary_platform=lg_webos$' "$CONFIG_FILE"
 grep -q '^screen_backend=gnome$' "$CONFIG_FILE"
 grep -q '^screen_idle_blank=disabled$' "$CONFIG_FILE"
 grep -q '^screen_idle_timeout=900$' "$CONFIG_FILE"

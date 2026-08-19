@@ -71,6 +71,10 @@ lg_buddy_config_get_raw() {
     sed -n "s/^${key}=//p" "$config_file" | tail -n1
 }
 
+lg_buddy_sanitize_config_value() {
+    printf '%s\n' "$1" | sed 's/#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//'
+}
+
 lg_buddy_config_get_valid() {
     local key="$1"
     local regex="$2"
@@ -173,6 +177,7 @@ lg_buddy_load_config() {
     tv_mac="$(lg_buddy_config_get_valid_any '^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$' "" "$LG_BUDDY_CONFIG_FILE" "tvs_primary_mac" "tv_mac")"
     input="$(lg_buddy_config_get_valid_any '^HDMI_[1-4]$' "" "$LG_BUDDY_CONFIG_FILE" "tvs_primary_input" "input")"
     tv_platform="$(lg_buddy_config_get_raw "tvs_primary_platform" "$LG_BUDDY_CONFIG_FILE")"
+    tv_platform="$(lg_buddy_sanitize_config_value "$tv_platform")"
     if [ -z "$tv_platform" ]; then
         tv_platform="$LG_BUDDY_DEFAULT_TV_PLATFORM"
     elif ! [[ "$tv_platform" =~ ^(bscpylgtv|lg_webos)$ ]]; then

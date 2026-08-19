@@ -35,6 +35,11 @@ impl WebOsTvClient {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn response_timeout(&self) -> Duration {
+        self.response_timeout
+    }
+
     fn with_session<T>(
         &self,
         operation: TvOperation,

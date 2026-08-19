@@ -214,18 +214,18 @@ pub trait TvClient {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TvClientBuildOptions {
-    legacy_command_timeout: Option<Duration>,
+    command_timeout: Option<Duration>,
 }
 
 impl TvClientBuildOptions {
     pub(crate) fn production() -> Self {
         Self {
-            legacy_command_timeout: None,
+            command_timeout: None,
         }
     }
 
-    pub(crate) fn with_legacy_command_timeout(mut self, timeout: Duration) -> Self {
-        self.legacy_command_timeout = Some(timeout);
+    pub(crate) fn with_command_timeout(mut self, timeout: Duration) -> Self {
+        self.command_timeout = Some(timeout);
         self
     }
 }
@@ -323,7 +323,7 @@ pub(crate) fn build_tv_client(
             let mut client = BscpylgtvCommandClient::from_env(tv_ip)
                 .with_auth_context(auth_context)
                 .with_launcher(UserScopedBscpylgtvCommandLauncher);
-            if let Some(timeout) = options.legacy_command_timeout {
+            if let Some(timeout) = options.command_timeout {
                 client = client.with_command_timeout(timeout);
             }
             Ok(SelectedTvClient::Bscpylgtv(client))
@@ -333,10 +333,13 @@ pub(crate) fn build_tv_client(
                 resolve_config_owner(config_path).map_err(TvClientBuildError::AuthContext)?;
             let token_store = PlatformAccessTokenStore::for_primary_profile(config_path, owner)
                 .map_err(TvClientBuildError::TokenStore)?;
+            let response_timeout = options
+                .command_timeout
+                .unwrap_or(DEFAULT_WEBOS_RESPONSE_TIMEOUT);
             Ok(SelectedTvClient::WebOs(Box::new(WebOsTvClient::new(
                 WebOsEndpoint::wss(tv_ip),
                 DEFAULT_WEBOS_CONNECT_TIMEOUT,
-                DEFAULT_WEBOS_RESPONSE_TIMEOUT,
+                response_timeout,
                 token_store,
             ))))
         }
@@ -1089,6 +1092,26 @@ mod tests {
     }
 
     #[test]
+    fn centralized_factory_applies_command_timeout_to_native_responses() {
+        let config = TestConfigFile::new("tv-client-native-timeout");
+        config.write_sample("HDMI_2");
+        let command_timeout = Duration::from_secs(3);
+
+        let webos = build_tv_client(
+            config.path(),
+            ip("192.0.2.42"),
+            TvPlatform::LgWebOs,
+            TvClientBuildOptions::production().with_command_timeout(command_timeout),
+        )
+        .expect("build native webOS TV client");
+
+        let SelectedTvClient::WebOs(client) = webos else {
+            panic!("lg_webos should select the native webOS client");
+        };
+        assert_eq!(client.response_timeout(), command_timeout);
+    }
+
+    #[test]
     fn get_input_uses_last_non_empty_stdout_line() {
         let mock = MockBscpylgtv::new("tv-get-input");
         mock.queue_success("get_input", "\nignored\ncom.webos.app.hdmi2\n");
@@ -1349,7 +1372,11 @@ mod tests {
 
         assert_eq!(err.operation(), TvOperation::ReadInput);
         assert_eq!(err.kind(), TvErrorKind::Transport);
-        assert!(err.detail().contains("timed out after"));
+        assert!(
+            err.detail().contains("timed out after"),
+            "unexpected error detail: {}",
+            err.detail()
+        );
     }
 
     #[test]
