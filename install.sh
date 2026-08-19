@@ -282,7 +282,7 @@ echo "Running configuration script..."
 if [ ! -x "$SCRIPT_DIR/configure.sh" ]; then
     chmod +x "$SCRIPT_DIR/configure.sh"
 fi
-"$SCRIPT_DIR/configure.sh"
+LG_BUDDY_RUNTIME_BINARY="$RUNTIME_BINARY" "$SCRIPT_DIR/configure.sh"
 CONFIG_FILE="$(bash "$SCRIPT_DIR/bin/LG_Buddy_Common" --user-config-path)"
 SCREEN_IDLE_BLANK="$(sed -n 's/^screen_idle_blank=//p' "$CONFIG_FILE" | tail -n1)"
 case "$SCREEN_IDLE_BLANK" in

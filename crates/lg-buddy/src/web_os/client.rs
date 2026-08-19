@@ -399,7 +399,7 @@ impl fmt::Display for WebOsClientRegistrationError {
             Self::StoredTokenRequiresPairing => {
                 write!(
                     f,
-                    "webOS rejected the stored access token and requires foreground pairing; run `lg-buddy settings set tv.platform lg_webos` to pair the TV again"
+                    "webOS rejected the stored access token and requires pairing"
                 )
             }
         }

@@ -16,7 +16,7 @@ use crate::state::{
     ScreenOwnershipMarker, SystemSleepAttemptLock, SystemSleepAttemptState,
     SystemSleepCycleOutcome, SystemSleepCycleState,
 };
-use crate::tv::{CurrentInput, TvClient, TvDevice};
+use crate::tv::{CurrentInput, TvClient, TvDevice, TvErrorKind};
 use crate::wol::{WakeOnLanSender, DEFAULT_WOL_PORT};
 use crate::{RunError, StartupMode};
 
@@ -674,15 +674,26 @@ pub(crate) fn run_startup_with_outcome<
         outcome.merge(select_lifecycle_input_restore(
             DecisionReasonCode::ManualRequest,
         ));
-        if tv.input().set(config.input).is_ok() {
-            outcome.merge(decide_restore_input_succeeded());
-            writeln!(
-                writer,
-                "LG Buddy Startup: TV turned on and set to {}.",
-                config.input.as_str()
-            )?;
-            writer.flush()?;
-            return Ok(outcome);
+        match tv.input().set(config.input) {
+            Ok(()) => {
+                outcome.merge(decide_restore_input_succeeded());
+                writeln!(
+                    writer,
+                    "LG Buddy Startup: TV turned on and set to {}.",
+                    config.input.as_str()
+                )?;
+                writer.flush()?;
+                return Ok(outcome);
+            }
+            Err(err) if err.kind() == TvErrorKind::Authentication => {
+                writeln!(
+                    writer,
+                    "LG Buddy Startup: Stored TV authentication is unavailable; skipping unattended TV control."
+                )?;
+                writer.flush()?;
+                return Ok(outcome);
+            }
+            Err(_) => {}
         }
 
         let retry_delay = startup_retry_delay(attempt);
@@ -787,6 +798,18 @@ pub(crate) fn run_shutdown_with_outcome<W: Write, C: TvClient, R: RebootDetector
                 ShutdownNext::QueryInput => unreachable!("input decision cannot request input"),
             }
         }
+        Err(err) if err.kind() == TvErrorKind::Authentication => {
+            writeln!(
+                writer,
+                "LG Buddy Shutdown: Stored TV authentication is unavailable; skipping power_off fallback."
+            )?;
+            outcome.merge(
+                PolicyOutcome::new().with_no_action(DecisionReason::with_detail(
+                    DecisionReasonCode::NotApplicable,
+                    err.to_string(),
+                )),
+            );
+        }
         Err(err) => {
             let decision = decide_shutdown_after_input(
                 config.input,
@@ -872,6 +895,18 @@ pub(crate) fn attempt_system_sleep_power_off_with_outcome<W: Write, C: TvClient,
                     outcome.merge(decision.outcome);
                 }
             }
+        }
+        Err(err) if err.kind() == TvErrorKind::Authentication => {
+            writeln!(
+                writer,
+                "LG Buddy Sleep Pre: Stored TV authentication is unavailable; skipping power_off fallback."
+            )?;
+            outcome.merge(
+                PolicyOutcome::new().with_no_action(DecisionReason::with_detail(
+                    DecisionReasonCode::NotApplicable,
+                    err.to_string(),
+                )),
+            );
         }
         Err(err) => {
             let decision = decide_system_sleep_after_input(
@@ -1250,6 +1285,13 @@ pub(crate) fn attempt_legacy_network_manager_sleep_with<
             marker.clear()?;
             return Ok(());
         }
+        Err(err) if err.kind() == TvErrorKind::Authentication => {
+            writeln!(
+                writer,
+                "LG Buddy Sleep: Stored TV authentication is unavailable; skipping power_off fallback."
+            )?;
+            return Ok(());
+        }
         Ok(_) | Err(_) => {}
     }
 
@@ -1331,17 +1373,33 @@ pub(crate) fn restore_after_system_sleep_with_outcome<
         outcome.merge(select_lifecycle_input_restore(
             DecisionReasonCode::RuntimeEvent,
         ));
-        if tv.input().set(config.input).is_ok() {
-            let success_outcome = decide_system_resume_input_succeeded();
-            apply_system_screen_marker_transitions(marker, &success_outcome)?;
-            outcome.merge(success_outcome);
-            writeln!(
-                writer,
-                "LG Buddy Startup: TV turned on and set to {}.",
-                config.input.as_str()
-            )?;
-            writer.flush()?;
-            return Ok(outcome);
+        match tv.input().set(config.input) {
+            Ok(()) => {
+                let success_outcome = decide_system_resume_input_succeeded();
+                apply_system_screen_marker_transitions(marker, &success_outcome)?;
+                outcome.merge(success_outcome);
+                writeln!(
+                    writer,
+                    "LG Buddy Startup: TV turned on and set to {}.",
+                    config.input.as_str()
+                )?;
+                writer.flush()?;
+                return Ok(outcome);
+            }
+            Err(err) if err.kind() == TvErrorKind::Authentication => {
+                writeln!(
+                    writer,
+                    "LG Buddy Startup: Stored TV authentication is unavailable; skipping unattended TV control."
+                )?;
+                writer.flush()?;
+                let unavailable_outcome = decide_system_resume_input_exhausted(
+                    "system resume skipped because stored TV authentication is unavailable",
+                );
+                apply_system_screen_marker_transitions(marker, &unavailable_outcome)?;
+                outcome.merge(unavailable_outcome);
+                return Ok(outcome);
+            }
+            Err(_) => {}
         }
 
         let retry_delay = startup_retry_delay(attempt);
@@ -1693,7 +1751,11 @@ fn query_current_input_with_retries<C: TvClient, Sl: Sleeper>(
         match tv.input().current() {
             Ok(current_input) => return Ok(current_input),
             Err(err) => {
+                let authentication_failed = err.kind() == TvErrorKind::Authentication;
                 last_err = Some(err);
+                if authentication_failed {
+                    break;
+                }
                 if attempt < retries {
                     sleeper.sleep(system_sleep_retry_delay());
                 }
@@ -1710,8 +1772,10 @@ fn retry_power_off<C: TvClient, Sl: Sleeper>(
     attempts: u32,
 ) -> bool {
     for attempt in 1..=attempts {
-        if tv.power().off().is_ok() {
-            return true;
+        match tv.power().off() {
+            Ok(()) => return true,
+            Err(err) if err.kind() == TvErrorKind::Authentication => return false,
+            Err(_) => {}
         }
 
         if attempt < attempts {

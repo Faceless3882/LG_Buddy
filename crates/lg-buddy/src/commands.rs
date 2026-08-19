@@ -262,6 +262,7 @@ pub fn run_sleep_pre_for_event<W: Write>(
         config.tv_ip,
         config.tv_platform,
         TvClientBuildOptions::production()
+            .stored_token_only()
             .with_command_timeout(SYSTEM_PRE_SLEEP_TV_COMMAND_TIMEOUT),
     )?;
     let sleeper = ThreadSleeper;
@@ -285,7 +286,7 @@ pub fn run_sleep<W: Write>(writer: &mut W) -> Result<(), RunError> {
         &config_path,
         config.tv_ip,
         config.tv_platform,
-        TvClientBuildOptions::production(),
+        TvClientBuildOptions::production().stored_token_only(),
     )?;
     let detector = JournalctlSleepDetector::default();
     let sleeper = ThreadSleeper;
@@ -306,6 +307,7 @@ pub fn run_nm_pre_down<W: Write>(writer: &mut W) -> Result<(), RunError> {
         config.tv_ip,
         config.tv_platform,
         TvClientBuildOptions::production()
+            .stored_token_only()
             .with_command_timeout(SYSTEM_PRE_SLEEP_TV_COMMAND_TIMEOUT),
     )?;
     let sleeper = ThreadSleeper;
@@ -369,8 +371,16 @@ pub fn run_startup<W: Write>(writer: &mut W, mode: StartupMode) -> Result<(), Ru
         &config_path,
         config.tv_ip,
         config.tv_platform,
-        TvClientBuildOptions::production(),
+        TvClientBuildOptions::production().stored_token_only(),
     )?;
+    if !tv_client.can_authenticate_unattended()? {
+        marker.clear()?;
+        writeln!(
+            writer,
+            "LG Buddy Startup: No stored native TV credential; skipping unattended TV control."
+        )?;
+        return Ok(());
+    }
     let wol_sender = UdpWakeOnLanSender::default();
     let sleeper = ThreadSleeper;
     let network_waiter = NmOnlineNetworkWaiter::default();
@@ -394,21 +404,37 @@ pub fn run_system_resume<W: Write>(writer: &mut W) -> Result<(), RunError> {
         &config_path,
         config.tv_ip,
         config.tv_platform,
-        TvClientBuildOptions::production(),
+        TvClientBuildOptions::production().stored_token_only(),
     )?;
     let wol_sender = UdpWakeOnLanSender::default();
     let sleeper = ThreadSleeper;
     let network_waiter = NmOnlineNetworkWaiter::default();
 
-    let result = lifecycle::restore_after_system_sleep_with(
-        writer,
-        &config,
-        &marker,
-        &tv_client,
-        &wol_sender,
-        &sleeper,
-        &network_waiter,
-    );
+    let result = (|| -> Result<(), RunError> {
+        match tv_client.can_authenticate_unattended() {
+            Ok(true) => lifecycle::restore_after_system_sleep_with(
+                writer,
+                &config,
+                &marker,
+                &tv_client,
+                &wol_sender,
+                &sleeper,
+                &network_waiter,
+            ),
+            Ok(false) => {
+                marker.clear()?;
+                writeln!(
+                    writer,
+                    "LG Buddy System Resume: No stored native TV credential; skipping unattended TV control."
+                )?;
+                Ok(())
+            }
+            Err(err) => {
+                marker.clear()?;
+                Err(err.into())
+            }
+        }
+    })();
 
     let mut cleanup_error = None;
 
@@ -465,8 +491,15 @@ pub fn run_shutdown<W: Write>(writer: &mut W) -> Result<(), RunError> {
         &config_path,
         config.tv_ip,
         config.tv_platform,
-        TvClientBuildOptions::production(),
+        TvClientBuildOptions::production().stored_token_only(),
     )?;
+    if !tv_client.can_authenticate_unattended()? {
+        writeln!(
+            writer,
+            "LG Buddy Shutdown: No stored native TV credential; skipping unattended TV control."
+        )?;
+        return Ok(());
+    }
     let reboot_detector = SystemctlRebootDetector::default();
 
     lifecycle::run_shutdown_with(writer, &config, &tv_client, &reboot_detector)

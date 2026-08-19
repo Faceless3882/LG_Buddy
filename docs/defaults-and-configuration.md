@@ -111,10 +111,12 @@ choice.
 
 - `bscpylgtv` remains the default, including for existing profiles where the
   key is absent
-- `lg_webos` is the experimental native Rust platform and must be selected
-  explicitly with `lg-buddy settings set tv.platform lg_webos`
-- native selection is saved only after foreground credential and TV-state
-  preflight succeeds; background services do not initiate pairing
+- `lg_webos` is the experimental native Rust platform and can be selected
+  during initial configuration or with `lg-buddy settings set tv.platform lg_webos`
+- initial native selection pairs before it is saved; ordinary TV operations
+  can also pair or repair credentials when needed
+- shutdown, suspend, resume, startup, and network-teardown handling use stored
+  credentials only and skip promptly when no credential is available
 - this is the only platform selector; there is no separate backend, adapter,
   or migration override
 

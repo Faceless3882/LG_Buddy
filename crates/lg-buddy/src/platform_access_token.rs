@@ -171,10 +171,7 @@ pub enum PlatformAccessTokenAcquisitionError {
 impl fmt::Display for PlatformAccessTokenAcquisitionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::MissingStoredToken => write!(
-                f,
-                "no stored platform access token is available; pair the TV from foreground settings by running `lg-buddy settings set tv.platform lg_webos`"
-            ),
+            Self::MissingStoredToken => write!(f, "no stored platform access token is available"),
             Self::Store { source } => write!(f, "platform access-token storage failed: {source}"),
             Self::Registration { source } => {
                 write!(f, "platform access-token registration failed: {source}")
@@ -683,7 +680,7 @@ mod tests {
     }
 
     #[test]
-    fn stored_token_load_reports_actionable_missing_credential() {
+    fn stored_token_load_reports_missing_credential_without_manual_repair_guidance() {
         let dir = TestDir::new("missing-stored-token");
         let store = PlatformAccessTokenStore::for_primary_profile(
             &dir.config_path(),
@@ -698,9 +695,10 @@ mod tests {
             error,
             PlatformAccessTokenAcquisitionError::MissingStoredToken
         ));
-        assert!(error
-            .to_string()
-            .contains("pair the TV from foreground settings"));
+        assert_eq!(
+            error.to_string(),
+            "no stored platform access token is available"
+        );
     }
 
     #[test]

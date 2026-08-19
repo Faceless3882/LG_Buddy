@@ -43,6 +43,13 @@ validate_input() {
     esac
 }
 
+validate_tv_platform() {
+    case "$1" in
+        bscpylgtv|lg_webos) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 validate_backend() {
     case "$1" in
         auto|gnome|swayidle) return 0 ;;
@@ -94,8 +101,10 @@ current_screen_restore_policy="$LG_BUDDY_DEFAULT_SCREEN_RESTORE_POLICY"
 current_system_sleep_wake_policy="$LG_BUDDY_DEFAULT_SYSTEM_SLEEP_WAKE_POLICY"
 current_update_auto_check="$LG_BUDDY_DEFAULT_UPDATE_AUTO_CHECK"
 current_update_channel="$LG_BUDDY_DEFAULT_UPDATE_CHANNEL"
+existing_config_loaded=0
 
 if lg_buddy_load_config >/dev/null 2>&1; then
+    existing_config_loaded=1
     current_tv_ip="$tv_ip"
     current_tv_mac="$tv_mac"
     current_input="$input"
@@ -120,6 +129,7 @@ if [ "${LG_BUDDY_NONINTERACTIVE:-0}" = "1" ]; then
     tv_ip="${LG_BUDDY_TV_IP:-$current_tv_ip}"
     tv_mac="${LG_BUDDY_TV_MAC:-$current_tv_mac}"
     input="${LG_BUDDY_INPUT:-$current_input}"
+    tv_platform="${LG_BUDDY_TV_PLATFORM:-$current_tv_platform}"
     screen_backend="${LG_BUDDY_SCREEN_BACKEND:-$current_screen_backend}"
     screen_idle_blank="$current_screen_idle_blank"
     screen_idle_timeout="${LG_BUDDY_SCREEN_IDLE_TIMEOUT:-$current_screen_idle_timeout}"
@@ -144,6 +154,10 @@ if [ "${LG_BUDDY_NONINTERACTIVE:-0}" = "1" ]; then
     }
     validate_input "$input" || {
         echo "LG_BUDDY_INPUT must be one of HDMI_1, HDMI_2, HDMI_3, or HDMI_4."
+        exit 1
+    }
+    validate_tv_platform "$tv_platform" || {
+        echo "LG_BUDDY_TV_PLATFORM must be one of bscpylgtv or lg_webos."
         exit 1
     }
     validate_backend "$screen_backend" || {
@@ -257,6 +271,25 @@ else
         esac
     done
 
+    echo "Choose the TV control platform:"
+    echo "  1) bscpylgtv  (Python compatibility platform)"
+    echo "  2) lg_webos   (native LG Buddy platform)"
+
+    case "$current_tv_platform" in
+        bscpylgtv) default_platform_choice="1" ;;
+        lg_webos) default_platform_choice="2" ;;
+        *) default_platform_choice="1" ;;
+    esac
+
+    while true; do
+        PLATFORM_CHOICE="$(prompt_with_default "Enter number (1-2)" "$default_platform_choice")"
+        case "$PLATFORM_CHOICE" in
+            1) tv_platform="bscpylgtv"; break ;;
+            2) tv_platform="lg_webos"; break ;;
+            *) echo "  Please enter 1 or 2." ;;
+        esac
+    done
+
     case "$current_screen_idle_blank" in
         enabled) default_idle_blank_choice="Y" ;;
         disabled) default_idle_blank_choice="n" ;;
@@ -338,7 +371,7 @@ echo "Configuration to apply:"
 echo "  TV IP:               $tv_ip"
 echo "  TV MAC:              $tv_mac"
 echo "  PC Input:            $input"
-echo "  TV Platform:         $current_tv_platform"
+echo "  TV Platform:         $tv_platform"
 echo "  Screen Idle Blank:   $screen_idle_blank"
 echo "  Screen Backend:      $screen_backend"
 echo "  Screen Idle Timeout: $screen_idle_timeout"
@@ -361,13 +394,15 @@ fi
 
 mkdir -p "$CONFIG_DIR"
 chmod 700 "$CONFIG_DIR"
+CONFIG_CANDIDATE="${CONFIG_FILE}.tmp.$$"
+trap 'rm -f -- "$CONFIG_CANDIDATE"' EXIT
 
-cat >"$CONFIG_FILE" <<EOF
+cat >"$CONFIG_CANDIDATE" <<EOF
 # LG Buddy configuration
 tvs_primary_ip=$tv_ip
 tvs_primary_mac=$tv_mac
 tvs_primary_input=$input
-tvs_primary_platform=$current_tv_platform
+tvs_primary_platform=bscpylgtv
 screen_idle_blank=$screen_idle_blank
 screen_backend=$screen_backend
 screen_idle_timeout=$screen_idle_timeout
@@ -377,7 +412,27 @@ updates_auto_check=$update_auto_check
 updates_channel=$update_channel
 EOF
 
-chmod 600 "$CONFIG_FILE"
+chmod 600 "$CONFIG_CANDIDATE"
+
+if [ "$tv_platform" = "lg_webos" ]; then
+    if [ "$existing_config_loaded" = "1" ] && [ "$current_tv_platform" = "lg_webos" ]; then
+        sed -i 's/^tvs_primary_platform=bscpylgtv$/tvs_primary_platform=lg_webos/' \
+            "$CONFIG_CANDIDATE"
+    else
+        RUNTIME_BINARY="${LG_BUDDY_RUNTIME_BINARY:-$SCRIPT_DIR/lg-buddy}"
+        if [ ! -x "$RUNTIME_BINARY" ]; then
+            echo "LG Buddy runtime binary is required to pair the native webOS platform: $RUNTIME_BINARY"
+            exit 1
+        fi
+
+        echo "Pairing the native webOS platform..."
+        LG_BUDDY_CONFIG="$CONFIG_CANDIDATE" \
+            "$RUNTIME_BINARY" settings set tv.platform lg_webos
+    fi
+fi
+
+mv -f -- "$CONFIG_CANDIDATE" "$CONFIG_FILE"
+trap - EXIT
 echo "Configuration written to $CONFIG_FILE"
 
 if [ -f "$HOME/.config/systemd/user/LG_Buddy_screen.service" ]; then

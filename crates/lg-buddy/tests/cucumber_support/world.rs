@@ -67,6 +67,12 @@ impl LgBuddyWorld {
         self.config = Some(config);
     }
 
+    pub fn create_empty_config_path(&mut self) {
+        let config = TestConfigFile::new("cucumber-initial-config");
+        self.ensure_env().set("LG_BUDDY_CONFIG", config.path());
+        self.config = Some(config);
+    }
+
     pub fn set_screen_restore_policy(&self, policy: &str) {
         self.config
             .as_ref()
@@ -184,7 +190,9 @@ exit 1\n",
     }
 
     pub fn create_native_webos_tv(&mut self, input: &str, backlight: u8) {
-        self.config().set_value("tvs_primary_ip", "127.0.0.1");
+        if self.config().path().exists() {
+            self.config().set_value("tvs_primary_ip", "127.0.0.1");
+        }
         let tv = MockWebOsTv::new(input);
         assert_eq!(
             tv.snapshot().backlight,
@@ -560,6 +568,34 @@ exit 1\n",
             success: output.status.success(),
             stdout: String::from_utf8(output.stdout).expect("utf8 command output"),
             stderr: String::from_utf8(output.stderr).expect("utf8 command stderr"),
+            duration,
+        });
+    }
+
+    pub fn run_native_initial_configuration(&mut self) {
+        self.ensure_env().set("LG_BUDDY_NONINTERACTIVE", "1");
+        self.ensure_env().set("LG_BUDDY_TV_IP", "127.0.0.1");
+        self.ensure_env()
+            .set("LG_BUDDY_TV_MAC", "22:33:44:55:66:77");
+        self.ensure_env().set("LG_BUDDY_INPUT", "HDMI_2");
+        self.ensure_env().set("LG_BUDDY_TV_PLATFORM", "lg_webos");
+        self.ensure_env()
+            .set("LG_BUDDY_RUNTIME_BINARY", env!("CARGO_BIN_EXE_lg-buddy"));
+        self.ensure_env().set("LG_BUDDY_SKIP_SYSTEMD_ACTIONS", "1");
+
+        let configure = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("configure.sh");
+        let started = std::time::Instant::now();
+        let output = ProcessCommand::new(configure)
+            .output()
+            .expect("run initial configuration");
+        let duration = started.elapsed();
+
+        self.command_result = Some(CommandExecution {
+            success: output.status.success(),
+            stdout: String::from_utf8(output.stdout).expect("utf8 configure output"),
+            stderr: String::from_utf8(output.stderr).expect("utf8 configure stderr"),
             duration,
         });
     }

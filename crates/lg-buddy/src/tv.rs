@@ -16,7 +16,7 @@ use crate::auth::{
 };
 use crate::config::{HdmiInput, MacAddress, TvPlatform};
 use crate::platform_access_token::{PlatformAccessTokenStore, PlatformAccessTokenStoreError};
-use crate::web_os::{WebOsEndpoint, WebOsTvClient};
+use crate::web_os::{WebOsEndpoint, WebOsPairingPolicy, WebOsTvClient};
 use crate::wol::{WakeOnLanError, WakeOnLanSender};
 
 pub const DEFAULT_BSCPYLGTV_COMMAND_PATH: &str = "/usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand";
@@ -24,6 +24,7 @@ pub const OLED_BRIGHTNESS_MIN: u8 = 0;
 pub const OLED_BRIGHTNESS_MAX: u8 = 100;
 const DEFAULT_WEBOS_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const DEFAULT_WEBOS_RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
+const DEFAULT_WEBOS_UNATTENDED_RESPONSE_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CommandOutput {
@@ -215,17 +216,24 @@ pub trait TvClient {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TvClientBuildOptions {
     command_timeout: Option<Duration>,
+    webos_pairing_policy: WebOsPairingPolicy,
 }
 
 impl TvClientBuildOptions {
     pub(crate) fn production() -> Self {
         Self {
             command_timeout: None,
+            webos_pairing_policy: WebOsPairingPolicy::PairIfNeeded,
         }
     }
 
     pub(crate) fn with_command_timeout(mut self, timeout: Duration) -> Self {
         self.command_timeout = Some(timeout);
+        self
+    }
+
+    pub(crate) fn stored_token_only(mut self) -> Self {
+        self.webos_pairing_policy = WebOsPairingPolicy::StoredTokenOnly;
         self
     }
 }
@@ -310,6 +318,17 @@ impl TvClient for SelectedTvClient {
     }
 }
 
+impl SelectedTvClient {
+    pub(crate) fn can_authenticate_unattended(&self) -> Result<bool, TvClientBuildError> {
+        match self {
+            Self::Bscpylgtv(_) => Ok(true),
+            Self::WebOs(client) => client
+                .has_stored_access_token()
+                .map_err(TvClientBuildError::TokenStore),
+        }
+    }
+}
+
 pub(crate) fn build_tv_client(
     config_path: &Path,
     tv_ip: Ipv4Addr,
@@ -333,14 +352,21 @@ pub(crate) fn build_tv_client(
                 resolve_config_owner(config_path).map_err(TvClientBuildError::AuthContext)?;
             let token_store = PlatformAccessTokenStore::for_primary_profile(config_path, owner)
                 .map_err(TvClientBuildError::TokenStore)?;
-            let response_timeout = options
-                .command_timeout
-                .unwrap_or(DEFAULT_WEBOS_RESPONSE_TIMEOUT);
+            let response_timeout =
+                options
+                    .command_timeout
+                    .unwrap_or(match options.webos_pairing_policy {
+                        WebOsPairingPolicy::PairIfNeeded => DEFAULT_WEBOS_RESPONSE_TIMEOUT,
+                        WebOsPairingPolicy::StoredTokenOnly => {
+                            DEFAULT_WEBOS_UNATTENDED_RESPONSE_TIMEOUT
+                        }
+                    });
             Ok(SelectedTvClient::WebOs(Box::new(WebOsTvClient::new(
                 WebOsEndpoint::wss(tv_ip),
                 DEFAULT_WEBOS_CONNECT_TIMEOUT,
                 response_timeout,
                 token_store,
+                options.webos_pairing_policy,
             ))))
         }
     }

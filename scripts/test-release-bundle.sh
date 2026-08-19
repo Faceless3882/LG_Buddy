@@ -254,8 +254,7 @@ printf '%s\n' "$INSTALLED_VERSION_OUTPUT" | grep -q "^commit: "
 
 # Existing profiles without the platform key remain on bscpylgtv. Materialize
 # that choice through settings, then use a controlled raw-config fixture to
-# prove lg_webos routes to native stored-credential authentication without
-# requiring a real TV in the release smoke test.
+# prove an unpaired native shutdown skips immediately without contacting a TV.
 sed -i '/^tvs_primary_platform=/d' "$CONFIG_FILE"
 "$INSTALLED_BINARY" settings get tv.platform | grep -q '^bscpylgtv$'
 "$INSTALLED_BINARY" settings set tv.platform bscpylgtv
@@ -263,12 +262,8 @@ grep -q '^tvs_primary_platform=bscpylgtv$' "$CONFIG_FILE"
 
 sed -i 's/^tvs_primary_platform=bscpylgtv$/tvs_primary_platform=lg_webos/' "$CONFIG_FILE"
 "$INSTALLED_BINARY" settings get tv.platform | grep -q '^lg_webos$'
-if NATIVE_PLATFORM_OUTPUT="$("$INSTALLED_BINARY" brightness get 2>&1)"; then
-    echo "Native platform smoke unexpectedly succeeded without a stored credential."
-    exit 1
-fi
-printf '%s\n' "$NATIVE_PLATFORM_OUTPUT" | grep -F -q 'no stored platform access token is available'
-printf '%s\n' "$NATIVE_PLATFORM_OUTPUT" | grep -F -q 'lg-buddy settings set tv.platform lg_webos'
+NATIVE_PLATFORM_OUTPUT="$("$INSTALLED_BINARY" shutdown 2>&1)"
+printf '%s\n' "$NATIVE_PLATFORM_OUTPUT" | grep -F -q 'No stored native TV credential; skipping unattended TV control.'
 
 "$INSTALLED_BINARY" settings set tv.platform bscpylgtv
 grep -q '^tvs_primary_platform=bscpylgtv$' "$CONFIG_FILE"

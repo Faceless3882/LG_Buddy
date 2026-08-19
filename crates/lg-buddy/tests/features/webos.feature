@@ -1,6 +1,20 @@
 Feature: Native webOS TV platform
   LG Buddy should expose the same product behavior through its native webOS platform,
-  while pairing only from an explicit foreground settings command.
+  pairing when the user is setting up or actively controlling the TV without delaying
+  shutdown, suspend, or network teardown when no stored credential is available.
+
+  Scenario: Initial configuration selects and pairs the native platform
+    Given an empty temporary LG Buddy config path
+    And a native webOS TV on input HDMI_2 with brightness 90
+    When I choose native webOS during initial configuration
+    Then the command succeeds
+    And stdout contains "TV Platform:         lg_webos"
+    And stdout contains "pairing required; accept the prompt on the TV"
+    And config.env contains "tvs_primary_platform=lg_webos"
+    And a valid native TV access token is stored
+    And the native TV connection count is 1
+    And the native TV registration tokens are "none"
+    And the native TV pairing prompt count is 1
 
   Scenario: Opting in pairs the TV and the stored token authenticates later commands
     Given a temporary LG Buddy config using input HDMI_2
@@ -20,31 +34,30 @@ Feature: Native webOS TV platform
     And the native TV connection count is 2
     And the native TV pairing prompt count is 1
 
-  Scenario: A missing token fails before a background command connects to the TV
+  Scenario: An ordinary command pairs when the token is missing
     Given a temporary LG Buddy config using input HDMI_2
     And the existing config selects TV platform "lg_webos"
     And a native webOS TV on input HDMI_2 with brightness 90
     When I run the command "brightness get"
-    Then the command fails
-    And stderr contains "no stored platform access token is available"
-    And stderr contains "settings set tv.platform lg_webos"
-    And no native TV access token is stored
-    And the native TV connection count is 0
-    And the native TV registration tokens are ""
+    Then the command succeeds
+    And stdout is "90"
+    And a valid native TV access token is stored
+    And the native TV connection count is 1
+    And the native TV registration tokens are "none"
+    And the native TV pairing prompt count is 1
 
-  Scenario: A stale token fails without background re-pairing or credential replacement
+  Scenario: An ordinary command repairs a stale token
     Given a temporary LG Buddy config using input HDMI_2
     And the existing config selects TV platform "lg_webos"
     And a native webOS TV on input HDMI_2 with brightness 90
     And a stale native TV access token is stored
     When I run the command "brightness get"
-    Then the command fails
-    And stderr contains "requires foreground pairing"
-    And stderr contains "settings set tv.platform lg_webos"
-    And the native TV access token is "stale-cucumber-access-token"
-    And the native TV connection count is 1
-    And the native TV registration tokens are "stale-cucumber-access-token"
-    And the native TV pairing prompt count is 1
+    Then the command succeeds
+    And stdout is "90"
+    And a valid native TV access token is stored
+    And the native TV connection count is 2
+    And the native TV registration tokens are "stale-cucumber-access-token,none"
+    And the native TV pairing prompt count is 2
 
   Scenario: Foreground opt-in repairs a stale token before persisting the platform
     Given a temporary LG Buddy config using input HDMI_2
@@ -154,6 +167,40 @@ Feature: Native webOS TV platform
     And the native TV registration tokens are "webos-test-access-token,webos-test-access-token"
     And the native TV pairing prompt count is 0
 
+  Scenario: Native startup does not delay boot when the token is missing
+    Given a temporary LG Buddy config using input HDMI_2
+    And the existing config selects TV platform "lg_webos"
+    And LG Buddy session runtime is isolated
+    And a native webOS TV on input HDMI_3 with brightness 100
+    And the system marker exists
+    When I run the command "startup boot"
+    Then the command succeeds
+    And the command completes within 1 seconds
+    And stdout contains "No stored native TV credential; skipping unattended TV control."
+    And no native TV access token is stored
+    And the system marker is absent
+    And the TV input is HDMI_3
+    And the native TV connection count is 0
+    And the native TV pairing prompt count is 0
+
+  Scenario: Native resume retires ownership when the stored token is stale
+    Given a temporary LG Buddy config using input HDMI_2
+    And the existing config selects TV platform "lg_webos"
+    And LG Buddy session runtime is isolated
+    And a native webOS TV on input HDMI_3 with brightness 100
+    And a stale native TV access token is stored
+    And the system marker exists
+    And nm-online succeeds
+    And startup delays are disabled
+    When I run the command "startup auto"
+    Then the command succeeds
+    And stdout contains "Stored TV authentication is unavailable; skipping unattended TV control."
+    And the system marker is absent
+    And the native TV access token is "stale-cucumber-access-token"
+    And the TV input is HDMI_3
+    And the native TV registration tokens are "stale-cucumber-access-token"
+    And the native TV pairing prompt count is 1
+
   Scenario: Native pre-sleep handling powers off an owned TV without background pairing
     Given a temporary LG Buddy config using input HDMI_2
     And the existing config selects TV platform "lg_webos"
@@ -168,6 +215,62 @@ Feature: Native webOS TV platform
     And the TV is powered off
     And the native TV registration tokens are "webos-test-access-token"
     And the native TV pairing prompt count is 0
+
+  Scenario: Native shutdown is immediate and does not pair when the token is missing
+    Given a temporary LG Buddy config using input HDMI_2
+    And the existing config selects TV platform "lg_webos"
+    And a native webOS TV on input HDMI_2 with brightness 90
+    And reboot detection reports no pending reboot
+    When I run the command "shutdown"
+    Then the command succeeds
+    And the command completes within 1 seconds
+    And stdout contains "No stored native TV credential; skipping unattended TV control."
+    And no native TV access token is stored
+    And the TV is powered on
+    And the native TV connection count is 0
+    And the native TV pairing prompt count is 0
+
+  Scenario: Native pre-sleep does not pair or retry when the token is missing
+    Given a temporary LG Buddy config using input HDMI_2
+    And the existing config selects TV platform "lg_webos"
+    And LG Buddy session runtime is isolated
+    And a native webOS TV on input HDMI_2 with brightness 90
+    When I run the command "sleep-pre"
+    Then the command succeeds
+    And the command completes within 1 seconds
+    And no native TV access token is stored
+    And the system marker is absent
+    And the TV is powered on
+    And the native TV connection count is 0
+    And the native TV pairing prompt count is 0
+
+  Scenario: Native NetworkManager pre-down does not pair or retry when the token is missing
+    Given a temporary LG Buddy config using input HDMI_2
+    And the existing config selects TV platform "lg_webos"
+    And LG Buddy session runtime is isolated
+    And a native webOS TV on input HDMI_2 with brightness 90
+    And mock system logind reports PreparingForSleep=true
+    When I run the command "nm-pre-down"
+    Then the command succeeds
+    And the command completes within 1 seconds
+    And no native TV access token is stored
+    And the system marker is absent
+    And the TV is powered on
+    And the native TV connection count is 0
+    And the native TV pairing prompt count is 0
+
+  Scenario: Native shutdown does not repair a stale token
+    Given a temporary LG Buddy config using input HDMI_2
+    And the existing config selects TV platform "lg_webos"
+    And a native webOS TV on input HDMI_2 with brightness 90
+    And a stale native TV access token is stored
+    And reboot detection reports no pending reboot
+    When I run the command "shutdown"
+    Then the command succeeds
+    And the native TV access token is "stale-cucumber-access-token"
+    And the TV is powered on
+    And the native TV registration tokens are "stale-cucumber-access-token"
+    And the native TV pairing prompt count is 1
 
   Scenario: Native pre-sleep bounds a stalled TV response and uses the fallback
     Given a temporary LG Buddy config using input HDMI_2

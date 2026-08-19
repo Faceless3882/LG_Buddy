@@ -6,6 +6,11 @@ fn temporary_config(world: &mut LgBuddyWorld, input: String) {
     world.create_config(&input);
 }
 
+#[given("an empty temporary LG Buddy config path")]
+fn empty_temporary_config_path(world: &mut LgBuddyWorld) {
+    world.create_empty_config_path();
+}
+
 #[given(regex = r#"the screen restore policy is "(marker_only|conservative|aggressive)""#)]
 fn screen_restore_policy(world: &mut LgBuddyWorld, policy: String) {
     world.set_screen_restore_policy(&policy);
@@ -310,6 +315,11 @@ fn journalctl_reports_no_sleep_requested(world: &mut LgBuddyWorld) {
 #[when(regex = r#"I run the command "([^"]+)""#)]
 fn run_command(world: &mut LgBuddyWorld, command: String) {
     world.run_named_command(&command);
+}
+
+#[when("I choose native webOS during initial configuration")]
+fn run_native_initial_configuration(world: &mut LgBuddyWorld) {
+    world.run_native_initial_configuration();
 }
 
 #[then("the command succeeds")]

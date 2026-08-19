@@ -337,6 +337,66 @@ fn run_system_resume_clears_sleep_cycle_state_and_preserves_session_marker() {
 }
 
 #[test]
+fn run_system_resume_without_native_token_retires_all_system_sleep_state() {
+    let config = TestConfigFile::new("entrypoint-native-resume-missing-token-config");
+    config.write_sample("HDMI_4");
+    config.append_line("tvs_primary_platform=lg_webos");
+
+    let runtime = RuntimeStateLayout::new("entrypoint-native-resume-missing-token-runtime");
+    runtime.create_system_marker();
+    runtime.create_system_sleep_attempt_marker();
+    let cycle_state = runtime.system_dir().join("system_sleep_cycle");
+    fs::write(&cycle_state, "outcome=completed\n").expect("create completed cycle state");
+
+    let mut env = TestEnv::new();
+    env.set("LG_BUDDY_CONFIG", config.path());
+    env.set("LG_BUDDY_SYSTEM_RUNTIME_DIR", runtime.system_dir());
+
+    let mut output = Vec::new();
+    run_system_resume(&mut output).expect("missing native token should skip resume");
+
+    runtime.assert_system_marker_absent();
+    runtime.assert_system_sleep_attempt_marker_absent();
+    assert!(!cycle_state.exists());
+    assert!(String::from_utf8(output)
+        .expect("utf8 output")
+        .contains("No stored native TV credential; skipping unattended TV control."));
+}
+
+#[test]
+fn run_system_resume_cleans_sleep_state_when_native_token_is_malformed() {
+    let config = TestConfigFile::new("entrypoint-native-resume-malformed-token-config");
+    config.write_sample("HDMI_4");
+    config.append_line("tvs_primary_platform=lg_webos");
+    let token_path = config
+        .path()
+        .parent()
+        .expect("config parent")
+        .join("tvs/primary/access-token.json");
+    fs::create_dir_all(token_path.parent().expect("token parent")).expect("create token directory");
+    fs::write(&token_path, "{ malformed").expect("write malformed token");
+
+    let runtime = RuntimeStateLayout::new("entrypoint-native-resume-malformed-token-runtime");
+    runtime.create_system_marker();
+    runtime.create_system_sleep_attempt_marker();
+    let cycle_state = runtime.system_dir().join("system_sleep_cycle");
+    fs::write(&cycle_state, "outcome=completed\n").expect("create completed cycle state");
+
+    let mut env = TestEnv::new();
+    env.set("LG_BUDDY_CONFIG", config.path());
+    env.set("LG_BUDDY_SYSTEM_RUNTIME_DIR", runtime.system_dir());
+
+    let mut output = Vec::new();
+    let error = run_system_resume(&mut output)
+        .expect_err("malformed native token should remain an actionable error");
+
+    assert!(error.to_string().contains("malformed"));
+    runtime.assert_system_marker_absent();
+    runtime.assert_system_sleep_attempt_marker_absent();
+    assert!(!cycle_state.exists());
+}
+
+#[test]
 fn run_system_resume_aggressive_policy_restores_without_system_marker() {
     let mock = MockBscpylgtv::new("entrypoint-system-resume-aggressive-tv");
     let wrapper = mock.command_wrapper("entrypoint-system-resume-aggressive-wrapper");
