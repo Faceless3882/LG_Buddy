@@ -38,8 +38,8 @@ screen behavior.
    immediate. Axis activity is compared against a moving baseline so arbitrary
    resting positions, such as a wheel left turned, do not continuously count as
    input.
-7. The runner receives throttled `UserActivity` events and merges them into the
-   inactivity engine.
+7. The runner receives throttled `UserActivity` events and resets the same
+   inactivity deadline used by desktop activity.
 
 ## Module Map
 

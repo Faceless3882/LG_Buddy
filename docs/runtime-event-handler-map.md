@@ -18,15 +18,15 @@ LG Buddy has four related but distinct event/result shapes.
 | Command entrypoint | `lib.rs` / `commands.rs` / `session::runner` | External service, hook, or user command invokes one runtime command. |
 | Runtime event | `events.rs` | Source-classified fact or intent, such as CLI/API, Linux logind, Linux NetworkManager, desktop session, or auxiliary input. |
 | Session event | `session.rs` | Backend-neutral event such as `Idle`, `Active`, `WakeRequested`, `BeforeSleep`, or `AfterResume`. |
-| Inactivity observation | `session/inactivity.rs` | Lower-level inactivity fact such as idletime, provider idle, wake request, or user activity. |
+| Inactivity observation | `session/inactivity.rs` | Lower-level activity fact such as desktop input, wake request, or auxiliary input. |
 | Policy outcome | `policy.rs` | Explicit selected actions, no-action decisions, diagnostics, and state transitions. |
 
 The command entrypoint layer remains the external integration surface. The
 session event layer is active for native monitor behavior and delegated backend
 modeling. System lifecycle handling is normalized through `RuntimeEvent` and
-the lifecycle policy domain. The inactivity observation layer owns
-edge-triggered blank and restore decisions for native idle/activity
-integrations.
+the lifecycle policy domain. The inactivity observation layer owns one
+deadline. Every activity observation resets it; expiry produces an
+edge-triggered blank decision.
 
 GNOME is the production pilot for the native inactivity path today, but the
 model is not GNOME-specific. A future non-GNOME Wayland adapter should feed the
@@ -87,7 +87,7 @@ Examples:
 | Source category | Example source | Runtime representation |
 | --- | --- | --- |
 | system lifecycle | `org.freedesktop.login1`, platform-native lifecycle APIs | `MachinePreparingForSleep`, `MachineResumed`, `NetworkTeardownImminent` |
-| desktop idle/activity | Mutter, native Wayland idle protocols | idletime and activity observations |
+| desktop activity | Mutter, native Wayland idle protocols | activity observations |
 | desktop wake request | GNOME ScreenSaver wake signal, future equivalents | `WakeRequested` |
 | auxiliary activity | Linux gamepad input | `UserActivityObserved` |
 
@@ -104,7 +104,8 @@ instead of delegating blank/restore commands to an external tool.
 native desktop activity facts
 auxiliary activity facts
   -> inactivity observations
-  -> InactivityEngine
+  -> reset the InactivityEngine deadline
+  -> configured timeout expires
   -> Idle / Active / WakeRequested / UserActivity
   -> screen policy
 ```
@@ -113,10 +114,10 @@ Current pilot inputs:
 
 | Provider surface | Runtime representation | Consumed by |
 | --- | --- | --- |
-| `org.gnome.ScreenSaver.ActiveChanged(true)` | `ProviderIdle` | `InactivityEngine` |
+| `org.gnome.ScreenSaver.ActiveChanged(true)` | Non-authoritative idle observation | GNOME runner; does not change the LG Buddy deadline |
 | `org.gnome.ScreenSaver.ActiveChanged(false)` | `ProviderActive` | `InactivityEngine` |
 | `org.gnome.ScreenSaver.WakeUpScreen` | `WakeRequested` | `InactivityEngine` |
-| `org.gnome.Mutter.IdleMonitor.GetIdletime` | `IdleTimeMs` | `InactivityEngine` |
+| Recent activity reported by `org.gnome.Mutter.IdleMonitor.GetIdletime` | `DesktopActivityObserved` | `InactivityEngine` |
 | Linux gamepad activity | `UserActivityObserved` | `InactivityEngine` |
 
 These are GNOME-specific source surfaces, but the runtime representations are
@@ -130,7 +131,7 @@ The resulting decisions are dispatched as:
 | `BlankNow` | `SessionEvent::Idle` -> `RuntimeEvent` from `DesktopSession` | `screen::run_screen_off_from_env_for_event` |
 | `RestoreNow` from provider active | `SessionEvent::Active` -> `RuntimeEvent` from `DesktopSession` | `screen::run_screen_on_from_env_for_event` |
 | `RestoreNow` from wake request | `SessionEvent::WakeRequested` -> `RuntimeEvent` from `DesktopSession` | `screen::run_screen_on_from_env_for_event` |
-| `RestoreNow` from idletime or auxiliary activity | `SessionEvent::UserActivity` -> `RuntimeEvent` from `DesktopSession` | `screen::run_screen_on_from_env_for_event` |
+| `RestoreNow` from desktop or auxiliary activity | `SessionEvent::UserActivity` -> `RuntimeEvent` from `DesktopSession` | `screen::run_screen_on_from_env_for_event` |
 
 ### Delegated `swayidle` CLI/API Path
 

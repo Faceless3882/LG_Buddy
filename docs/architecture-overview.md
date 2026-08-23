@@ -251,8 +251,9 @@ The intended split is:
   - top-level event consumption is mapped separately in
     [runtime-event-handler-map.md](runtime-event-handler-map.md)
 - `session/inactivity.rs`
-  - synthesizes idle and active transitions from native backend observations
-    and configured thresholds
+  - owns the configured inactivity deadline
+  - resets the deadline from normalized activity observations and blanks when
+    it expires
   - keeps blank and restore decisions edge-triggered instead of poll-triggered
 - `session/gamepad/`
   - discovers readable Linux gamepad-like input devices
@@ -300,14 +301,14 @@ The session-facing pieces should be read as one subsystem:
 - `session.rs`
   - defines the homogenized session contract
 - `session/inactivity.rs`
-  - owns session-phase synthesis from native inactivity observations and
-    configured thresholds
+  - owns session-phase synthesis and the configured inactivity deadline
 - `session/gamepad/`
   - supplies auxiliary user-activity observations for controller input
   - owns gamepad device discovery, event-triggered refresh, and reconciliation
   - see [gamepad-subsystem.md](gamepad-subsystem.md) for adapter and lifecycle details
 - `session/runner.rs`
-  - consumes normalized session events and idletime observations and dispatches runtime policy
+  - converts provider input into activity observations, resets the inactivity
+    deadline, and dispatches runtime policy
   - treats `screen_idle_blank=disabled` as a passive user-session mode that
     preserves update notification handoff without TV idle blank/restore actions
   - treats delegated `swayidle` as a CLI/API client for timeout/resume actions
@@ -641,9 +642,9 @@ and state normally, construct canonical CLI/API runtime events, and enter
 The session subsystem is intentionally asymmetric where the providers are
 asymmetric:
 
-- the current GNOME pilot combines ScreenSaver idle/active and wake signals
-  with Mutter idletime observations, then passes them through the inactivity
-  engine
+- the current GNOME pilot treats ScreenSaver active/wake, recent Mutter input,
+  and gamepad input as activity that resets LG Buddy's inactivity deadline;
+  ScreenSaver idle is not a blanking authority
 - the native monitor path also consumes gamepad activity directly from Linux
   input devices; today that is attached to GNOME because GNOME is the only
   native production adapter, but the source is not GNOME-specific

@@ -79,7 +79,7 @@ This is the place for integration tests and contract tests.
 - GNOME runner behavior against a private session-bus harness
 - logind lifecycle and NetworkManager gate behavior against a private system-bus
   harness
-- GNOME inactivity merging with auxiliary gamepad activity observations
+- GNOME and auxiliary gamepad activity resetting one LG Buddy-owned deadline
 
 ### How to test it
 
@@ -222,7 +222,7 @@ Examples:
 - GNOME capability probing
 - GNOME signal mapping
 - GNOME monitor and idletime integration over the session-bus seam
-- gamepad activity integration with the GNOME inactivity merger
+- gamepad activity integration with the LG Buddy inactivity deadline
 - screen runtime-phase eligibility over the private logind system-bus seam
 
 ### Gamepad activity
