@@ -107,7 +107,7 @@ Use this shape for a new device adapter:
 2. Match devices narrowly, preferably by vendor/product ID. If a whole device
    family is supported, document the reason in the adapter tests or comments.
 3. Reuse `RawHidReportReader` to read reports from a hidraw surface.
-4. Add a custom reader that extracts meaningful controls as `RawEvent` values;
+4. Add a custom reader that extracts meaningful controls as `RawGamepadEvent` values;
    ignore sequence, timestamp, status, and other non-input fields.
 5. Register the adapter in `adapters/mod.rs`.
 6. Add tests for support matching and reader specs. If the adapter parses
