@@ -12,7 +12,7 @@ use std::path::Path;
 use std::time::Instant;
 
 pub(crate) use activity::ActivityPolicy;
-use adapters::{reader_specs_for_device, ActivityObservation, ActivityReader};
+use adapters::{reader_specs_for_device, ActivityReader};
 pub(crate) use device_events::{
     open_system_gamepad_device_event_monitor, SystemGamepadDeviceEventMonitor,
 };
@@ -163,28 +163,15 @@ impl SystemGamepadActivitySource {
             self.adapter_readers.retain_mut(|reader| {
                 let key = reader.key().clone();
                 match reader.read_available() {
-                    Ok(observations) => {
-                        for observation in observations {
-                            match observation {
-                                ActivityObservation::RawEvent(event) => {
-                                    #[cfg(test)]
-                                    let event_device_id = event.device_id.clone();
-                                    if registry.observe(event, now) {
-                                        activity = true;
-                                        #[cfg(test)]
-                                        if !activity_devices.contains(&event_device_id) {
-                                            activity_devices.push(event_device_id);
-                                        }
-                                    }
-                                }
-                                ActivityObservation::ActivityPulse {
-                                    device_id: _activity_device_id,
-                                } => {
-                                    activity = true;
-                                    #[cfg(test)]
-                                    if !activity_devices.contains(&_activity_device_id) {
-                                        activity_devices.push(_activity_device_id);
-                                    }
+                    Ok(events) => {
+                        for event in events {
+                            #[cfg(test)]
+                            let event_device_id = event.device_id.clone();
+                            if registry.observe(event, now) {
+                                activity = true;
+                                #[cfg(test)]
+                                if !activity_devices.contains(&event_device_id) {
+                                    activity_devices.push(event_device_id);
                                 }
                             }
                         }
