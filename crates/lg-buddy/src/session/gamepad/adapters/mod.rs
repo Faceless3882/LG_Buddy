@@ -21,7 +21,7 @@ pub(crate) trait ActivityReaderSpec: fmt::Debug {
 pub(crate) trait ActivityReader: fmt::Debug {
     fn key(&self) -> &ActivityReaderKey;
     fn device_id(&self) -> &DeviceId;
-    fn read_available(&mut self) -> io::Result<Vec<ActivityObservation>>;
+    fn read_available(&mut self) -> io::Result<Vec<RawGamepadEvent>>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -56,15 +56,6 @@ impl fmt::Display for ActivityReaderSurface {
             Self::Hidraw(path) => write!(f, "hidraw {}", path.display()),
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ActivityObservation {
-    #[allow(dead_code)]
-    RawEvent(RawGamepadEvent),
-    ActivityPulse {
-        device_id: DeviceId,
-    },
 }
 
 static REGISTERED_ADAPTERS: &[&dyn GamepadActivityAdapter] = &[&logitech_g923::ADAPTER];
