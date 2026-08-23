@@ -1,7 +1,8 @@
+use std::time::{Duration, Instant};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InactivityObservation {
-    IdleTimeMs(u64),
-    ProviderIdle,
+    DesktopActivityObserved,
     ProviderActive,
     WakeRequested,
     UserActivityObserved,
@@ -15,12 +16,6 @@ pub enum InactivityDecision {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct InactivityThresholds {
-    pub blank_threshold_ms: u64,
-    pub active_threshold_ms: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InactivityPhase {
     Unknown,
     Active,
@@ -29,317 +24,242 @@ enum InactivityPhase {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InactivityEngine {
-    thresholds: InactivityThresholds,
+    blank_after: Duration,
+    blank_at: Instant,
     phase: InactivityPhase,
-    provider_idle: bool,
+    restore_pending: bool,
 }
 
 impl InactivityEngine {
-    pub fn new(thresholds: InactivityThresholds) -> Self {
+    pub fn new(blank_after: Duration, started_at: Instant) -> Self {
         Self {
-            thresholds,
+            blank_after,
+            blank_at: started_at + blank_after,
             phase: InactivityPhase::Unknown,
-            provider_idle: false,
+            restore_pending: false,
         }
     }
 
-    pub fn thresholds(&self) -> InactivityThresholds {
-        self.thresholds
-    }
-
-    fn activate_from_signal(&mut self) -> InactivityDecision {
-        if self.phase == InactivityPhase::Active {
-            InactivityDecision::NoOp
-        } else {
-            self.phase = InactivityPhase::Active;
-            InactivityDecision::RestoreNow
+    pub fn new_with_restore_pending(blank_after: Duration, started_at: Instant) -> Self {
+        Self {
+            blank_after,
+            blank_at: started_at + blank_after,
+            phase: InactivityPhase::Unknown,
+            restore_pending: true,
         }
     }
 
-    fn observe_idletime(&mut self, idletime_ms: u64) -> InactivityDecision {
-        if self.provider_idle {
-            if idletime_ms < self.thresholds.active_threshold_ms {
-                self.provider_idle = false;
-                return self.activate_from_signal();
+    pub fn time_until_blank(&self, now: Instant) -> Option<Duration> {
+        (self.phase != InactivityPhase::Idle).then(|| self.blank_at.saturating_duration_since(now))
+    }
+
+    pub fn observe_activity(
+        &mut self,
+        observation: InactivityObservation,
+        observed_at: Instant,
+    ) -> InactivityDecision {
+        self.blank_at = self.blank_at.max(observed_at + self.blank_after);
+
+        match self.phase {
+            InactivityPhase::Idle => {
+                self.phase = InactivityPhase::Active;
+                self.restore_pending = false;
+                InactivityDecision::RestoreNow
             }
+            InactivityPhase::Unknown => {
+                self.phase = InactivityPhase::Active;
+                if self.restore_pending
+                    || observation != InactivityObservation::DesktopActivityObserved
+                {
+                    self.restore_pending = false;
+                    InactivityDecision::RestoreNow
+                } else {
+                    InactivityDecision::NoOp
+                }
+            }
+            InactivityPhase::Active => InactivityDecision::NoOp,
+        }
+    }
 
+    pub fn observe_time(&mut self, observed_at: Instant) -> InactivityDecision {
+        if self.phase == InactivityPhase::Idle || observed_at < self.blank_at {
             return InactivityDecision::NoOp;
         }
 
-        if idletime_ms >= self.thresholds.blank_threshold_ms {
-            match self.phase {
-                InactivityPhase::Unknown | InactivityPhase::Active => {
-                    self.phase = InactivityPhase::Idle;
-                    InactivityDecision::BlankNow
-                }
-                InactivityPhase::Idle => InactivityDecision::NoOp,
-            }
-        } else if idletime_ms < self.thresholds.active_threshold_ms {
-            match self.phase {
-                InactivityPhase::Idle => {
-                    self.phase = InactivityPhase::Active;
-                    InactivityDecision::RestoreNow
-                }
-                InactivityPhase::Unknown => {
-                    self.phase = InactivityPhase::Active;
-                    InactivityDecision::NoOp
-                }
-                InactivityPhase::Active => InactivityDecision::NoOp,
-            }
-        } else {
-            InactivityDecision::NoOp
-        }
-    }
-
-    pub fn observe(&mut self, observation: InactivityObservation) -> InactivityDecision {
-        match observation {
-            InactivityObservation::ProviderIdle => {
-                self.provider_idle = true;
-                if self.phase == InactivityPhase::Idle {
-                    InactivityDecision::NoOp
-                } else {
-                    self.phase = InactivityPhase::Idle;
-                    InactivityDecision::BlankNow
-                }
-            }
-            InactivityObservation::IdleTimeMs(idletime_ms) => self.observe_idletime(idletime_ms),
-            InactivityObservation::ProviderActive => {
-                self.provider_idle = false;
-                self.activate_from_signal()
-            }
-            InactivityObservation::WakeRequested | InactivityObservation::UserActivityObserved => {
-                self.provider_idle = false;
-                self.activate_from_signal()
-            }
-        }
+        self.phase = InactivityPhase::Idle;
+        InactivityDecision::BlankNow
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        InactivityDecision, InactivityEngine, InactivityObservation, InactivityThresholds,
-    };
+    use super::{InactivityDecision, InactivityEngine, InactivityObservation};
+    use std::time::{Duration, Instant};
 
-    fn test_engine() -> InactivityEngine {
-        InactivityEngine::new(InactivityThresholds {
-            blank_threshold_ms: 5_000,
-            active_threshold_ms: 1_000,
-        })
+    fn test_engine(started_at: Instant) -> InactivityEngine {
+        InactivityEngine::new(Duration::from_secs(5), started_at)
     }
 
     #[test]
-    fn idle_threshold_crossing_blanks_once() {
-        let mut engine = test_engine();
+    fn timeout_blanks_once() {
+        let started_at = Instant::now();
+        let mut engine = test_engine(started_at);
 
         assert_eq!(
-            engine.observe(InactivityObservation::IdleTimeMs(4_999)),
+            engine.observe_time(started_at + Duration::from_millis(4_999)),
             InactivityDecision::NoOp
         );
         assert_eq!(
-            engine.observe(InactivityObservation::IdleTimeMs(5_000)),
-            InactivityDecision::BlankNow
-        );
-    }
-
-    #[test]
-    fn remaining_above_idle_threshold_does_not_blank_repeatedly() {
-        let mut engine = test_engine();
-
-        assert_eq!(
-            engine.observe(InactivityObservation::IdleTimeMs(5_000)),
+            engine.observe_time(started_at + Duration::from_secs(5)),
             InactivityDecision::BlankNow
         );
         assert_eq!(
-            engine.observe(InactivityObservation::IdleTimeMs(6_000)),
-            InactivityDecision::NoOp
-        );
-        assert_eq!(
-            engine.observe(InactivityObservation::IdleTimeMs(7_500)),
+            engine.observe_time(started_at + Duration::from_secs(6)),
             InactivityDecision::NoOp
         );
     }
 
     #[test]
-    fn fresh_activity_below_active_threshold_restores_after_blank() {
-        let mut engine = test_engine();
-        assert_eq!(
-            engine.observe(InactivityObservation::IdleTimeMs(5_000)),
-            InactivityDecision::BlankNow
-        );
+    fn desktop_activity_resets_the_timeout() {
+        let started_at = Instant::now();
+        let mut engine = test_engine(started_at);
 
         assert_eq!(
-            engine.observe(InactivityObservation::IdleTimeMs(1_500)),
+            engine.observe_activity(
+                InactivityObservation::DesktopActivityObserved,
+                started_at + Duration::from_secs(4),
+            ),
             InactivityDecision::NoOp
         );
         assert_eq!(
-            engine.observe(InactivityObservation::IdleTimeMs(999)),
+            engine.observe_time(started_at + Duration::from_secs(5)),
+            InactivityDecision::NoOp
+        );
+        assert_eq!(
+            engine.observe_time(started_at + Duration::from_secs(9)),
+            InactivityDecision::BlankNow
+        );
+    }
+
+    #[test]
+    fn owned_blank_restores_on_first_desktop_activity_after_restart() {
+        let started_at = Instant::now();
+        let mut engine =
+            InactivityEngine::new_with_restore_pending(Duration::from_secs(5), started_at);
+
+        assert_eq!(
+            engine.observe_activity(
+                InactivityObservation::DesktopActivityObserved,
+                started_at + Duration::from_secs(1),
+            ),
             InactivityDecision::RestoreNow
         );
     }
 
     #[test]
-    fn wake_request_restores_after_blank() {
-        let mut engine = test_engine();
+    fn pending_restore_does_not_suppress_timeout_reconciliation() {
+        let started_at = Instant::now();
+        let mut engine =
+            InactivityEngine::new_with_restore_pending(Duration::from_secs(5), started_at);
+
         assert_eq!(
-            engine.observe(InactivityObservation::IdleTimeMs(5_000)),
+            engine.observe_time(started_at + Duration::from_secs(5)),
+            InactivityDecision::BlankNow
+        );
+    }
+
+    #[test]
+    fn auxiliary_activity_resets_the_timeout_and_restores_after_blank() {
+        let started_at = Instant::now();
+        let mut engine = test_engine(started_at);
+        assert_eq!(
+            engine.observe_time(started_at + Duration::from_secs(5)),
             InactivityDecision::BlankNow
         );
 
         assert_eq!(
-            engine.observe(InactivityObservation::WakeRequested),
+            engine.observe_activity(
+                InactivityObservation::UserActivityObserved,
+                started_at + Duration::from_secs(6),
+            ),
             InactivityDecision::RestoreNow
         );
         assert_eq!(
-            engine.observe(InactivityObservation::WakeRequested),
+            engine.observe_time(started_at + Duration::from_secs(10)),
             InactivityDecision::NoOp
         );
-    }
-
-    #[test]
-    fn provider_active_restores_after_blank() {
-        let mut engine = test_engine();
         assert_eq!(
-            engine.observe(InactivityObservation::IdleTimeMs(5_000)),
-            InactivityDecision::BlankNow
-        );
-
-        assert_eq!(
-            engine.observe(InactivityObservation::ProviderActive),
-            InactivityDecision::RestoreNow
-        );
-    }
-
-    #[test]
-    fn observed_user_activity_restores_after_blank() {
-        let mut engine = test_engine();
-        assert_eq!(
-            engine.observe(InactivityObservation::IdleTimeMs(5_000)),
-            InactivityDecision::BlankNow
-        );
-
-        assert_eq!(
-            engine.observe(InactivityObservation::UserActivityObserved),
-            InactivityDecision::RestoreNow
-        );
-    }
-
-    #[test]
-    fn provider_idle_blanks_immediately() {
-        let mut engine = test_engine();
-
-        assert_eq!(
-            engine.observe(InactivityObservation::ProviderIdle),
+            engine.observe_time(started_at + Duration::from_secs(11)),
             InactivityDecision::BlankNow
         );
     }
 
     #[test]
-    fn provider_idle_is_a_first_class_blank_source() {
-        let mut engine = test_engine();
+    fn wake_and_provider_activity_reset_the_same_timeout() {
+        let started_at = Instant::now();
 
-        assert_eq!(
-            engine.observe(InactivityObservation::ProviderIdle),
-            InactivityDecision::BlankNow
-        );
-        assert_eq!(
-            engine.observe(InactivityObservation::ProviderIdle),
-            InactivityDecision::NoOp
-        );
+        for observation in [
+            InactivityObservation::ProviderActive,
+            InactivityObservation::WakeRequested,
+        ] {
+            let mut engine = test_engine(started_at);
+            assert_eq!(
+                engine.observe_activity(observation, started_at + Duration::from_secs(4)),
+                InactivityDecision::RestoreNow
+            );
+            assert_eq!(
+                engine.observe_time(started_at + Duration::from_secs(5)),
+                InactivityDecision::NoOp
+            );
+            assert_eq!(
+                engine.observe_time(started_at + Duration::from_secs(9)),
+                InactivityDecision::BlankNow
+            );
+        }
     }
 
     #[test]
-    fn idletime_activity_restores_while_provider_still_reports_idle() {
-        let mut engine = test_engine();
-        assert_eq!(
-            engine.observe(InactivityObservation::ProviderIdle),
-            InactivityDecision::BlankNow
-        );
+    fn stale_activity_cannot_move_the_deadline_back() {
+        let started_at = Instant::now();
+        let mut engine = test_engine(started_at);
 
         assert_eq!(
-            engine.observe(InactivityObservation::IdleTimeMs(0)),
+            engine.observe_activity(
+                InactivityObservation::UserActivityObserved,
+                started_at + Duration::from_secs(4),
+            ),
             InactivityDecision::RestoreNow
         );
         assert_eq!(
-            engine.observe(InactivityObservation::ProviderActive),
-            InactivityDecision::NoOp
-        );
-    }
-
-    #[test]
-    fn idletime_above_active_threshold_does_not_restore_while_provider_reports_idle() {
-        let mut engine = test_engine();
-        assert_eq!(
-            engine.observe(InactivityObservation::ProviderIdle),
-            InactivityDecision::BlankNow
-        );
-
-        assert_eq!(
-            engine.observe(InactivityObservation::IdleTimeMs(1_000)),
-            InactivityDecision::NoOp
-        );
-    }
-
-    #[test]
-    fn restore_signals_are_noops_after_engine_is_already_active() {
-        let mut engine = test_engine();
-        assert_eq!(
-            engine.observe(InactivityObservation::IdleTimeMs(250)),
-            InactivityDecision::NoOp
-        );
-
-        assert_eq!(
-            engine.observe(InactivityObservation::ProviderActive),
+            engine.observe_activity(
+                InactivityObservation::UserActivityObserved,
+                started_at + Duration::from_secs(2),
+            ),
             InactivityDecision::NoOp
         );
         assert_eq!(
-            engine.observe(InactivityObservation::WakeRequested),
+            engine.observe_time(started_at + Duration::from_secs(7)),
             InactivityDecision::NoOp
         );
         assert_eq!(
-            engine.observe(InactivityObservation::UserActivityObserved),
-            InactivityDecision::NoOp
-        );
-    }
-
-    #[test]
-    fn low_idletime_seeds_active_state_without_restoring() {
-        let mut engine = test_engine();
-
-        assert_eq!(
-            engine.observe(InactivityObservation::IdleTimeMs(999)),
-            InactivityDecision::NoOp
-        );
-        assert_eq!(
-            engine.observe(InactivityObservation::IdleTimeMs(5_000)),
+            engine.observe_time(started_at + Duration::from_secs(9)),
             InactivityDecision::BlankNow
         );
     }
 
     #[test]
-    fn provider_active_restores_when_engine_starts_unknown() {
-        let mut engine = test_engine();
+    fn idle_phase_has_no_pending_timeout() {
+        let started_at = Instant::now();
+        let mut engine = test_engine(started_at);
 
         assert_eq!(
-            engine.observe(InactivityObservation::ProviderActive),
-            InactivityDecision::RestoreNow
+            engine.time_until_blank(started_at),
+            Some(Duration::from_secs(5))
         );
         assert_eq!(
-            engine.observe(InactivityObservation::ProviderActive),
-            InactivityDecision::NoOp
+            engine.observe_time(started_at + Duration::from_secs(5)),
+            InactivityDecision::BlankNow
         );
-    }
-
-    #[test]
-    fn thresholds_are_reported_verbatim() {
-        let engine = test_engine();
-
-        assert_eq!(
-            engine.thresholds(),
-            InactivityThresholds {
-                blank_threshold_ms: 5_000,
-                active_threshold_ms: 1_000,
-            }
-        );
+        assert_eq!(engine.time_until_blank(started_at), None);
     }
 }

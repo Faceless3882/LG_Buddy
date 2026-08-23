@@ -15,23 +15,66 @@ Feature: GNOME monitor
     And the TV client did not receive "get_input"
     And the TV client did not receive "turn_screen_off"
 
-  Scenario: GNOME ScreenSaver idle still blanks the configured TV input
+  Scenario: GNOME ScreenSaver idle does not bypass the LG Buddy timeout
     Given a temporary LG Buddy config using input HDMI_2
+    And the idle timeout is 2 seconds
     And LG Buddy session runtime is isolated
     And a mock TV client
     And the TV is on input HDMI_2
     And the executable PATH is isolated
     And GNOME Shell is available
     And GNOME reports the session idle
+    And GNOME idle monitor will report idletimes "1000"
+    And GNOME monitor stays open for 0.6 seconds
     When I run the command "monitor"
     Then the command succeeds
     And stdout contains "Using GNOME backend."
-    And the TV client received "get_input"
-    And the TV client received "turn_screen_off"
-    And the session marker exists
-    And the TV screen is blanked
+    And stdout does not contain "Session became idle."
+    And the TV client did not receive "get_input"
+    And the TV client did not receive "turn_screen_off"
+    And the session marker is absent
+    And the TV screen is visible
 
-  Scenario: GNOME inactivity blanks the configured TV input when ScreenSaver idle is inhibited
+  Scenario: Desktop activity resets the LG Buddy timeout
+    Given a temporary LG Buddy config using input HDMI_2
+    And the idle timeout is 1 seconds
+    And LG Buddy session runtime is isolated
+    And a mock TV client
+    And the TV is on input HDMI_2
+    And the executable PATH is isolated
+    And GNOME Shell is available
+    And GNOME emits no ScreenSaver signals
+    And GNOME idle monitor will report idletimes "1000, 1000, 0, 1000"
+    And GNOME monitor stays open for 1.2 seconds
+    When I run the command "monitor"
+    Then the command succeeds
+    And stdout does not contain "Session became idle."
+    And the TV client did not receive "get_input"
+    And the TV client did not receive "turn_screen_off"
+    And the session marker is absent
+    And the TV screen is visible
+
+  Scenario: Monitor restart restores an owned blank screen on desktop activity
+    Given a temporary LG Buddy config using input HDMI_2
+    And the idle timeout is 120 seconds
+    And LG Buddy session runtime is isolated
+    And a mock TV client
+    And the TV is on input HDMI_2
+    And the TV screen is blanked
+    And the session marker exists
+    And the executable PATH is isolated
+    And GNOME Shell is available
+    And GNOME emits no ScreenSaver signals
+    And GNOME idle monitor will report idletimes "0"
+    And GNOME monitor stays open for 0.4 seconds
+    When I run the command "monitor"
+    Then the command succeeds
+    And stdout contains "Session event `user-activity` requests screen restore."
+    And the TV client received "turn_screen_on" exactly 1 times
+    And the session marker is absent
+    And the TV screen is visible
+
+  Scenario: LG Buddy blanks after its timeout without activity reports
     Given a temporary LG Buddy config using input HDMI_2
     And the idle timeout is 1 seconds
     And LG Buddy session runtime is isolated
@@ -41,7 +84,7 @@ Feature: GNOME monitor
     And GNOME Shell is available
     And GNOME emits no ScreenSaver signals
     And GNOME idle monitor will report idletimes "1000"
-    And GNOME monitor stays open for 1.0 seconds
+    And GNOME monitor stays open for 1.2 seconds
     When I run the command "monitor"
     Then the command succeeds
     And stdout contains "Using GNOME backend."
@@ -50,7 +93,7 @@ Feature: GNOME monitor
     And the session marker exists
     And the TV screen is blanked
 
-  Scenario: GNOME inhibited inactivity does not blank repeatedly while idletime stays high
+  Scenario: LG Buddy does not blank repeatedly without intervening activity
     Given a temporary LG Buddy config using input HDMI_2
     And the idle timeout is 1 seconds
     And LG Buddy session runtime is isolated
@@ -60,7 +103,7 @@ Feature: GNOME monitor
     And GNOME Shell is available
     And GNOME emits no ScreenSaver signals
     And GNOME idle monitor will report idletimes "1000, 1500, 2000, 2500"
-    And GNOME monitor stays open for 1.0 seconds
+    And GNOME monitor stays open for 1.2 seconds
     When I run the command "monitor"
     Then the command succeeds
     And the TV client received "turn_screen_off" exactly 1 times
@@ -78,8 +121,8 @@ Feature: GNOME monitor
     And GNOME Shell is available
     And GNOME emits no ScreenSaver signals
     And GNOME idle monitor will report idletimes "1000, 1000, 1000, 1000"
-    And gamepad activity is observed after 0.1 seconds
-    And GNOME monitor stays open for 0.6 seconds
+    And gamepad activity is observed after 1.2 seconds
+    And GNOME monitor stays open for 1.6 seconds
     When I run the command "monitor"
     Then the command succeeds
     And stdout contains "Session event `user-activity` requests screen restore."
@@ -97,8 +140,8 @@ Feature: GNOME monitor
     And the executable PATH is isolated
     And GNOME Shell is available
     And GNOME reports the session idle
-    And GNOME idle monitor will report idletimes "500, 0, 0"
-    And GNOME monitor stays open for 0.7 seconds
+    And GNOME idle monitor will report idletimes "1000, 1000, 1000, 1000, 1000, 1000, 0"
+    And GNOME monitor stays open for 1.8 seconds
     When I run the command "monitor"
     Then the command succeeds
     And stdout contains "Session event `user-activity` requests screen restore."
@@ -118,7 +161,7 @@ Feature: GNOME monitor
     And GNOME Shell is available
     And GNOME emits no ScreenSaver signals
     And GNOME idle monitor will report idletimes "1000"
-    And GNOME monitor stays open for 1.0 seconds
+    And GNOME monitor stays open for 1.2 seconds
     When I run the command "monitor"
     Then the command succeeds
     And stdout contains "Skipping idle action."
@@ -195,8 +238,8 @@ Feature: GNOME monitor
     And the executable PATH is isolated
     And GNOME Shell is available
     And GNOME emits no ScreenSaver signals
-    And GNOME idle monitor will report idletimes "1000, 0, 0, 0"
-    And GNOME monitor stays open for 1.0 seconds
+    And GNOME idle monitor will report idletimes "1000, 1000, 1000, 1000, 1000, 1000, 0"
+    And GNOME monitor stays open for 1.8 seconds
     When I run the command "monitor"
     Then the command succeeds
     And stdout contains "screen restore action failed"
@@ -238,8 +281,8 @@ Feature: GNOME monitor
     And the executable PATH is isolated
     And GNOME Shell is available
     And GNOME emits no ScreenSaver signals
-    And GNOME idle monitor will report idletimes "1000, 0, 0, 0"
-    And GNOME monitor stays open for 1.0 seconds
+    And GNOME idle monitor will report idletimes "1000, 1000, 1000, 1000, 1000, 1000, 0"
+    And GNOME monitor stays open for 1.8 seconds
     When I run the command "monitor"
     Then the command succeeds
     And the TV client received "turn_screen_off" exactly 1 times

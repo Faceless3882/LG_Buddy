@@ -29,9 +29,7 @@ use crate::session::gamepad::{
     open_system_gamepad_activity_source, open_system_gamepad_device_event_monitor,
     SystemGamepadActivitySource, SystemGamepadDeviceEventMonitor,
 };
-use crate::session::inactivity::{
-    InactivityDecision, InactivityEngine, InactivityObservation, InactivityThresholds,
-};
+use crate::session::inactivity::{InactivityDecision, InactivityEngine, InactivityObservation};
 use crate::session::{SessionBackend, SessionBackendError, SessionEvent};
 use crate::session_bus::{
     new_session_bus_client, new_system_bus_client, BusSignal, BusSignalMatch, SessionBusClient,
@@ -46,12 +44,13 @@ use crate::sources::desktop::gnome::{
 use crate::sources::linux::logind::{
     acquire_sleep_delay_inhibitor, add_logind_signal_match, map_prepare_for_sleep_signal,
 };
+use crate::state::{ScreenOwnershipMarker, StateScope};
 use crate::RunError;
 
 const GNOME_WAIT_TIMEOUT_SECS: u64 = 15;
-const GNOME_ACTIVE_THRESHOLD_MS: u64 = 1000;
 const GNOME_BUS_PROCESS_INTERVAL: Duration = Duration::from_millis(50);
 const GNOME_IDLE_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const GNOME_DESKTOP_ACTIVITY_WINDOW: Duration = Duration::from_millis(500);
 const GAMEPAD_ACTIVITY_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const GAMEPAD_ACTIVITY_REFRESH_DEBOUNCE: Duration = Duration::from_millis(250);
 const GAMEPAD_ACTIVITY_REFRESH_RETRY_INTERVAL: Duration = Duration::from_secs(2);
@@ -635,85 +634,90 @@ fn run_gnome_monitor<W: Write, E: SessionActionExecutor>(
 
     writeln!(writer, "LG Buddy Monitor: Using GNOME backend.")?;
 
-    let thresholds = InactivityThresholds {
-        blank_threshold_ms: resolve_idle_timeout_ms(),
-        active_threshold_ms: GNOME_ACTIVE_THRESHOLD_MS,
+    let blank_after = Duration::from_millis(resolve_idle_timeout_ms());
+    let started_at = Instant::now();
+    let mut inactivity = if session_screen_ownership_marker_exists()? {
+        InactivityEngine::new_with_restore_pending(blank_after, started_at)
+    } else {
+        InactivityEngine::new(blank_after, started_at)
     };
-    let mut inactivity = InactivityEngine::new(thresholds);
 
     let (sender, receiver) = mpsc::channel();
     let latest_inactivity = Arc::new(LatestInactivityObservation::default());
     let monitor_handle = spawn_gnome_monitor_thread(sender.clone(), Arc::clone(&latest_inactivity));
     let _gamepad_monitor = spawn_gamepad_activity_thread(sender.clone());
-    let mut observation_merger = InactivityObservationMerger::new(thresholds.blank_threshold_ms);
     let mut monitor_result = Ok(());
 
-    while let Ok(message) = receiver.recv() {
-        match message {
-            RunnerMessage::InactivityObservationReady => {
-                if let Some(observation) = latest_inactivity.take() {
-                    let observation =
-                        observation_merger.merge(observation.observation, observation.observed_at);
-                    handle_gnome_inactivity_observation(
+    loop {
+        let message = match inactivity.time_until_blank(Instant::now()) {
+            Some(wait) => match receiver.recv_timeout(wait) {
+                Ok(message) => message,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    handle_gnome_inactivity_timeout(
                         writer,
                         dispatcher,
                         &mut inactivity,
-                        observation,
+                        Instant::now(),
+                    )?;
+                    continue;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            },
+            None => match receiver.recv() {
+                Ok(message) => message,
+                Err(_) => break,
+            },
+        };
+
+        match message {
+            RunnerMessage::InactivityObservationReady => {
+                if let Some(observation) = latest_inactivity.take() {
+                    handle_gnome_activity_observation(
+                        writer,
+                        dispatcher,
+                        &mut inactivity,
+                        observation.observation,
+                        observation.observed_at,
                     )?;
                 }
             }
             RunnerMessage::SessionEvent {
                 event: SessionEvent::Idle,
-                observed_at,
+                ..
             } => {
-                let observation =
-                    observation_merger.merge(InactivityObservation::ProviderIdle, observed_at);
-                handle_gnome_inactivity_observation(
-                    writer,
-                    dispatcher,
-                    &mut inactivity,
-                    observation,
-                )?;
+                // GNOME ScreenSaver idle is observational. Only LG Buddy's
+                // inactivity deadline decides when to blank.
             }
             RunnerMessage::SessionEvent {
                 event: SessionEvent::Active,
                 observed_at,
-            } => {
-                let observation =
-                    observation_merger.merge(InactivityObservation::ProviderActive, observed_at);
-                handle_gnome_inactivity_observation(
-                    writer,
-                    dispatcher,
-                    &mut inactivity,
-                    observation,
-                )?
-            }
+            } => handle_gnome_activity_observation(
+                writer,
+                dispatcher,
+                &mut inactivity,
+                InactivityObservation::ProviderActive,
+                observed_at,
+            )?,
             RunnerMessage::SessionEvent {
                 event: SessionEvent::WakeRequested,
                 observed_at,
-            } => {
-                let observation =
-                    observation_merger.merge(InactivityObservation::WakeRequested, observed_at);
-                handle_gnome_inactivity_observation(
-                    writer,
-                    dispatcher,
-                    &mut inactivity,
-                    observation,
-                )?
-            }
+            } => handle_gnome_activity_observation(
+                writer,
+                dispatcher,
+                &mut inactivity,
+                InactivityObservation::WakeRequested,
+                observed_at,
+            )?,
             RunnerMessage::SessionEvent {
                 event: SessionEvent::UserActivity,
                 observed_at,
-            } => {
-                let observation = observation_merger
-                    .merge(InactivityObservation::UserActivityObserved, observed_at);
-                handle_gnome_inactivity_observation(
-                    writer,
-                    dispatcher,
-                    &mut inactivity,
-                    observation,
-                )?
-            }
+            } => handle_gnome_activity_observation(
+                writer,
+                dispatcher,
+                &mut inactivity,
+                InactivityObservation::UserActivityObserved,
+                observed_at,
+            )?,
             RunnerMessage::SessionEvent { event, .. } => {
                 dispatcher.dispatch_event(writer, event)?;
             }
@@ -792,6 +796,15 @@ fn resolve_idle_timeout_secs() -> u64 {
             .map(u128::from)
             .unwrap_or(u128::from(DEFAULT_IDLE_TIMEOUT)),
     )
+}
+
+fn session_screen_ownership_marker_exists() -> Result<bool, SessionRunnerError> {
+    ScreenOwnershipMarker::from_env(StateScope::Session)
+        .map(|marker| marker.exists())
+        .map_err(|err| SessionRunnerError::Failed {
+            backend: ScreenBackend::Gnome,
+            message: format!("failed to inspect session screen ownership: {err}"),
+        })
 }
 
 fn resolve_idle_timeout_ms() -> u64 {
@@ -1118,72 +1131,6 @@ impl Drop for GamepadActivityThread {
     }
 }
 
-#[derive(Debug)]
-struct InactivityObservationMerger {
-    blank_threshold_ms: u64,
-    latest_external_activity_at: Option<Instant>,
-}
-
-impl InactivityObservationMerger {
-    fn new(blank_threshold_ms: u64) -> Self {
-        Self {
-            blank_threshold_ms,
-            latest_external_activity_at: None,
-        }
-    }
-
-    fn merge(
-        &mut self,
-        observation: InactivityObservation,
-        observed_at: Instant,
-    ) -> InactivityObservation {
-        match observation {
-            InactivityObservation::IdleTimeMs(idletime_ms) => InactivityObservation::IdleTimeMs(
-                self.effective_idletime_ms(idletime_ms, observed_at),
-            ),
-            InactivityObservation::ProviderIdle => self.effective_provider_idle(observed_at),
-            InactivityObservation::ProviderActive
-            | InactivityObservation::WakeRequested
-            | InactivityObservation::UserActivityObserved => {
-                self.latest_external_activity_at = Some(observed_at);
-                observation
-            }
-        }
-    }
-
-    fn effective_provider_idle(&self, observed_at: Instant) -> InactivityObservation {
-        let Some(external_idletime_ms) = self.external_idletime_ms(observed_at) else {
-            return InactivityObservation::ProviderIdle;
-        };
-
-        if external_idletime_ms < self.blank_threshold_ms {
-            InactivityObservation::IdleTimeMs(external_idletime_ms)
-        } else {
-            InactivityObservation::ProviderIdle
-        }
-    }
-
-    fn effective_idletime_ms(&self, provider_idletime_ms: u64, observed_at: Instant) -> u64 {
-        self.external_idletime_ms(observed_at)
-            .map(|external_idletime_ms| provider_idletime_ms.min(external_idletime_ms))
-            .unwrap_or(provider_idletime_ms)
-    }
-
-    fn external_idletime_ms(&self, observed_at: Instant) -> Option<u64> {
-        self.latest_external_activity_at.map(|activity_at| {
-            duration_millis_u64(
-                observed_at
-                    .checked_duration_since(activity_at)
-                    .unwrap_or_default(),
-            )
-        })
-    }
-}
-
-fn duration_millis_u64(duration: Duration) -> u64 {
-    duration.as_millis().try_into().unwrap_or(u64::MAX)
-}
-
 fn gamepad_activity_send_due(last_sent_at: Option<Instant>, observed_at: Instant) -> bool {
     last_sent_at
         .map(|last_sent_at| {
@@ -1406,23 +1353,32 @@ fn poll_gnome_idle_monitor_once(
         return true;
     };
 
+    let activity_age = Duration::from_millis(idletime_ms);
+    if activity_age > GNOME_DESKTOP_ACTIVITY_WINDOW {
+        return true;
+    }
+
+    let observed_at = Instant::now();
+    let activity_at = observed_at.checked_sub(activity_age).unwrap_or(observed_at);
+
     latest_observation.publish(
         sender,
-        InactivityObservation::IdleTimeMs(idletime_ms),
-        Instant::now(),
+        InactivityObservation::DesktopActivityObserved,
+        activity_at,
     )
 }
 
-fn handle_gnome_inactivity_observation<W: Write, E: SessionActionExecutor>(
+fn handle_gnome_activity_observation<W: Write, E: SessionActionExecutor>(
     writer: &mut W,
     dispatcher: &mut SessionEventDispatcher<E>,
     inactivity: &mut InactivityEngine,
     observation: InactivityObservation,
+    observed_at: Instant,
 ) -> Result<(), SessionRunnerError> {
-    let decision = inactivity.observe(observation);
+    let decision = inactivity.observe_activity(observation, observed_at);
     let event = match (observation, decision) {
         (_, InactivityDecision::NoOp) => None,
-        (_, InactivityDecision::BlankNow) => Some(SessionEvent::Idle),
+        (_, InactivityDecision::BlankNow) => None,
         (InactivityObservation::ProviderActive, InactivityDecision::RestoreNow) => {
             Some(SessionEvent::Active)
         }
@@ -1430,14 +1386,27 @@ fn handle_gnome_inactivity_observation<W: Write, E: SessionActionExecutor>(
             Some(SessionEvent::WakeRequested)
         }
         (
-            InactivityObservation::IdleTimeMs(_) | InactivityObservation::UserActivityObserved,
+            InactivityObservation::DesktopActivityObserved
+            | InactivityObservation::UserActivityObserved,
             InactivityDecision::RestoreNow,
         ) => Some(SessionEvent::UserActivity),
-        (InactivityObservation::ProviderIdle, InactivityDecision::RestoreNow) => None,
     };
 
     if let Some(event) = event {
         dispatcher.dispatch_event(writer, event)?;
+    }
+
+    Ok(())
+}
+
+fn handle_gnome_inactivity_timeout<W: Write, E: SessionActionExecutor>(
+    writer: &mut W,
+    dispatcher: &mut SessionEventDispatcher<E>,
+    inactivity: &mut InactivityEngine,
+    observed_at: Instant,
+) -> Result<(), SessionRunnerError> {
+    if inactivity.observe_time(observed_at) == InactivityDecision::BlankNow {
+        dispatcher.dispatch_event(writer, SessionEvent::Idle)?;
     }
 
     Ok(())
@@ -1477,18 +1446,16 @@ mod tests {
     use super::{
         complete_gamepad_refresh, gamepad_activity_send_due,
         gamepad_device_event_refresh_requested, gamepad_refresh_due,
-        handle_gnome_inactivity_observation, normalize_idle_timeout_secs,
-        poll_gnome_idle_monitor_once, run_lifecycle_monitor_with_bus, schedule_gamepad_refresh,
-        shell_quote, GamepadDeviceEventMonitor, GamepadDeviceEventRefresh,
-        GamepadDiagnosticEmitter, InactivityObservationMerger, LatestInactivityObservation,
+        handle_gnome_activity_observation, handle_gnome_inactivity_timeout,
+        normalize_idle_timeout_secs, poll_gnome_idle_monitor_once, run_lifecycle_monitor_with_bus,
+        schedule_gamepad_refresh, shell_quote, GamepadDeviceEventMonitor,
+        GamepadDeviceEventRefresh, GamepadDiagnosticEmitter, LatestInactivityObservation,
         RunnerMessage, SessionActionExecutor, SessionEventDispatcher, TimedInactivityObservation,
         TrustedScreenSaverSignals, GAMEPAD_ACTIVITY_REFRESH_RETRY_INTERVAL,
         GAMEPAD_ACTIVITY_SEND_INTERVAL,
     };
     use crate::events::{EventSource, RuntimeEvent, RuntimeEventKind};
-    use crate::session::inactivity::{
-        InactivityEngine, InactivityObservation, InactivityThresholds,
-    };
+    use crate::session::inactivity::{InactivityEngine, InactivityObservation};
     use crate::session::SessionEvent;
     use crate::session_bus::{
         BusMethodCall, BusReply, BusSignal, BusSignalMatch, BusValue, SessionBusClient,
@@ -2089,12 +2056,12 @@ system_sleep_wake_policy={policy}
 
         assert!(latest.publish(
             &sender,
-            InactivityObservation::IdleTimeMs(1_000),
+            InactivityObservation::DesktopActivityObserved,
             first_observed_at
         ));
         assert!(latest.publish(
             &sender,
-            InactivityObservation::IdleTimeMs(2_000),
+            InactivityObservation::DesktopActivityObserved,
             second_observed_at
         ));
 
@@ -2105,7 +2072,7 @@ system_sleep_wake_policy={policy}
         assert_eq!(
             latest.take(),
             Some(TimedInactivityObservation {
-                observation: InactivityObservation::IdleTimeMs(2_000),
+                observation: InactivityObservation::DesktopActivityObserved,
                 observed_at: second_observed_at,
             })
         );
@@ -2121,7 +2088,7 @@ system_sleep_wake_policy={policy}
 
         assert!(latest.publish(
             &sender,
-            InactivityObservation::IdleTimeMs(1_000),
+            InactivityObservation::DesktopActivityObserved,
             first_observed_at
         ));
         assert!(matches!(
@@ -2131,14 +2098,14 @@ system_sleep_wake_policy={policy}
         assert_eq!(
             latest.take(),
             Some(TimedInactivityObservation {
-                observation: InactivityObservation::IdleTimeMs(1_000),
+                observation: InactivityObservation::DesktopActivityObserved,
                 observed_at: first_observed_at,
             })
         );
 
         assert!(latest.publish(
             &sender,
-            InactivityObservation::IdleTimeMs(3_000),
+            InactivityObservation::DesktopActivityObserved,
             second_observed_at
         ));
         assert!(matches!(
@@ -2148,18 +2115,18 @@ system_sleep_wake_policy={policy}
         assert_eq!(
             latest.take(),
             Some(TimedInactivityObservation {
-                observation: InactivityObservation::IdleTimeMs(3_000),
+                observation: InactivityObservation::DesktopActivityObserved,
                 observed_at: second_observed_at,
             })
         );
     }
 
     #[test]
-    fn gnome_idle_monitor_poller_publishes_idletime_from_session_bus() {
+    fn gnome_idle_monitor_poller_publishes_recent_desktop_activity() {
         let (sender, receiver) = mpsc::channel();
         let latest = LatestInactivityObservation::default();
         let mut bus = FakeSessionBus {
-            method_replies: vec![Ok(BusReply::new(vec![BusValue::U64(1_500)]))],
+            method_replies: vec![Ok(BusReply::new(vec![BusValue::U64(250)]))],
             ..FakeSessionBus::default()
         };
         let before_poll = Instant::now();
@@ -2172,10 +2139,24 @@ system_sleep_wake_policy={policy}
         let observation = latest.take().expect("latest observation");
         assert_eq!(
             observation.observation,
-            InactivityObservation::IdleTimeMs(1_500)
+            InactivityObservation::DesktopActivityObserved
         );
-        assert!(observation.observed_at >= before_poll);
+        assert!(observation.observed_at < before_poll);
         assert!(observation.observed_at <= Instant::now());
+    }
+
+    #[test]
+    fn gnome_idle_monitor_poller_does_not_publish_old_activity() {
+        let (sender, receiver) = mpsc::channel();
+        let latest = LatestInactivityObservation::default();
+        let mut bus = FakeSessionBus {
+            method_replies: vec![Ok(BusReply::new(vec![BusValue::U64(1_500)]))],
+            ..FakeSessionBus::default()
+        };
+
+        assert!(poll_gnome_idle_monitor_once(&mut bus, &sender, &latest));
+        assert!(receiver.try_recv().is_err());
+        assert_eq!(latest.take(), None);
     }
 
     #[test]
@@ -2423,99 +2404,114 @@ system_sleep_wake_policy={policy}
     }
 
     #[test]
-    fn idletime_observation_blanks_when_threshold_is_crossed() {
+    fn inactivity_timeout_blanks_once() {
         let executor = FakeActionExecutor {
             screen_off_output: "screen-off output\n".to_string(),
             ..FakeActionExecutor::default()
         };
         let mut dispatcher = SessionEventDispatcher::new(executor);
-        let mut inactivity = InactivityEngine::new(InactivityThresholds {
-            blank_threshold_ms: 1_000,
-            active_threshold_ms: 100,
-        });
+        let started_at = Instant::now();
+        let mut inactivity = InactivityEngine::new(Duration::from_secs(1), started_at);
         let mut output = Vec::new();
 
-        handle_gnome_inactivity_observation(
+        handle_gnome_inactivity_timeout(
             &mut output,
             &mut dispatcher,
             &mut inactivity,
-            InactivityObservation::IdleTimeMs(1_000),
+            started_at + Duration::from_secs(1),
         )
-        .expect("blank from idletime observation");
+        .expect("blank when the LG Buddy timeout expires");
+        handle_gnome_inactivity_timeout(
+            &mut output,
+            &mut dispatcher,
+            &mut inactivity,
+            started_at + Duration::from_secs(2),
+        )
+        .expect("do not blank repeatedly");
+
         let output = String::from_utf8(output).expect("utf8");
         assert!(output.contains("Session became idle."));
         assert_eq!(dispatcher.executor.screen_off_calls, 1);
     }
 
     #[test]
-    fn idletime_observation_restores_when_activity_returns() {
-        let executor = FakeActionExecutor {
-            screen_on_output: "screen-on output\n".to_string(),
-            ..FakeActionExecutor::default()
-        };
-        let mut dispatcher = SessionEventDispatcher::new(executor);
-        let mut inactivity = InactivityEngine::new(InactivityThresholds {
-            blank_threshold_ms: 1_000,
-            active_threshold_ms: 100,
-        });
-        let mut output = Vec::new();
-
-        handle_gnome_inactivity_observation(
-            &mut output,
-            &mut dispatcher,
-            &mut inactivity,
-            InactivityObservation::IdleTimeMs(1_000),
-        )
-        .expect("blank from idletime observation");
-        let mut output = Vec::new();
-
-        handle_gnome_inactivity_observation(
-            &mut output,
-            &mut dispatcher,
-            &mut inactivity,
-            InactivityObservation::IdleTimeMs(99),
-        )
-        .expect("restore from idletime observation");
-        let output = String::from_utf8(output).expect("utf8");
-        assert!(output.contains("user-activity"));
-        assert_eq!(dispatcher.executor.screen_on_calls, 1);
-    }
-
-    #[test]
-    fn idletime_activity_restores_while_provider_still_reports_idle() {
+    fn desktop_activity_restores_and_resets_the_timeout() {
         let executor = FakeActionExecutor {
             screen_off_output: "screen-off output\n".to_string(),
             screen_on_output: "screen-on output\n".to_string(),
             ..FakeActionExecutor::default()
         };
         let mut dispatcher = SessionEventDispatcher::new(executor);
-        let mut inactivity = InactivityEngine::new(InactivityThresholds {
-            blank_threshold_ms: 1_000,
-            active_threshold_ms: 100,
-        });
+        let started_at = Instant::now();
+        let mut inactivity = InactivityEngine::new(Duration::from_secs(1), started_at);
         let mut output = Vec::new();
 
-        handle_gnome_inactivity_observation(
+        handle_gnome_inactivity_timeout(
             &mut output,
             &mut dispatcher,
             &mut inactivity,
-            InactivityObservation::ProviderIdle,
+            started_at + Duration::from_secs(1),
         )
-        .expect("blank from provider idle");
-
+        .expect("blank when the timeout expires");
         let mut output = Vec::new();
-        handle_gnome_inactivity_observation(
+
+        handle_gnome_activity_observation(
             &mut output,
             &mut dispatcher,
             &mut inactivity,
-            InactivityObservation::IdleTimeMs(99),
+            InactivityObservation::DesktopActivityObserved,
+            started_at + Duration::from_millis(1_100),
         )
-        .expect("restore from lock-screen user activity");
-        handle_gnome_inactivity_observation(
+        .expect("restore from desktop activity");
+        handle_gnome_inactivity_timeout(
+            &mut output,
+            &mut dispatcher,
+            &mut inactivity,
+            started_at + Duration::from_secs(2),
+        )
+        .expect("activity reset should keep the screen active");
+
+        let output = String::from_utf8(output).expect("utf8");
+        assert!(output.contains("user-activity"));
+        assert_eq!(dispatcher.executor.screen_on_calls, 1);
+        assert_eq!(dispatcher.executor.screen_off_calls, 1);
+    }
+
+    #[test]
+    fn auxiliary_activity_restores_before_provider_reports_active() {
+        let executor = FakeActionExecutor {
+            screen_off_output: "screen-off output\n".to_string(),
+            screen_on_output: "screen-on output\n".to_string(),
+            ..FakeActionExecutor::default()
+        };
+        let mut dispatcher = SessionEventDispatcher::new(executor);
+        let started_at = Instant::now();
+        let mut inactivity = InactivityEngine::new(Duration::from_secs(1), started_at);
+        let mut output = Vec::new();
+
+        handle_gnome_inactivity_timeout(
+            &mut output,
+            &mut dispatcher,
+            &mut inactivity,
+            started_at + Duration::from_secs(1),
+        )
+        .expect("blank when the timeout expires");
+
+        let mut output = Vec::new();
+        handle_gnome_activity_observation(
+            &mut output,
+            &mut dispatcher,
+            &mut inactivity,
+            InactivityObservation::UserActivityObserved,
+            started_at + Duration::from_millis(1_100),
+        )
+        .expect("restore from auxiliary activity");
+        handle_gnome_activity_observation(
             &mut output,
             &mut dispatcher,
             &mut inactivity,
             InactivityObservation::ProviderActive,
+            started_at + Duration::from_millis(1_200),
         )
         .expect("provider active should not duplicate restore");
 
@@ -2534,210 +2530,82 @@ system_sleep_wake_policy={policy}
     }
 
     #[test]
-    fn external_activity_caps_effective_provider_idletime() {
-        let started = Instant::now();
-        let mut merger = InactivityObservationMerger::new(1_000);
-
-        assert_eq!(
-            merger.merge(
-                InactivityObservation::UserActivityObserved,
-                started + Duration::from_millis(100),
-            ),
-            InactivityObservation::UserActivityObserved
-        );
-        assert_eq!(
-            merger.merge(
-                InactivityObservation::IdleTimeMs(10_000),
-                started + Duration::from_millis(350),
-            ),
-            InactivityObservation::IdleTimeMs(250)
-        );
-    }
-
-    #[test]
-    fn external_activity_delays_provider_idle_until_blank_threshold_passes() {
-        let started = Instant::now();
-        let mut merger = InactivityObservationMerger::new(1_000);
-
-        assert_eq!(
-            merger.merge(InactivityObservation::UserActivityObserved, started),
-            InactivityObservation::UserActivityObserved
-        );
-        assert_eq!(
-            merger.merge(
-                InactivityObservation::ProviderIdle,
-                started + Duration::from_millis(250),
-            ),
-            InactivityObservation::IdleTimeMs(250)
-        );
-        assert_eq!(
-            merger.merge(
-                InactivityObservation::ProviderIdle,
-                started + Duration::from_millis(1_000),
-            ),
-            InactivityObservation::ProviderIdle
-        );
-    }
-
-    #[test]
-    fn gamepad_activity_prevents_next_high_idletime_sample_from_reblanking() {
+    fn activity_resets_timeout_before_reblanking() {
         let executor = FakeActionExecutor {
             screen_off_output: "screen-off output\n".to_string(),
             screen_on_output: "screen-on output\n".to_string(),
             ..FakeActionExecutor::default()
         };
         let mut dispatcher = SessionEventDispatcher::new(executor);
-        let mut inactivity = InactivityEngine::new(InactivityThresholds {
-            blank_threshold_ms: 1_000,
-            active_threshold_ms: 100,
-        });
-        let mut merger = InactivityObservationMerger::new(1_000);
-        let started = Instant::now();
+        let started_at = Instant::now();
+        let mut inactivity = InactivityEngine::new(Duration::from_secs(1), started_at);
         let mut output = Vec::new();
 
-        handle_gnome_inactivity_observation(
+        handle_gnome_inactivity_timeout(
             &mut output,
             &mut dispatcher,
             &mut inactivity,
-            merger.merge(InactivityObservation::IdleTimeMs(1_000), started),
+            started_at + Duration::from_secs(1),
         )
-        .expect("blank from provider idletime");
+        .expect("blank when the timeout expires");
 
-        handle_gnome_inactivity_observation(
+        handle_gnome_activity_observation(
             &mut output,
             &mut dispatcher,
             &mut inactivity,
-            merger.merge(
-                InactivityObservation::UserActivityObserved,
-                started + Duration::from_millis(100),
-            ),
+            InactivityObservation::UserActivityObserved,
+            started_at + Duration::from_millis(1_100),
         )
-        .expect("restore from gamepad activity");
+        .expect("restore from auxiliary activity");
 
-        handle_gnome_inactivity_observation(
+        handle_gnome_inactivity_timeout(
             &mut output,
             &mut dispatcher,
             &mut inactivity,
-            merger.merge(
-                InactivityObservation::IdleTimeMs(5_000),
-                started + Duration::from_millis(250),
-            ),
+            started_at + Duration::from_secs(2),
         )
-        .expect("recent gamepad activity should suppress stale provider idletime");
+        .expect("the original deadline must stay retired");
+        handle_gnome_inactivity_timeout(
+            &mut output,
+            &mut dispatcher,
+            &mut inactivity,
+            started_at + Duration::from_millis(2_100),
+        )
+        .expect("blank at the reset deadline");
 
-        assert_eq!(dispatcher.executor.screen_off_calls, 1);
+        assert_eq!(dispatcher.executor.screen_off_calls, 2);
         assert_eq!(dispatcher.executor.screen_on_calls, 1);
     }
 
     #[test]
-    fn gamepad_activity_prevents_recent_provider_idle_from_blanking() {
-        let executor = FakeActionExecutor {
-            screen_on_output: "screen-on output\n".to_string(),
-            ..FakeActionExecutor::default()
-        };
-        let mut dispatcher = SessionEventDispatcher::new(executor);
-        let mut inactivity = InactivityEngine::new(InactivityThresholds {
-            blank_threshold_ms: 1_000,
-            active_threshold_ms: 100,
-        });
-        let mut merger = InactivityObservationMerger::new(1_000);
-        let started = Instant::now();
-        let mut output = Vec::new();
-
-        handle_gnome_inactivity_observation(
-            &mut output,
-            &mut dispatcher,
-            &mut inactivity,
-            merger.merge(InactivityObservation::UserActivityObserved, started),
-        )
-        .expect("gamepad activity should seed active state");
-
-        handle_gnome_inactivity_observation(
-            &mut output,
-            &mut dispatcher,
-            &mut inactivity,
-            merger.merge(
-                InactivityObservation::ProviderIdle,
-                started + Duration::from_millis(250),
-            ),
-        )
-        .expect("recent gamepad activity should suppress stale provider idle");
-
-        assert_eq!(dispatcher.executor.screen_off_calls, 0);
-        assert_eq!(dispatcher.executor.screen_on_calls, 1);
-    }
-
-    #[test]
-    fn failed_blank_from_idletime_is_not_retried_while_session_stays_idle() {
+    fn failed_blank_is_not_retried_without_activity() {
         let executor = FakeActionExecutor {
             screen_off_error: Some("tv did not respond".to_string()),
             ..FakeActionExecutor::default()
         };
         let mut dispatcher = SessionEventDispatcher::new(executor);
-        let mut inactivity = InactivityEngine::new(InactivityThresholds {
-            blank_threshold_ms: 1_000,
-            active_threshold_ms: 100,
-        });
+        let started_at = Instant::now();
+        let mut inactivity = InactivityEngine::new(Duration::from_secs(1), started_at);
         let mut output = Vec::new();
 
-        handle_gnome_inactivity_observation(
+        handle_gnome_inactivity_timeout(
             &mut output,
             &mut dispatcher,
             &mut inactivity,
-            InactivityObservation::IdleTimeMs(1_000),
+            started_at + Duration::from_secs(1),
         )
         .expect("initial blank attempt should be logged");
-        handle_gnome_inactivity_observation(
+        handle_gnome_inactivity_timeout(
             &mut output,
             &mut dispatcher,
             &mut inactivity,
-            InactivityObservation::IdleTimeMs(1_500),
+            started_at + Duration::from_secs(2),
         )
-        .expect("repeated idle sample should not retry blank");
+        .expect("elapsed time should not retry blank");
 
         let output = String::from_utf8(output).expect("utf8");
         assert!(output.contains("screen-off action failed. tv did not respond"));
         assert_eq!(dispatcher.executor.screen_off_calls, 1);
-    }
-
-    #[test]
-    fn failed_restore_from_idletime_is_not_retried_while_session_stays_active() {
-        let executor = FakeActionExecutor {
-            screen_on_error: Some("tv is still waking".to_string()),
-            ..FakeActionExecutor::default()
-        };
-        let mut dispatcher = SessionEventDispatcher::new(executor);
-        let mut inactivity = InactivityEngine::new(InactivityThresholds {
-            blank_threshold_ms: 1_000,
-            active_threshold_ms: 100,
-        });
-        let mut output = Vec::new();
-
-        handle_gnome_inactivity_observation(
-            &mut output,
-            &mut dispatcher,
-            &mut inactivity,
-            InactivityObservation::IdleTimeMs(1_000),
-        )
-        .expect("blank should succeed");
-        handle_gnome_inactivity_observation(
-            &mut output,
-            &mut dispatcher,
-            &mut inactivity,
-            InactivityObservation::IdleTimeMs(99),
-        )
-        .expect("initial restore attempt should be logged");
-        handle_gnome_inactivity_observation(
-            &mut output,
-            &mut dispatcher,
-            &mut inactivity,
-            InactivityObservation::IdleTimeMs(0),
-        )
-        .expect("repeated active sample should not retry restore");
-
-        let output = String::from_utf8(output).expect("utf8");
-        assert!(output.contains("screen restore action failed. tv is still waking"));
-        assert_eq!(dispatcher.executor.screen_on_calls, 1);
     }
 
     #[test]
@@ -2747,24 +2615,24 @@ system_sleep_wake_policy={policy}
             ..FakeActionExecutor::default()
         };
         let mut dispatcher = SessionEventDispatcher::new(executor);
-        let mut inactivity = InactivityEngine::new(InactivityThresholds {
-            blank_threshold_ms: 1_000,
-            active_threshold_ms: 100,
-        });
+        let started_at = Instant::now();
+        let mut inactivity = InactivityEngine::new(Duration::from_secs(1), started_at);
         let mut output = Vec::new();
 
-        handle_gnome_inactivity_observation(
+        handle_gnome_activity_observation(
             &mut output,
             &mut dispatcher,
             &mut inactivity,
             InactivityObservation::ProviderActive,
+            started_at,
         )
         .expect("initial provider active should restore");
-        handle_gnome_inactivity_observation(
+        handle_gnome_activity_observation(
             &mut output,
             &mut dispatcher,
             &mut inactivity,
             InactivityObservation::ProviderActive,
+            started_at + Duration::from_millis(100),
         )
         .expect("repeated provider active should not duplicate restore");
 

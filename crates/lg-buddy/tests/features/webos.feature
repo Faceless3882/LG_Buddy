@@ -145,6 +145,26 @@ Feature: Native webOS TV platform
     And the native TV registration tokens are "webos-test-access-token,webos-test-access-token"
     And the native TV pairing prompt count is 0
 
+  Scenario: Native GNOME inactivity follows the LG Buddy timeout
+    Given a temporary LG Buddy config using input HDMI_2
+    And the existing config selects TV platform "lg_webos"
+    And the idle timeout is 1 seconds
+    And LG Buddy session runtime is isolated
+    And a native webOS TV on input HDMI_2 with brightness 90
+    And a valid native TV access token is stored
+    And the executable PATH is isolated
+    And GNOME Shell is available
+    And GNOME emits no ScreenSaver signals
+    And GNOME idle monitor will report idletimes "1000, 1000, 1000, 1000, 1000, 1000, 0"
+    And GNOME monitor stays open for 1.8 seconds
+    When I run the command "monitor"
+    Then the command succeeds
+    And stdout contains "Using GNOME backend."
+    And the session marker is absent
+    And the TV screen is visible
+    And the native TV registration tokens are "webos-test-access-token,webos-test-access-token"
+    And the native TV pairing prompt count is 0
+
   Scenario: Native startup input restoration is followed by native shutdown power-off
     Given a temporary LG Buddy config using input HDMI_2
     And the existing config selects TV platform "lg_webos"

@@ -129,17 +129,23 @@ Current mapping:
 
 | Provider surface | Canonical meaning | Current Rust Status |
 | --- | --- | --- |
-| `org.gnome.ScreenSaver.ActiveChanged (true,)` | `Idle` | Implemented |
+| `org.gnome.ScreenSaver.ActiveChanged (true,)` | Idle observation that cannot bypass LG Buddy's timeout | Implemented |
 | `org.gnome.ScreenSaver.ActiveChanged (false,)` | `Active` | Implemented |
 | `org.gnome.ScreenSaver.WakeUpScreen` | `WakeRequested` | Implemented |
-| `org.gnome.Mutter.IdleMonitor.GetIdletime` | LG Buddy-owned inactivity thresholding and activity synthesis | Implemented |
+| Recent activity from `org.gnome.Mutter.IdleMonitor.GetIdletime` | `UserActivity` | Implemented |
 | Linux gamepad input devices | `UserActivity` | Implemented in the GNOME monitor runtime |
 
 Notes:
 
 - GNOME requires GNOME Shell, `org.gnome.ScreenSaver`, and `org.gnome.Mutter.IdleMonitor`.
 - LG Buddy owns the configured timeout value for this backend.
-- ScreenSaver idle/active signals and Mutter idletime are both observation inputs into LG Buddy policy.
+- LG Buddy owns one inactivity deadline. Desktop, gamepad, active, and wake
+  activity reports reset it; expiry after `screen_idle_timeout` triggers blanking.
+- Mutter idletime is used only to detect recent desktop activity. Its absolute
+  value does not trigger blanking.
+- ScreenSaver idle cannot trigger blanking by itself. ScreenSaver active and
+  wake signals reset the same LG Buddy deadline and remain restore observations
+  evaluated by screen policy.
 - Gamepad activity is not a separate desktop backend. It is an auxiliary
   activity source attached to the current native monitor path because some
   desktop idle APIs may not count controller input as activity.
