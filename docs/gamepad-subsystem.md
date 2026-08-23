@@ -52,7 +52,7 @@ screen behavior.
 | `session/gamepad/activity.rs` | Pure activity policy for buttons and axes |
 | `session/gamepad/registry.rs` | Per-device state registry that applies activity policy |
 | `session/gamepad/adapters/` | Device-specific supplemental activity adapters |
-| `session/gamepad/hidraw.rs` | Reusable raw HID activity reader for adapters |
+| `session/gamepad/hidraw.rs` | Reusable nonblocking raw HID report reader for adapters |
 
 ## Refresh And Lifecycle
 
@@ -86,13 +86,11 @@ Adapters live under `session/gamepad/adapters/` and implement
 
 An adapter decides whether it supports a discovered `GamepadDevice` and returns
 zero or more `ActivityReaderSpec`s. A reader spec has a stable
-`ActivityReaderKey` and opens an `ActivityReader`. Readers emit
-`ActivityObservation` values:
-
-- `RawEvent` is for readers that can map device data into the normal button or
-  axis model.
-- `ActivityPulse` is for opaque device surfaces where the presence of a report
-  is enough to prove user activity.
+`ActivityReaderKey` and opens an `ActivityReader`. Adapter readers map device
+data into normal button or axis observations. Those
+observations pass through the shared movement and noise policy before they can
+count as activity. Receiving an opaque report is not itself proof of user
+activity because devices may emit unsolicited status reports while untouched.
 
 Adapters should stay narrow. They should not own refresh scheduling, retries,
 registry cleanup, idle policy, screen behavior, or user configuration.
@@ -108,10 +106,9 @@ Use this shape for a new device adapter:
 1. Add a file under `crates/lg-buddy/src/session/gamepad/adapters/`.
 2. Match devices narrowly, preferably by vendor/product ID. If a whole device
    family is supported, document the reason in the adapter tests or comments.
-3. Reuse `RawHidActivityReaderSpec` when any report on a hidraw surface should
-   count as activity.
-4. Add a custom reader only when the raw data needs parsing before it can become
-   a `RawEvent` or `ActivityPulse`.
+3. Reuse `RawHidReportReader` to read reports from a hidraw surface.
+4. Add a custom reader that extracts meaningful controls as `RawGamepadEvent` values;
+   ignore sequence, timestamp, status, and other non-input fields.
 5. Register the adapter in `adapters/mod.rs`.
 6. Add tests for support matching and reader specs. If the adapter parses
    reports, add parser tests with captured representative payloads.

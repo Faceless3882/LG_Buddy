@@ -297,7 +297,7 @@ mod tests {
         assert_eq!(packet.len(), MAGIC_PACKET_LEN);
         assert_eq!(&packet[..6], &[0xFF; 6]);
 
-        for chunk in packet[6..].chunks_exact(6) {
+        for chunk in packet[6..].as_chunks::<6>().0 {
             assert_eq!(chunk, &[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
         }
     }
