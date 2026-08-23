@@ -44,6 +44,7 @@ use crate::sources::desktop::gnome::{
 use crate::sources::linux::logind::{
     acquire_sleep_delay_inhibitor, add_logind_signal_match, map_prepare_for_sleep_signal,
 };
+use crate::state::{ScreenOwnershipMarker, StateScope};
 use crate::RunError;
 
 const GNOME_WAIT_TIMEOUT_SECS: u64 = 15;
@@ -633,10 +634,13 @@ fn run_gnome_monitor<W: Write, E: SessionActionExecutor>(
 
     writeln!(writer, "LG Buddy Monitor: Using GNOME backend.")?;
 
-    let mut inactivity = InactivityEngine::new(
-        Duration::from_millis(resolve_idle_timeout_ms()),
-        Instant::now(),
-    );
+    let blank_after = Duration::from_millis(resolve_idle_timeout_ms());
+    let started_at = Instant::now();
+    let mut inactivity = if session_screen_ownership_marker_exists()? {
+        InactivityEngine::new_with_restore_pending(blank_after, started_at)
+    } else {
+        InactivityEngine::new(blank_after, started_at)
+    };
 
     let (sender, receiver) = mpsc::channel();
     let latest_inactivity = Arc::new(LatestInactivityObservation::default());
@@ -792,6 +796,15 @@ fn resolve_idle_timeout_secs() -> u64 {
             .map(u128::from)
             .unwrap_or(u128::from(DEFAULT_IDLE_TIMEOUT)),
     )
+}
+
+fn session_screen_ownership_marker_exists() -> Result<bool, SessionRunnerError> {
+    ScreenOwnershipMarker::from_env(StateScope::Session)
+        .map(|marker| marker.exists())
+        .map_err(|err| SessionRunnerError::Failed {
+            backend: ScreenBackend::Gnome,
+            message: format!("failed to inspect session screen ownership: {err}"),
+        })
 }
 
 fn resolve_idle_timeout_ms() -> u64 {
