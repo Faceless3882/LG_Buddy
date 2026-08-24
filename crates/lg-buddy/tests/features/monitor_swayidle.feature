@@ -52,7 +52,7 @@ Feature: swayidle monitor
     Then the command succeeds
     And stdout contains "Sending initial Wake-on-LAN packet"
     And stdout contains "Wake attempt 1 succeeded."
-    And the TV client received "turn_screen_on"
+    And the TV client did not receive "turn_screen_on"
     And the TV client received "set_input"
     And the session marker is absent
     And the TV is powered on

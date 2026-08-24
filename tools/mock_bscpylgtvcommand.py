@@ -251,6 +251,15 @@ def main() -> int:
         save_state(state_path, state)
         return 0
 
+    if command == "get_power_state":
+        if not state["power_on"]:
+            save_state(state_path, state)
+            return powered_off_error()
+        power_state = "Active" if state["screen_on"] else "Screen Off"
+        print({"returnValue": True, "state": power_state})
+        save_state(state_path, state)
+        return 0
+
     if command == "get_picture_settings":
         if not state["power_on"]:
             save_state(state_path, state)

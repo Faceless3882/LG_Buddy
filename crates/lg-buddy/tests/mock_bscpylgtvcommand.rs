@@ -1,7 +1,9 @@
 mod support;
 
 use lg_buddy::config::HdmiInput;
-use lg_buddy::tv::{BscpylgtvCommandClient, CurrentInput, OledBrightness, TvClient, TvErrorKind};
+use lg_buddy::tv::{
+    BscpylgtvCommandClient, CurrentInput, OledBrightness, TvClient, TvErrorKind, TvPowerState,
+};
 use std::net::Ipv4Addr;
 use support::MockBscpylgtv;
 
@@ -101,15 +103,28 @@ fn mock_tracks_screen_and_power_state_transitions() {
     let mock = MockBscpylgtv::new("mock-state-transitions");
     let client = mock_client(&mock);
 
+    assert_eq!(
+        client.power_state().expect("read active power state"),
+        TvPowerState::Active
+    );
+
     client
         .blank_screen()
         .expect("turn_screen_off should succeed");
     assert!(!mock.state_snapshot().screen_on);
+    assert_eq!(
+        client.power_state().expect("read blanked power state"),
+        TvPowerState::ScreenOff
+    );
 
     client
         .unblank_screen()
         .expect("turn_screen_on should succeed from blank state");
     assert!(mock.state_snapshot().screen_on);
+    assert_eq!(
+        client.power_state().expect("read restored power state"),
+        TvPowerState::Active
+    );
 
     client.power_off().expect("power_off should succeed");
     let state = mock.state_snapshot();

@@ -5,7 +5,9 @@ use super::{
     WebOsSetBacklightBrightnessError,
 };
 use crate::platform_access_token::{PlatformAccessTokenAcquisitionError, PlatformAccessTokenStore};
-use crate::tv::{CurrentInput, OledBrightness, TvClient, TvError, TvErrorKind, TvOperation};
+use crate::tv::{
+    CurrentInput, OledBrightness, TvClient, TvError, TvErrorKind, TvOperation, TvPowerState,
+};
 use serde_json::Value;
 use std::fmt;
 use std::sync::{Mutex, MutexGuard};
@@ -172,6 +174,15 @@ impl TvClient for WebOsTvClient {
         })
     }
 
+    fn power_state(&self) -> Result<TvPowerState, TvError> {
+        self.with_session(TvOperation::ReadPowerState, |client| {
+            client
+                .power_state()
+                .map(tv_power_state)
+                .map_err(power_state_failure)
+        })
+    }
+
     fn oled_brightness(&self) -> Result<OledBrightness, TvError> {
         self.with_session(TvOperation::ReadOledBrightness, |client| {
             let brightness = client
@@ -243,6 +254,18 @@ impl TvClient for WebOsTvClient {
                 }
             })
         })
+    }
+}
+
+fn tv_power_state(state: WebOsPowerState) -> TvPowerState {
+    match state {
+        WebOsPowerState::Active => TvPowerState::Active,
+        WebOsPowerState::ActiveStandby => TvPowerState::ActiveStandby,
+        WebOsPowerState::ScreenOff => TvPowerState::ScreenOff,
+        WebOsPowerState::Suspend => TvPowerState::Suspend,
+        WebOsPowerState::PowerOff => TvPowerState::PowerOff,
+        WebOsPowerState::Unknown => TvPowerState::Unknown,
+        WebOsPowerState::Other(value) => TvPowerState::Other(value),
     }
 }
 
@@ -494,7 +517,9 @@ impl fmt::Debug for WebOsTvClient {
 mod tests {
     use super::{WebOsPairingPolicy, WebOsTvClient};
     use crate::config::HdmiInput;
-    use crate::tv::{CurrentInput, OledBrightness, SelectedTvClient, TvClient, TvErrorKind};
+    use crate::tv::{
+        CurrentInput, OledBrightness, SelectedTvClient, TvClient, TvErrorKind, TvPowerState,
+    };
     use crate::web_os::test_support::{
         TestAccessTokenStore, WebOsTestInput, WebOsTestScenario, WebOsTestServer,
     };
@@ -627,8 +652,20 @@ mod tests {
                 .as_percent(),
             42
         );
+        assert_eq!(
+            client.power_state().expect("read active power state"),
+            TvPowerState::Active
+        );
         client.blank_screen().expect("blank screen");
+        assert_eq!(
+            client.power_state().expect("read blanked power state"),
+            TvPowerState::ScreenOff
+        );
         client.unblank_screen().expect("unblank screen");
+        assert_eq!(
+            client.power_state().expect("read restored power state"),
+            TvPowerState::Active
+        );
 
         assert_eq!(server.snapshot().connection_count, 1);
         client.power_off().expect("power off active TV");

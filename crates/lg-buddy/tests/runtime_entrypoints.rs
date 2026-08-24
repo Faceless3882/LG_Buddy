@@ -83,7 +83,11 @@ fn run_screen_on_loads_config_and_clears_session_marker() {
             .into_iter()
             .map(|call| call.command)
             .collect::<Vec<_>>(),
-        vec!["turn_screen_on".to_string()]
+        vec![
+            "get_power_state".to_string(),
+            "turn_screen_on".to_string(),
+            "get_power_state".to_string(),
+        ]
     );
     assert!(String::from_utf8(output)
         .expect("utf8 output")
@@ -117,7 +121,11 @@ fn run_screen_on_loads_aggressive_config_and_restores_without_session_marker() {
             .into_iter()
             .map(|call| call.command)
             .collect::<Vec<_>>(),
-        vec!["turn_screen_on".to_string()]
+        vec![
+            "get_power_state".to_string(),
+            "turn_screen_on".to_string(),
+            "get_power_state".to_string(),
+        ]
     );
     let output = String::from_utf8(output).expect("utf8 output");
     assert!(output.contains("Aggressive restore policy is enabled"));
@@ -167,7 +175,11 @@ fn settings_set_restore_policy_is_loaded_by_screen_runtime() {
             .into_iter()
             .map(|call| call.command)
             .collect::<Vec<_>>(),
-        vec!["turn_screen_on".to_string()]
+        vec![
+            "get_power_state".to_string(),
+            "turn_screen_on".to_string(),
+            "get_power_state".to_string(),
+        ]
     );
     assert!(String::from_utf8(output)
         .expect("screen output utf8")

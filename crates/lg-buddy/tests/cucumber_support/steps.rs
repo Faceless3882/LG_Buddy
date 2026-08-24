@@ -81,6 +81,11 @@ fn native_webos_tv_stalls_first_response(world: &mut LgBuddyWorld) {
     world.stall_native_tv_response();
 }
 
+#[given("the native webOS TV interrupts the first restore session and acknowledges input without unblanking")]
+fn native_webos_tv_has_ambiguous_restore(world: &mut LgBuddyWorld) {
+    world.make_native_restore_ambiguous();
+}
+
 #[given(regex = r#"mock system logind reports PreparingForSleep=(true|false)"#)]
 fn mock_system_logind_preparing_for_sleep(world: &mut LgBuddyWorld, value: String) {
     world.configure_system_logind(value == "true");

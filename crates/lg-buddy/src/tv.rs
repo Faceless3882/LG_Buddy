@@ -58,6 +58,7 @@ impl CommandOutput {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TvOperation {
     ReadInput,
+    ReadPowerState,
     SetInput,
     ReadOledBrightness,
     SetOledBrightness,
@@ -70,6 +71,7 @@ impl TvOperation {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::ReadInput => "read input",
+            Self::ReadPowerState => "read power state",
             Self::SetInput => "set input",
             Self::ReadOledBrightness => "read OLED brightness",
             Self::SetOledBrightness => "set OLED brightness",
@@ -94,6 +96,19 @@ pub enum TvErrorKind {
     InvalidResponse,
     ScreenUnblankSubstateMismatch,
     Internal,
+}
+
+impl TvErrorKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Transport => "transport",
+            Self::Authentication => "authentication",
+            Self::Rejected => "rejected",
+            Self::InvalidResponse => "invalid_response",
+            Self::ScreenUnblankSubstateMismatch => "screen_unblank_substate_mismatch",
+            Self::Internal => "internal",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -203,8 +218,49 @@ impl fmt::Display for OledBrightness {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TvPowerState {
+    Active,
+    ActiveStandby,
+    ScreenOff,
+    Suspend,
+    PowerOff,
+    Unknown,
+    Other(String),
+}
+
+impl TvPowerState {
+    fn from_wire_value(value: impl Into<String>) -> Self {
+        let value = value.into();
+        match value.as_str() {
+            "Active" => Self::Active,
+            "Active Standby" => Self::ActiveStandby,
+            "Screen Off" => Self::ScreenOff,
+            "Suspend" => Self::Suspend,
+            "Power Off" => Self::PowerOff,
+            "Unknown" => Self::Unknown,
+            _ => Self::Other(value),
+        }
+    }
+}
+
+impl fmt::Display for TvPowerState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Active => f.write_str("Active"),
+            Self::ActiveStandby => f.write_str("Active Standby"),
+            Self::ScreenOff => f.write_str("Screen Off"),
+            Self::Suspend => f.write_str("Suspend"),
+            Self::PowerOff => f.write_str("Power Off"),
+            Self::Unknown => f.write_str("Unknown"),
+            Self::Other(value) => f.write_str(value),
+        }
+    }
+}
+
 pub trait TvClient {
     fn current_input(&self) -> Result<CurrentInput, TvError>;
+    fn power_state(&self) -> Result<TvPowerState, TvError>;
     fn oled_brightness(&self) -> Result<OledBrightness, TvError>;
     fn set_input(&self, input: HdmiInput) -> Result<(), TvError>;
     fn set_oled_brightness(&self, brightness: OledBrightness) -> Result<(), TvError>;
@@ -272,6 +328,13 @@ impl TvClient for SelectedTvClient {
         match self {
             Self::Bscpylgtv(client) => client.current_input(),
             Self::WebOs(client) => client.current_input(),
+        }
+    }
+
+    fn power_state(&self) -> Result<TvPowerState, TvError> {
+        match self {
+            Self::Bscpylgtv(client) => client.power_state(),
+            Self::WebOs(client) => client.power_state(),
         }
     }
 
@@ -491,6 +554,10 @@ pub struct TvPower<'a, C> {
 }
 
 impl<'a, C: TvClient> TvPower<'a, C> {
+    pub fn state(&self) -> Result<TvPowerState, TvError> {
+        self.client.power_state()
+    }
+
     pub fn wake<W: WakeOnLanSender>(
         &self,
         sender: &W,
@@ -938,6 +1005,21 @@ impl<L: BscpylgtvCommandLauncher> TvClient for BscpylgtvCommandClient<L> {
             })
     }
 
+    fn power_state(&self) -> Result<TvPowerState, TvError> {
+        let output = self.run_command(TvOperation::ReadPowerState, "get_power_state", &[])?;
+        parse_power_state(output.stdout()).ok_or_else(|| {
+            TvError::new(
+                TvOperation::ReadPowerState,
+                TvErrorKind::InvalidResponse,
+                invalid_command_output_detail(
+                    "get_power_state",
+                    &output,
+                    "expected a string state field",
+                ),
+            )
+        })
+    }
+
     fn oled_brightness(&self) -> Result<OledBrightness, TvError> {
         let output =
             self.run_command(TvOperation::ReadOledBrightness, "get_picture_settings", &[])?;
@@ -1005,6 +1087,18 @@ fn last_non_empty_line(output: &str) -> Option<String> {
         .rev()
         .find(|line| !line.trim().is_empty())
         .map(str::to_string)
+}
+
+fn parse_power_state(output: &str) -> Option<TvPowerState> {
+    [('\'', "'state'"), ('"', "\"state\"")]
+        .into_iter()
+        .find_map(|(quote, key)| {
+            let (_, suffix) = output.rsplit_once(key)?;
+            let value = suffix.trim_start().strip_prefix(':')?.trim_start();
+            let value = value.strip_prefix(quote)?;
+            let (value, _) = value.split_once(quote)?;
+            Some(TvPowerState::from_wire_value(value))
+        })
 }
 
 fn parse_backlight(output: &str) -> Option<OledBrightness> {
