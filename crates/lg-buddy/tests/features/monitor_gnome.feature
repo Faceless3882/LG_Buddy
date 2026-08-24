@@ -220,10 +220,34 @@ Feature: GNOME monitor
     Then the command succeeds
     And stdout contains "Aggressive restore policy is enabled"
     And stdout contains "Wake attempt 1 succeeded."
-    And the TV client did not receive "turn_screen_on"
+    And the TV client received "turn_screen_on"
     And the TV client received "set_input"
     And the session marker is absent
     And the TV is powered on
+    And the TV screen is visible
+
+  Scenario: GNOME activity verifies legacy screen visibility after an input acknowledgement
+    Given a temporary LG Buddy config using input HDMI_3
+    And LG Buddy session runtime is isolated
+    And a mock TV client
+    And the TV is on input HDMI_3
+    And the TV screen is blanked
+    And the session marker exists
+    And the TV will fail "turn_screen_on" with status 1 and stderr "unblank failed"
+    And the next input restore attempt is acknowledged without unblanking
+    And screen wake delays are disabled
+    And the executable PATH is isolated
+    And GNOME Shell is available
+    And GNOME reports the session active
+    When I run the command "monitor"
+    Then the command succeeds
+    And stdout contains "operations: direct_unblank=failed kind=screen_not_visible"
+    And stdout contains "input_attempt_1=failed kind=screen_not_visible"
+    And stdout contains "recovery_unblank_1=succeeded"
+    And stdout contains "input_retry_1=succeeded"
+    And the TV client received "turn_screen_on" exactly 2 times
+    And the TV client received "set_input" exactly 2 times
+    And the session marker is absent
     And the TV screen is visible
 
   Scenario: GNOME restore failure does not retry continuously while activity stays active
@@ -232,7 +256,7 @@ Feature: GNOME monitor
     And LG Buddy session runtime is isolated
     And a mock TV client
     And the TV is on input HDMI_2
-    And the TV will fail "turn_screen_on" 7 times with status 1 and stderr "offline"
+    And the TV will fail "turn_screen_on" with status 1 and stderr "offline"
     And the TV will fail "set_input" 6 times with status 1 and stderr "not ready"
     And screen wake delays are disabled
     And the executable PATH is isolated
@@ -244,7 +268,7 @@ Feature: GNOME monitor
     Then the command succeeds
     And stdout contains "screen restore action failed"
     And the TV client received "turn_screen_off" exactly 1 times
-    And the TV client received "turn_screen_on" exactly 7 times
+    And the TV client received "turn_screen_on" exactly 1 times
     And the TV client received "set_input" exactly 6 times
     And the session marker exists
     And the TV screen is blanked
@@ -266,7 +290,7 @@ Feature: GNOME monitor
     Then the command succeeds
     And stdout contains "Sending initial Wake-on-LAN packet"
     And stdout contains "Wake attempt 1 succeeded."
-    And the TV client did not receive "turn_screen_on"
+    And the TV client received "turn_screen_on"
     And the TV client received "set_input"
     And the session marker is absent
     And the TV is powered on

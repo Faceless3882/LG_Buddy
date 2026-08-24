@@ -5,10 +5,7 @@ use super::{
     WebOsSetBacklightBrightnessError,
 };
 use crate::platform_access_token::{PlatformAccessTokenAcquisitionError, PlatformAccessTokenStore};
-use crate::tv::{
-    CurrentInput, OledBrightness, TvClient, TvError, TvErrorKind, TvOperation, TvPowerState,
-};
-use serde_json::Value;
+use crate::tv::{CurrentInput, OledBrightness, TvClient, TvError, TvErrorKind, TvOperation};
 use std::fmt;
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
@@ -162,6 +159,96 @@ impl WebOsTvClient {
             .power_off()
             .map_err(|error| control_failure(error).into_tv_error(operation))
     }
+
+    fn observe_power_state(&self, operation: TvOperation) -> Result<WebOsPowerState, TvError> {
+        self.with_session(operation, |client| {
+            client.power_state().map_err(power_state_failure)
+        })
+    }
+
+    fn verify_power_state(
+        &self,
+        operation: TvOperation,
+        expected: WebOsPowerState,
+        command_result: Result<(), TvError>,
+    ) -> Result<(), TvError> {
+        if command_result.as_ref().is_err_and(verification_cannot_help) {
+            return command_result;
+        }
+
+        match self.observe_power_state(operation) {
+            Ok(actual) if actual == expected => Ok(()),
+            Ok(actual) => {
+                let kind = if expected == WebOsPowerState::Active {
+                    TvErrorKind::ScreenNotVisible
+                } else {
+                    TvErrorKind::Rejected
+                };
+                Err(postcondition_failure(
+                    operation,
+                    kind,
+                    &command_result,
+                    format!("expected power state `{expected}`, but the TV reported `{actual}`"),
+                ))
+            }
+            Err(verification_error) => match command_result {
+                Ok(()) => Err(verification_error),
+                Err(command_error) => Err(combined_failure(command_error, verification_error)),
+            },
+        }
+    }
+
+    fn verify_input(
+        &self,
+        input: crate::config::HdmiInput,
+        command_result: Result<(), TvError>,
+    ) -> Result<(), TvError> {
+        let operation = TvOperation::SetInput;
+        if command_result.as_ref().is_err_and(verification_cannot_help) {
+            return command_result;
+        }
+
+        match self.observe_power_state(operation) {
+            Ok(WebOsPowerState::Active) => {}
+            Ok(actual) => {
+                return Err(postcondition_failure(
+                    operation,
+                    TvErrorKind::ScreenNotVisible,
+                    &command_result,
+                    format!("cannot verify input while the TV reports power state `{actual}`"),
+                ));
+            }
+            Err(verification_error) => {
+                return match command_result {
+                    Ok(()) => Err(verification_error),
+                    Err(command_error) => Err(combined_failure(command_error, verification_error)),
+                };
+            }
+        }
+
+        let observed_input = self.with_session(operation, |client| {
+            client
+                .foreground_app()
+                .map(|app| CurrentInput::from_raw(app.app_id().to_string()))
+                .map_err(foreground_app_failure)
+        });
+        match observed_input {
+            Ok(actual) if actual.is_hdmi(input) => Ok(()),
+            Ok(actual) => Err(postcondition_failure(
+                operation,
+                TvErrorKind::Rejected,
+                &command_result,
+                format!(
+                    "expected input `{}`, but the TV reported `{actual}`",
+                    input.as_str()
+                ),
+            )),
+            Err(verification_error) => match command_result {
+                Ok(()) => Err(verification_error),
+                Err(command_error) => Err(combined_failure(command_error, verification_error)),
+            },
+        }
+    }
 }
 
 impl TvClient for WebOsTvClient {
@@ -171,15 +258,6 @@ impl TvClient for WebOsTvClient {
                 .foreground_app()
                 .map(|app| CurrentInput::from_raw(app.app_id().to_string()))
                 .map_err(foreground_app_failure)
-        })
-    }
-
-    fn power_state(&self) -> Result<TvPowerState, TvError> {
-        self.with_session(TvOperation::ReadPowerState, |client| {
-            client
-                .power_state()
-                .map(tv_power_state)
-                .map_err(power_state_failure)
         })
     }
 
@@ -206,9 +284,10 @@ impl TvClient for WebOsTvClient {
                 format!("could not map configured input to webOS: {error}"),
             )
         })?;
-        self.with_session(TvOperation::SetInput, |client| {
+        let command_result = self.with_session(TvOperation::SetInput, |client| {
             client.switch_input(&input_id).map_err(control_failure)
-        })
+        });
+        self.verify_input(input, command_result)
     }
 
     fn set_oled_brightness(&self, brightness: OledBrightness) -> Result<(), TvError> {
@@ -232,41 +311,71 @@ impl TvClient for WebOsTvClient {
     }
 
     fn blank_screen(&self) -> Result<(), TvError> {
-        self.with_session(TvOperation::BlankScreen, |client| {
+        let command_result = self.with_session(TvOperation::BlankScreen, |client| {
             client
                 .turn_screen_off()
                 .map(|_| ())
                 .map_err(screen_control_failure)
-        })
+        });
+        self.verify_power_state(
+            TvOperation::BlankScreen,
+            WebOsPowerState::ScreenOff,
+            command_result,
+        )
     }
 
     fn unblank_screen(&self) -> Result<(), TvError> {
-        self.with_session(TvOperation::UnblankScreen, |client| {
-            client.turn_screen_on().map(|_| ()).map_err(|error| {
-                if screen_unblank_substate_mismatch(&error) {
-                    WebOsAdapterFailure::new(
-                        TvErrorKind::ScreenUnblankSubstateMismatch,
-                        error.to_string(),
-                        false,
-                    )
-                } else {
-                    screen_control_failure(error)
-                }
-            })
-        })
+        let command_result = self.with_session(TvOperation::UnblankScreen, |client| {
+            client
+                .turn_screen_on()
+                .map(|_| ())
+                .map_err(screen_control_failure)
+        });
+        self.verify_power_state(
+            TvOperation::UnblankScreen,
+            WebOsPowerState::Active,
+            command_result,
+        )
     }
 }
 
-fn tv_power_state(state: WebOsPowerState) -> TvPowerState {
-    match state {
-        WebOsPowerState::Active => TvPowerState::Active,
-        WebOsPowerState::ActiveStandby => TvPowerState::ActiveStandby,
-        WebOsPowerState::ScreenOff => TvPowerState::ScreenOff,
-        WebOsPowerState::Suspend => TvPowerState::Suspend,
-        WebOsPowerState::PowerOff => TvPowerState::PowerOff,
-        WebOsPowerState::Unknown => TvPowerState::Unknown,
-        WebOsPowerState::Other(value) => TvPowerState::Other(value),
-    }
+fn postcondition_failure(
+    operation: TvOperation,
+    kind: TvErrorKind,
+    command_result: &Result<(), TvError>,
+    observation: impl AsRef<str>,
+) -> TvError {
+    let detail = match command_result {
+        Ok(()) => format!(
+            "native webOS acknowledged the command, but {}",
+            observation.as_ref()
+        ),
+        Err(error) => format!(
+            "native webOS command failed: {}; verification found that {}",
+            error.detail(),
+            observation.as_ref()
+        ),
+    };
+    TvError::new(operation, kind, detail)
+}
+
+fn combined_failure(command_error: TvError, verification_error: TvError) -> TvError {
+    TvError::new(
+        command_error.operation(),
+        command_error.kind(),
+        format!(
+            "native webOS command failed: {}; postcondition verification also failed: {}",
+            command_error.detail(),
+            verification_error.detail()
+        ),
+    )
+}
+
+fn verification_cannot_help(error: &TvError) -> bool {
+    matches!(
+        error.kind(),
+        TvErrorKind::Authentication | TvErrorKind::Internal
+    )
 }
 
 struct WebOsAdapterFailure {
@@ -472,34 +581,6 @@ fn set_backlight_brightness_failure(
     }
 }
 
-fn screen_unblank_substate_mismatch(error: &WebOsScreenControlError) -> bool {
-    let WebOsScreenControlError::Control { source } = error else {
-        return false;
-    };
-    match source {
-        WebOsControlError::Request {
-            source:
-                WebOsClientError::WebOs {
-                    payload: Some(payload),
-                    ..
-                },
-        }
-        | WebOsControlError::RequestRejected { payload, .. } => payload_error_code(payload) == -102,
-        _ => false,
-    }
-}
-
-fn payload_error_code(payload: &Value) -> i64 {
-    payload
-        .get("errorCode")
-        .and_then(|value| match value {
-            Value::Number(number) => number.as_i64(),
-            Value::String(value) => value.parse::<i64>().ok(),
-            _ => None,
-        })
-        .unwrap_or_default()
-}
-
 impl fmt::Debug for WebOsTvClient {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("WebOsTvClient")
@@ -517,9 +598,7 @@ impl fmt::Debug for WebOsTvClient {
 mod tests {
     use super::{WebOsPairingPolicy, WebOsTvClient};
     use crate::config::HdmiInput;
-    use crate::tv::{
-        CurrentInput, OledBrightness, SelectedTvClient, TvClient, TvErrorKind, TvPowerState,
-    };
+    use crate::tv::{CurrentInput, OledBrightness, SelectedTvClient, TvClient, TvErrorKind};
     use crate::web_os::test_support::{
         TestAccessTokenStore, WebOsTestInput, WebOsTestScenario, WebOsTestServer,
     };
@@ -619,6 +698,25 @@ mod tests {
     }
 
     #[test]
+    fn effectful_operation_does_not_retry_a_definitive_authentication_failure() {
+        let server = WebOsTestServer::for_scenario(WebOsTestScenario::StoredTokenPairingPrompt);
+        let token_fixture = TestAccessTokenStore::new();
+        let client = client_for_server_with_policy(
+            &server,
+            &token_fixture,
+            WebOsPairingPolicy::StoredTokenOnly,
+        );
+
+        let error = client
+            .set_input(HdmiInput::Hdmi2)
+            .expect_err("stored-token-only operation must not retry authentication");
+
+        assert_eq!(error.kind(), TvErrorKind::Authentication);
+        assert_eq!(server.snapshot().connection_count, 1);
+        server.finish();
+    }
+
+    #[test]
     fn complete_tv_contract_reuses_one_authenticated_session() {
         let server = WebOsTestServer::active(WebOsTestInput::Hdmi3);
         let token_fixture = TestAccessTokenStore::new();
@@ -652,20 +750,10 @@ mod tests {
                 .as_percent(),
             42
         );
-        assert_eq!(
-            client.power_state().expect("read active power state"),
-            TvPowerState::Active
-        );
         client.blank_screen().expect("blank screen");
-        assert_eq!(
-            client.power_state().expect("read blanked power state"),
-            TvPowerState::ScreenOff
-        );
+        assert_eq!(server.snapshot().power_state, WebOsPowerState::ScreenOff);
         client.unblank_screen().expect("unblank screen");
-        assert_eq!(
-            client.power_state().expect("read restored power state"),
-            TvPowerState::Active
-        );
+        assert_eq!(server.snapshot().power_state, WebOsPowerState::Active);
 
         assert_eq!(server.snapshot().connection_count, 1);
         client.power_off().expect("power off active TV");
@@ -678,7 +766,7 @@ mod tests {
     }
 
     #[test]
-    fn ambiguous_write_is_not_replayed_and_later_operation_reconnects() {
+    fn ambiguous_write_is_not_replayed_and_safe_readback_resolves_success() {
         let server = WebOsTestServer::for_scenario(WebOsTestScenario::CloseAfterFirstInputWrite);
         let token_fixture = TestAccessTokenStore::new();
         let client = client_for_server(&server, &token_fixture);
@@ -687,20 +775,20 @@ mod tests {
             client.current_input().expect("establish initial session"),
             CurrentInput::Hdmi(HdmiInput::Hdmi3)
         );
-        let error = client
+        client
             .set_input(HdmiInput::Hdmi2)
-            .expect_err("lost write response must be reported");
-
-        assert_eq!(error.kind(), TvErrorKind::Transport);
-        let after_failure = server.snapshot();
-        assert_eq!(after_failure.input, WebOsTestInput::Hdmi2);
+            .expect("safe readback should prove the write succeeded");
+        let after_write = server.snapshot();
+        assert_eq!(after_write.input, WebOsTestInput::Hdmi2);
         assert_eq!(
-            after_failure.connection_count, 1,
-            "the failed effectful operation must not reconnect and replay"
+            after_write.connection_count, 2,
+            "verification reconnects without replaying the effectful operation"
         );
 
         assert_eq!(
-            client.current_input().expect("later operation reconnects"),
+            client
+                .current_input()
+                .expect("verified session remains reusable"),
             CurrentInput::Hdmi(HdmiInput::Hdmi2)
         );
         assert_eq!(server.snapshot().connection_count, 2);
@@ -708,15 +796,14 @@ mod tests {
     }
 
     #[test]
-    fn screen_unblank_substate_mismatch_is_typed_without_discarding_session() {
+    fn unblank_is_idempotent_when_the_screen_is_already_active() {
         let server = WebOsTestServer::active(WebOsTestInput::Hdmi3);
         let token_fixture = TestAccessTokenStore::new();
         let client = client_for_server(&server, &token_fixture);
 
-        let error = client
+        client
             .unblank_screen()
-            .expect_err("active screen cannot be unblanked");
-        assert_eq!(error.kind(), TvErrorKind::ScreenUnblankSubstateMismatch);
+            .expect("verified active state should satisfy unblank");
         assert_eq!(
             client
                 .current_input()
@@ -724,6 +811,24 @@ mod tests {
             CurrentInput::Hdmi(HdmiInput::Hdmi3)
         );
         assert_eq!(server.snapshot().connection_count, 1);
+        server.finish();
+    }
+
+    #[test]
+    fn set_input_reports_screen_not_visible_when_screen_off_ack_changes_nothing() {
+        let server = WebOsTestServer::active(WebOsTestInput::Hdmi3);
+        let token_fixture = TestAccessTokenStore::new();
+        let client = client_for_server(&server, &token_fixture);
+        client.blank_screen().expect("blank screen");
+        server.set_scenario(WebOsTestScenario::SameInputWriteAcknowledgedWhileScreenOff);
+
+        let error = client
+            .set_input(HdmiInput::Hdmi3)
+            .expect_err("an acknowledgement without a visible screen is not success");
+
+        assert_eq!(error.kind(), TvErrorKind::ScreenNotVisible);
+        assert!(error.detail().contains("power state `Screen Off`"));
+        assert_eq!(server.snapshot().power_state, WebOsPowerState::ScreenOff);
         server.finish();
     }
 

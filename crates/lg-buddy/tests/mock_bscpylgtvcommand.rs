@@ -1,9 +1,7 @@
 mod support;
 
 use lg_buddy::config::HdmiInput;
-use lg_buddy::tv::{
-    BscpylgtvCommandClient, CurrentInput, OledBrightness, TvClient, TvErrorKind, TvPowerState,
-};
+use lg_buddy::tv::{BscpylgtvCommandClient, CurrentInput, OledBrightness, TvClient, TvErrorKind};
 use std::net::Ipv4Addr;
 use support::MockBscpylgtv;
 
@@ -30,6 +28,22 @@ fn mock_set_input_succeeds_and_updates_state() {
 
     assert_eq!(mock.state_snapshot().input, "HDMI_2");
     assert!(mock.state_snapshot().screen_on);
+}
+
+#[test]
+fn set_input_acknowledgement_does_not_claim_success_while_screen_off() {
+    let mock = MockBscpylgtv::new("mock-set-input-screen-off-ack");
+    mock.set_screen_on(false);
+    mock.queue_set_input_ack_without_screen_on();
+    let client = mock_client(&mock);
+
+    let error = client
+        .set_input(HdmiInput::Hdmi3)
+        .expect_err("screen-off acknowledgement must not satisfy input restore");
+
+    assert_eq!(error.kind(), TvErrorKind::ScreenNotVisible);
+    assert!(error.detail().contains("power state `Screen Off`"));
+    assert!(!mock.state_snapshot().screen_on);
 }
 
 #[test]
@@ -77,24 +91,21 @@ fn mock_get_picture_settings_includes_backlight() {
 }
 
 #[test]
-fn mock_turn_screen_on_substate_error_matches_real_traceback_shape() {
+fn mock_turn_screen_on_is_idempotent_when_already_active() {
     let mock = MockBscpylgtv::new("mock-turn-screen-on-substate");
     let client = mock_client(&mock);
 
-    let err = client
+    client
         .unblank_screen()
-        .expect_err("substate mismatch should fail");
+        .expect("active power-state readback should satisfy unblank");
 
-    assert_eq!(err.kind(), TvErrorKind::ScreenUnblankSubstateMismatch);
-    assert!(
-        err.detail().contains("bscpylgtv.exceptions.PyLGTVCmdError"),
-        "detail was: {}",
-        err.detail()
-    );
-    assert!(
-        err.detail().contains("errorCode': '-102'"),
-        "detail was: {}",
-        err.detail()
+    assert!(mock.state_snapshot().screen_on);
+    assert_eq!(
+        mock.calls()
+            .into_iter()
+            .map(|call| call.command)
+            .collect::<Vec<_>>(),
+        vec!["turn_screen_on", "get_power_state"]
     );
 }
 
@@ -103,28 +114,15 @@ fn mock_tracks_screen_and_power_state_transitions() {
     let mock = MockBscpylgtv::new("mock-state-transitions");
     let client = mock_client(&mock);
 
-    assert_eq!(
-        client.power_state().expect("read active power state"),
-        TvPowerState::Active
-    );
-
     client
         .blank_screen()
         .expect("turn_screen_off should succeed");
     assert!(!mock.state_snapshot().screen_on);
-    assert_eq!(
-        client.power_state().expect("read blanked power state"),
-        TvPowerState::ScreenOff
-    );
 
     client
         .unblank_screen()
         .expect("turn_screen_on should succeed from blank state");
     assert!(mock.state_snapshot().screen_on);
-    assert_eq!(
-        client.power_state().expect("read restored power state"),
-        TvPowerState::Active
-    );
 
     client.power_off().expect("power_off should succeed");
     let state = mock.state_snapshot();

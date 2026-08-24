@@ -41,10 +41,6 @@ impl CommandOutput {
         &self.stdout
     }
 
-    fn stderr(&self) -> &str {
-        &self.stderr
-    }
-
     fn combined_output(&self) -> String {
         match (self.stdout.is_empty(), self.stderr.is_empty()) {
             (false, false) => format!("{}{}", self.stdout, self.stderr),
@@ -58,7 +54,6 @@ impl CommandOutput {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TvOperation {
     ReadInput,
-    ReadPowerState,
     SetInput,
     ReadOledBrightness,
     SetOledBrightness,
@@ -71,7 +66,6 @@ impl TvOperation {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::ReadInput => "read input",
-            Self::ReadPowerState => "read power state",
             Self::SetInput => "set input",
             Self::ReadOledBrightness => "read OLED brightness",
             Self::SetOledBrightness => "set OLED brightness",
@@ -94,7 +88,7 @@ pub enum TvErrorKind {
     Authentication,
     Rejected,
     InvalidResponse,
-    ScreenUnblankSubstateMismatch,
+    ScreenNotVisible,
     Internal,
 }
 
@@ -105,7 +99,7 @@ impl TvErrorKind {
             Self::Authentication => "authentication",
             Self::Rejected => "rejected",
             Self::InvalidResponse => "invalid_response",
-            Self::ScreenUnblankSubstateMismatch => "screen_unblank_substate_mismatch",
+            Self::ScreenNotVisible => "screen_not_visible",
             Self::Internal => "internal",
         }
     }
@@ -151,8 +145,8 @@ impl TvError {
         }
     }
 
-    pub fn indicates_screen_unblank_substate_mismatch(&self) -> bool {
-        self.kind == TvErrorKind::ScreenUnblankSubstateMismatch
+    pub fn indicates_screen_not_visible(&self) -> bool {
+        self.kind == TvErrorKind::ScreenNotVisible
     }
 }
 
@@ -218,49 +212,8 @@ impl fmt::Display for OledBrightness {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TvPowerState {
-    Active,
-    ActiveStandby,
-    ScreenOff,
-    Suspend,
-    PowerOff,
-    Unknown,
-    Other(String),
-}
-
-impl TvPowerState {
-    fn from_wire_value(value: impl Into<String>) -> Self {
-        let value = value.into();
-        match value.as_str() {
-            "Active" => Self::Active,
-            "Active Standby" => Self::ActiveStandby,
-            "Screen Off" => Self::ScreenOff,
-            "Suspend" => Self::Suspend,
-            "Power Off" => Self::PowerOff,
-            "Unknown" => Self::Unknown,
-            _ => Self::Other(value),
-        }
-    }
-}
-
-impl fmt::Display for TvPowerState {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Active => f.write_str("Active"),
-            Self::ActiveStandby => f.write_str("Active Standby"),
-            Self::ScreenOff => f.write_str("Screen Off"),
-            Self::Suspend => f.write_str("Suspend"),
-            Self::PowerOff => f.write_str("Power Off"),
-            Self::Unknown => f.write_str("Unknown"),
-            Self::Other(value) => f.write_str(value),
-        }
-    }
-}
-
 pub trait TvClient {
     fn current_input(&self) -> Result<CurrentInput, TvError>;
-    fn power_state(&self) -> Result<TvPowerState, TvError>;
     fn oled_brightness(&self) -> Result<OledBrightness, TvError>;
     fn set_input(&self, input: HdmiInput) -> Result<(), TvError>;
     fn set_oled_brightness(&self, brightness: OledBrightness) -> Result<(), TvError>;
@@ -328,13 +281,6 @@ impl TvClient for SelectedTvClient {
         match self {
             Self::Bscpylgtv(client) => client.current_input(),
             Self::WebOs(client) => client.current_input(),
-        }
-    }
-
-    fn power_state(&self) -> Result<TvPowerState, TvError> {
-        match self {
-            Self::Bscpylgtv(client) => client.power_state(),
-            Self::WebOs(client) => client.power_state(),
         }
     }
 
@@ -554,10 +500,6 @@ pub struct TvPower<'a, C> {
 }
 
 impl<'a, C: TvClient> TvPower<'a, C> {
-    pub fn state(&self) -> Result<TvPowerState, TvError> {
-        self.client.power_state()
-    }
-
     pub fn wake<W: WakeOnLanSender>(
         &self,
         sender: &W,
@@ -974,15 +916,72 @@ impl<L: BscpylgtvCommandLauncher> BscpylgtvCommandClient<L> {
                 detail.push_str(": ");
                 detail.push_str(combined.trim_end());
             }
-            let kind = if tv_operation == TvOperation::UnblankScreen
-                && (rendered.stderr().contains("errorCode': '-102'")
-                    || rendered.stdout().contains("errorCode': '-102'"))
-            {
-                TvErrorKind::ScreenUnblankSubstateMismatch
-            } else {
-                TvErrorKind::Rejected
-            };
-            Err(TvError::new(tv_operation, kind, detail))
+            Err(TvError::new(tv_operation, TvErrorKind::Rejected, detail))
+        }
+    }
+
+    fn power_state_for(&self, operation: TvOperation) -> Result<String, TvError> {
+        let output = self.run_command(operation, "get_power_state", &[])?;
+        parse_power_state(output.stdout()).ok_or_else(|| {
+            TvError::new(
+                operation,
+                TvErrorKind::InvalidResponse,
+                invalid_command_output_detail(
+                    "get_power_state",
+                    &output,
+                    "expected a string state field",
+                ),
+            )
+        })
+    }
+
+    fn verify_visible_after_ack(&self, operation: TvOperation) -> Result<(), TvError> {
+        let power_state = self.power_state_for(operation)?;
+        if power_state == "Active" {
+            return Ok(());
+        }
+
+        Err(TvError::new(
+            operation,
+            TvErrorKind::ScreenNotVisible,
+            format!(
+                "bscpylgtv acknowledged the command, but the TV reported power state `{power_state}`"
+            ),
+        ))
+    }
+
+    fn verify_unblank_result(&self, command_result: Result<(), TvError>) -> Result<(), TvError> {
+        let operation = TvOperation::UnblankScreen;
+        match self.power_state_for(operation) {
+            Ok(power_state) if power_state == "Active" => Ok(()),
+            Ok(power_state) => {
+                let detail = match command_result {
+                    Ok(()) => format!(
+                        "bscpylgtv acknowledged screen unblank, but the TV reported power state `{power_state}`"
+                    ),
+                    Err(error) => format!(
+                        "bscpylgtv screen unblank failed: {}; verification found power state `{power_state}`",
+                        error.detail()
+                    ),
+                };
+                Err(TvError::new(
+                    operation,
+                    TvErrorKind::ScreenNotVisible,
+                    detail,
+                ))
+            }
+            Err(verification_error) => match command_result {
+                Ok(()) => Err(verification_error),
+                Err(command_error) => Err(TvError::new(
+                    operation,
+                    command_error.kind(),
+                    format!(
+                        "bscpylgtv screen unblank failed: {}; postcondition verification also failed: {}",
+                        command_error.detail(),
+                        verification_error.detail()
+                    ),
+                )),
+            },
         }
     }
 }
@@ -1005,21 +1004,6 @@ impl<L: BscpylgtvCommandLauncher> TvClient for BscpylgtvCommandClient<L> {
             })
     }
 
-    fn power_state(&self) -> Result<TvPowerState, TvError> {
-        let output = self.run_command(TvOperation::ReadPowerState, "get_power_state", &[])?;
-        parse_power_state(output.stdout()).ok_or_else(|| {
-            TvError::new(
-                TvOperation::ReadPowerState,
-                TvErrorKind::InvalidResponse,
-                invalid_command_output_detail(
-                    "get_power_state",
-                    &output,
-                    "expected a string state field",
-                ),
-            )
-        })
-    }
-
     fn oled_brightness(&self) -> Result<OledBrightness, TvError> {
         let output =
             self.run_command(TvOperation::ReadOledBrightness, "get_picture_settings", &[])?;
@@ -1037,8 +1021,8 @@ impl<L: BscpylgtvCommandLauncher> TvClient for BscpylgtvCommandClient<L> {
     }
 
     fn set_input(&self, input: HdmiInput) -> Result<(), TvError> {
-        self.run_command(TvOperation::SetInput, "set_input", &[input.as_str()])
-            .map(|_| ())
+        self.run_command(TvOperation::SetInput, "set_input", &[input.as_str()])?;
+        self.verify_visible_after_ack(TvOperation::SetInput)
     }
 
     fn set_oled_brightness(&self, brightness: OledBrightness) -> Result<(), TvError> {
@@ -1062,8 +1046,10 @@ impl<L: BscpylgtvCommandLauncher> TvClient for BscpylgtvCommandClient<L> {
     }
 
     fn unblank_screen(&self) -> Result<(), TvError> {
-        self.run_command(TvOperation::UnblankScreen, "turn_screen_on", &[])
-            .map(|_| ())
+        let command_result = self
+            .run_command(TvOperation::UnblankScreen, "turn_screen_on", &[])
+            .map(|_| ());
+        self.verify_unblank_result(command_result)
     }
 }
 
@@ -1089,7 +1075,7 @@ fn last_non_empty_line(output: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn parse_power_state(output: &str) -> Option<TvPowerState> {
+fn parse_power_state(output: &str) -> Option<String> {
     [('\'', "'state'"), ('"', "\"state\"")]
         .into_iter()
         .find_map(|(quote, key)| {
@@ -1097,7 +1083,7 @@ fn parse_power_state(output: &str) -> Option<TvPowerState> {
             let value = suffix.trim_start().strip_prefix(':')?.trim_start();
             let value = value.strip_prefix(quote)?;
             let (value, _) = value.split_once(quote)?;
-            Some(TvPowerState::from_wire_value(value))
+            Some(value.to_string())
         })
 }
 
@@ -1281,11 +1267,18 @@ mod tests {
                 .into_iter()
                 .map(|call| (call.tv_ip, call.command, call.args))
                 .collect::<Vec<_>>(),
-            vec![(
-                "10.0.0.5".to_string(),
-                "set_input".to_string(),
-                vec!["HDMI_3".to_string()],
-            )]
+            vec![
+                (
+                    "10.0.0.5".to_string(),
+                    "set_input".to_string(),
+                    vec!["HDMI_3".to_string()],
+                ),
+                (
+                    "10.0.0.5".to_string(),
+                    "get_power_state".to_string(),
+                    Vec::new(),
+                ),
+            ]
         );
     }
 
@@ -1464,6 +1457,7 @@ mod tests {
     #[test]
     fn command_failures_preserve_diagnostics_without_exposing_command_output() {
         let mock = MockBscpylgtv::new("tv-command-failure");
+        mock.set_screen_on(false);
         mock.queue_error("turn_screen_on", 7, "failure stderr\n");
         let client = client_for_mock(&mock, ip("10.0.0.8"));
         let err = client
@@ -1471,7 +1465,7 @@ mod tests {
             .expect_err("turn_screen_on should fail");
 
         assert_eq!(err.operation(), TvOperation::UnblankScreen);
-        assert_eq!(err.kind(), TvErrorKind::Rejected);
+        assert_eq!(err.kind(), TvErrorKind::ScreenNotVisible);
         assert!(err.detail().contains("failed with status 7"));
         assert!(err.detail().contains("failure stderr"));
     }
@@ -1543,16 +1537,28 @@ mod tests {
 
         assert_eq!(
             launcher.calls(),
-            vec![BscpylgtvInvocation::new(
-                "/usr/bin/mock-bscpylgtv",
-                vec![
-                    "-p".to_string(),
-                    "/home/vas/.local/state/lg-buddy/.aiopylgtv.sqlite".to_string(),
-                    "10.0.0.8".to_string(),
-                    "turn_screen_on".to_string(),
-                ],
-                Some(SystemUser::new("vas", 1000, 1000, "/home/vas")),
-            )]
+            vec![
+                BscpylgtvInvocation::new(
+                    "/usr/bin/mock-bscpylgtv",
+                    vec![
+                        "-p".to_string(),
+                        "/home/vas/.local/state/lg-buddy/.aiopylgtv.sqlite".to_string(),
+                        "10.0.0.8".to_string(),
+                        "turn_screen_on".to_string(),
+                    ],
+                    Some(SystemUser::new("vas", 1000, 1000, "/home/vas")),
+                ),
+                BscpylgtvInvocation::new(
+                    "/usr/bin/mock-bscpylgtv",
+                    vec![
+                        "-p".to_string(),
+                        "/home/vas/.local/state/lg-buddy/.aiopylgtv.sqlite".to_string(),
+                        "10.0.0.8".to_string(),
+                        "get_power_state".to_string(),
+                    ],
+                    Some(SystemUser::new("vas", 1000, 1000, "/home/vas")),
+                ),
+            ]
         );
     }
 
@@ -1820,9 +1826,18 @@ mod tests {
     impl BscpylgtvCommandLauncher for RecordingLauncher {
         fn run(&self, invocation: &BscpylgtvInvocation) -> io::Result<BscpylgtvLaunchResult> {
             self.calls.borrow_mut().push(invocation.clone());
+            let stdout = if invocation
+                .args()
+                .last()
+                .is_some_and(|argument| argument == "get_power_state")
+            {
+                "{'returnValue': True, 'state': 'Active'}\n"
+            } else {
+                "{'returnValue': True}\n"
+            };
             Ok(BscpylgtvLaunchResult::new(
                 Some(0),
-                "{'returnValue': True}\n".to_string(),
+                stdout.to_string(),
                 String::new(),
             ))
         }

@@ -405,9 +405,10 @@ Flow:
 5. Apply `screen_restore_policy`:
    - `conservative`: skip if the marker is missing
    - `aggressive`: continue even without the marker
-6. Try `turn_screen_on`.
-7. If the TV reports the known active-screen error (`-102`), try immediate input restore.
-8. Otherwise fall back to Wake-on-LAN plus repeated `set_input` attempts.
+6. Try the adapter-neutral screen-unblank operation.
+7. On failure, fall back to Wake-on-LAN plus repeated input-restore attempts.
+8. If input restore reports that the screen is not visible, unblank it and retry
+   the input so the complete restore is verified.
 9. Clear the marker on success.
 10. Leave the marker in place if wake recovery fails.
 
@@ -519,10 +520,10 @@ The current contract covers:
 - `tv.picture().set_oled_brightness(...)`
 
 Successful effectful operations return no transport-specific output. Failures
-are normalized into typed TV errors, including the screen-unblank substate
-mismatch that policy uses to select its full-wake fallback. Wake-on-LAN keeps
-the configured network identity at `TvDevice`; adapter operations do not accept
-targeting data.
+are normalized into typed TV errors. Policy may react to adapter-neutral
+outcomes such as the screen not being visible, but transport and platform state
+remain inside the adapter. Wake-on-LAN keeps the configured network identity at
+`TvDevice`; adapter operations do not accept targeting data.
 
 ### Transitional Backend
 
@@ -534,16 +535,17 @@ The Rust runtime talks to it through `BscpylgtvCommandClient`, which:
 - shells out to the configured command path
 - keeps subprocess output and exit status inside the legacy adapter
 - maps reads and failures into the shared domain contract
+- privately verifies screen visibility after input restore and screen unblank
 
-`SelectedTvClient` is the internal delegation point for the legacy and native
-implementations. `WebOsTvClient` owns one lazily authenticated websocket
-session behind a mutex, reuses it while healthy, and discards it after transport
-or framing failure. It never replays an effectful operation after an ambiguous
-failure; a later policy operation may establish a new session.
-
-Production construction deliberately selects the legacy variant. The native
-variant is available for internal and scripted-server validation, but there is
-no end-user selection or configuration change at this stage.
+`SelectedTvClient` is the internal delegation point for the configured legacy
+or native implementation. `WebOsTvClient` owns one lazily authenticated
+websocket session behind a mutex, reuses it while healthy, and discards it after
+transport or framing failure. Native effectful operations verify their own
+postconditions before reporting success. After an ambiguous failure the adapter
+may reconnect for safe read-only verification, but it never replays the
+effectful operation. The legacy adapter performs its equivalent power-state
+readback through `bscpylgtvcommand`; neither implementation exposes webOS power
+states to policy code.
 
 ## State Model
 

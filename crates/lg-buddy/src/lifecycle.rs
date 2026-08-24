@@ -2759,7 +2759,7 @@ mod tests {
         assert_eq!(sleeper.durations(), vec![Duration::from_secs(6)]);
         assert_eq!(network.calls(), 1);
         assert_eq!(network.route_targets(), vec![ip("192.0.2.42")]);
-        assert_call_commands(&mock, &["set_input"]);
+        assert_call_commands(&mock, &["set_input", "get_power_state"]);
     }
 
     #[test]
@@ -2789,7 +2789,7 @@ mod tests {
         assert_eq!(network.calls(), 1);
         assert_eq!(network.route_targets(), vec![ip("192.0.2.42")]);
         assert_eq!(wol.calls().len(), 1);
-        assert_call_commands(&mock, &["set_input"]);
+        assert_call_commands(&mock, &["set_input", "get_power_state"]);
         let rendered = rendered(&output);
         assert!(rendered.contains("Waiting for NetworkManager connectivity"));
         assert!(rendered.contains("Waiting for route to TV at 192.0.2.42"));
@@ -2845,7 +2845,7 @@ mod tests {
         assert!(!marker.exists());
         assert_eq!(network.calls(), 1);
         assert!(network.route_targets().is_empty());
-        assert_call_commands(&mock, &["set_input"]);
+        assert_call_commands(&mock, &["set_input", "get_power_state"]);
     }
 
     #[test]

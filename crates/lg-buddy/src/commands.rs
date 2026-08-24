@@ -871,7 +871,6 @@ mod tests {
         let mock = MockBscpylgtv::new("screen-on-aggressive-no-marker-tv");
         mock.set_screen_on(false);
         mock.queue_error("turn_screen_on", 1, "offline\n");
-        mock.queue_error("turn_screen_on", 1, "still offline\n");
         mock.queue_error("set_input", 1, "not ready\n");
         let client = client_for_mock(&mock);
         let wol = RecordingWakeOnLanSender::default();
@@ -892,13 +891,9 @@ mod tests {
         assert_call_commands(
             &mock,
             &[
-                "get_power_state",
                 "turn_screen_on",
                 "get_power_state",
                 "set_input",
-                "get_power_state",
-                "turn_screen_on",
-                "get_power_state",
                 "set_input",
                 "get_power_state",
             ],
@@ -944,10 +939,7 @@ mod tests {
             !marker.exists(),
             "successful restore should clear the marker"
         );
-        assert_call_commands(
-            &mock,
-            &["get_power_state", "turn_screen_on", "get_power_state"],
-        );
+        assert_call_commands(&mock, &["turn_screen_on", "get_power_state"]);
         assert!(wol.calls().is_empty());
         assert!(sleeper.durations().is_empty());
         assert!(rendered(&output).contains("Screen unblank succeeded."));
@@ -976,16 +968,13 @@ mod tests {
         .expect("turn_screen_on should succeed");
 
         assert!(!marker.exists());
-        assert_call_commands(
-            &mock,
-            &["get_power_state", "turn_screen_on", "get_power_state"],
-        );
+        assert_call_commands(&mock, &["turn_screen_on", "get_power_state"]);
         assert!(wol.calls().is_empty());
         assert!(rendered(&output).contains("Screen unblank succeeded."));
     }
 
     #[test]
-    fn screen_on_reconciles_a_substate_rejection_when_the_tv_is_already_active() {
+    fn screen_on_treats_already_active_unblank_as_success() {
         let temp_dir = TestDir::new("screen-on-substate-mismatch");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
         marker.create().expect("create marker");
@@ -1003,14 +992,14 @@ mod tests {
             &wol,
             &sleeper,
         )
-        .expect("active readback should reconcile the substate rejection");
+        .expect("active power-state readback should satisfy unblank");
 
         assert!(!marker.exists());
-        assert_call_commands(&mock, &["get_power_state"]);
+        assert_call_commands(&mock, &["turn_screen_on", "get_power_state"]);
         assert!(wol.calls().is_empty());
         assert!(sleeper.durations().is_empty());
         let rendered = rendered(&output);
-        assert!(rendered.contains("Verified TV power state Active."));
+        assert!(rendered.contains("Screen unblank succeeded."));
         assert!(!rendered.contains("Falling back to full wake."));
     }
 
@@ -1022,7 +1011,6 @@ mod tests {
         let mock = MockBscpylgtv::new("screen-on-wake-retry-success-tv");
         mock.set_screen_on(false);
         mock.queue_error("turn_screen_on", 1, "offline\n");
-        mock.queue_error("turn_screen_on", 1, "still offline\n");
         mock.queue_error("set_input", 1, "not ready\n");
         let client = client_for_mock(&mock);
         let wol = RecordingWakeOnLanSender::default();
@@ -1043,13 +1031,9 @@ mod tests {
         assert_call_commands(
             &mock,
             &[
-                "get_power_state",
                 "turn_screen_on",
                 "get_power_state",
                 "set_input",
-                "get_power_state",
-                "turn_screen_on",
-                "get_power_state",
                 "set_input",
                 "get_power_state",
             ],
@@ -1072,9 +1056,7 @@ mod tests {
         marker.create().expect("create marker");
         let mock = MockBscpylgtv::new("screen-on-wake-retry-failure-tv");
         mock.set_screen_on(false);
-        for _ in 0..7 {
-            mock.queue_error("turn_screen_on", 1, "offline\n");
-        }
+        mock.queue_error("turn_screen_on", 1, "offline\n");
         for _ in 0..6 {
             mock.queue_error("set_input", 1, "not ready\n");
         }
@@ -1094,7 +1076,7 @@ mod tests {
         .expect_err("exhausted retries should fail");
 
         assert!(marker.exists());
-        assert_eq!(mock.calls().len(), 27);
+        assert_eq!(mock.calls().len(), 8);
         assert_eq!(wol.calls().len(), 7);
         assert_eq!(sleeper.durations().len(), 7);
         assert!(matches!(err, crate::RunError::Policy(_)));
@@ -1107,9 +1089,7 @@ mod tests {
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
         let mock = MockBscpylgtv::new("screen-on-aggressive-wake-retry-failure-tv");
         mock.set_screen_on(false);
-        for _ in 0..7 {
-            mock.queue_error("turn_screen_on", 1, "offline\n");
-        }
+        mock.queue_error("turn_screen_on", 1, "offline\n");
         for _ in 0..6 {
             mock.queue_error("set_input", 1, "not ready\n");
         }
@@ -1129,7 +1109,7 @@ mod tests {
         .expect_err("aggressive mode should still fail after exhausting retries");
 
         assert!(!marker.exists());
-        assert_eq!(mock.calls().len(), 27);
+        assert_eq!(mock.calls().len(), 8);
         assert_eq!(wol.calls().len(), 7);
         assert_eq!(sleeper.durations().len(), 7);
         assert!(matches!(err, crate::RunError::Policy(_)));
@@ -1201,7 +1181,7 @@ mod tests {
         assert_eq!(network.calls(), 1);
         assert_eq!(wol.calls().len(), 1);
         assert_eq!(sleeper.durations(), vec![Duration::from_secs(6)]);
-        assert_call_commands(&mock, &["set_input"]);
+        assert_call_commands(&mock, &["set_input", "get_power_state"]);
         let rendered = rendered(&output);
         assert!(rendered.contains("Aggressive restore policy is enabled"));
         assert!(rendered.contains("Wake from sleep: Restoring display state."));
@@ -1238,7 +1218,7 @@ mod tests {
         assert_eq!(network.calls(), 1);
         assert_eq!(wol.calls().len(), 1);
         assert_eq!(sleeper.durations(), vec![Duration::from_secs(6)]);
-        assert_call_commands(&mock, &["set_input"]);
+        assert_call_commands(&mock, &["set_input", "get_power_state"]);
         let rendered = rendered(&output);
         assert!(rendered.contains("Cold boot: Turning TV on and switching to HDMI_4."));
         assert!(rendered.contains("TV turned on and set to HDMI_4."));
@@ -1274,7 +1254,7 @@ mod tests {
         assert!(!marker.exists());
         assert_eq!(network.calls(), 1);
         assert_eq!(wol.calls().len(), 1);
-        assert_call_commands(&mock, &["set_input"]);
+        assert_call_commands(&mock, &["set_input", "get_power_state"]);
         assert!(rendered(&output).contains("Wake from sleep: LG Buddy turned TV off. Restoring."));
     }
 
@@ -1307,7 +1287,7 @@ mod tests {
 
         assert!(!marker.exists());
         assert_eq!(network.calls(), 1);
-        assert_call_commands(&mock, &["set_input"]);
+        assert_call_commands(&mock, &["set_input", "get_power_state"]);
         assert!(rendered(&output).contains("Cold boot: Turning TV on and switching to HDMI_3."));
     }
 
@@ -1339,7 +1319,7 @@ mod tests {
 
         assert_eq!(network.calls(), 1);
         assert_eq!(wol.calls().len(), 1);
-        assert_call_commands(&mock, &["set_input"]);
+        assert_call_commands(&mock, &["set_input", "get_power_state"]);
         assert!(rendered(&output).contains("TV turned on and set to HDMI_2."));
     }
 
@@ -1371,7 +1351,7 @@ mod tests {
         .expect("startup retry should succeed");
 
         assert_eq!(network.calls(), 1);
-        assert_call_commands(&mock, &["set_input", "set_input"]);
+        assert_call_commands(&mock, &["set_input", "set_input", "get_power_state"]);
         assert_eq!(wol.calls().len(), 2);
         assert_eq!(
             sleeper.durations(),

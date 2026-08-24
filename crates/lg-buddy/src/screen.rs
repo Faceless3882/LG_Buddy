@@ -5,7 +5,6 @@ use std::time::{Duration, Instant};
 
 use crate::config::{
     load_config, resolve_config_path_from_env, Config, HdmiInput, MacAddress, ScreenRestorePolicy,
-    TvPlatform,
 };
 use crate::events::{EventSource, RuntimeEvent, RuntimeEventKind};
 use crate::policy::{
@@ -16,10 +15,7 @@ use crate::policy::{
 use crate::runtime_phase::NoopRuntimePhaseProvider;
 use crate::runtime_phase::{LogindRuntimePhaseProvider, RuntimePhaseProvider, RuntimePhaseRead};
 use crate::state::{ScreenOwnershipMarker, StateScope};
-use crate::tv::{
-    build_tv_client, CurrentInput, TvClient, TvClientBuildOptions, TvDevice, TvError, TvErrorKind,
-    TvPowerState,
-};
+use crate::tv::{build_tv_client, CurrentInput, TvClient, TvClientBuildOptions, TvDevice, TvError};
 use crate::wol::{UdpWakeOnLanSender, WakeOnLanSender};
 use crate::RunError;
 
@@ -161,146 +157,70 @@ enum ScreenOnNext {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ScreenOnUnblankObservation {
-    VerifiedActive,
-    SubstateMismatch(String),
+    Succeeded,
     Failed(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct TvFailureSnapshot {
-    kind: TvErrorKind,
-    detail: String,
-}
-
-impl TvFailureSnapshot {
-    fn from_error(error: &TvError) -> Self {
-        Self {
-            kind: error.kind(),
-            detail: compact_failure_detail(error.detail()),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum TvStepOutcome {
-    Succeeded,
-    Failed(TvFailureSnapshot),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct TimedTvStep {
-    elapsed: Duration,
-    outcome: TvStepOutcome,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct TimedPowerStateObservation {
-    stage: String,
-    elapsed: Duration,
-    result: Result<TvPowerState, TvFailureSnapshot>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct WakePacketSnapshot {
-    elapsed: Duration,
-    error: Option<String>,
-}
-
 #[derive(Debug)]
-struct ScreenRestoreAnomaly {
-    source: EventSource,
-    platform: TvPlatform,
-    configured_input: HdmiInput,
-    marker_before: bool,
+struct ScreenRestoreTrace {
     started_at: Instant,
-    direct_unblank: Option<TimedTvStep>,
-    wake_packets: Vec<WakePacketSnapshot>,
-    input_attempts: Vec<TimedTvStep>,
-    recovery_unblank_attempts: Vec<TimedTvStep>,
-    power_state_observations: Vec<TimedPowerStateObservation>,
+    entries: Vec<String>,
+    failed: bool,
 }
 
-impl ScreenRestoreAnomaly {
-    fn new(event: RuntimeEvent, config: &Config, marker_before: bool) -> Self {
+impl ScreenRestoreTrace {
+    fn new() -> Self {
         Self {
-            source: event.source,
-            platform: config.tv_platform,
-            configured_input: config.input,
-            marker_before,
             started_at: Instant::now(),
-            direct_unblank: None,
-            wake_packets: Vec::new(),
-            input_attempts: Vec::new(),
-            recovery_unblank_attempts: Vec::new(),
-            power_state_observations: Vec::new(),
+            entries: Vec::new(),
+            failed: false,
         }
     }
 
-    fn command_failed(&self) -> bool {
-        self.direct_unblank
-            .as_ref()
-            .is_some_and(|step| matches!(&step.outcome, TvStepOutcome::Failed(_)))
-            || self
-                .input_attempts
-                .iter()
-                .chain(&self.recovery_unblank_attempts)
-                .any(|step| matches!(&step.outcome, TvStepOutcome::Failed(_)))
+    fn record(&mut self, operation: impl AsRef<str>, result: &Result<(), TvError>) {
+        let elapsed_ms = self.started_at.elapsed().as_millis();
+        match result {
+            Ok(()) => self.entries.push(format!(
+                "{}=succeeded elapsed_ms={elapsed_ms}",
+                operation.as_ref()
+            )),
+            Err(error) => {
+                self.failed = true;
+                self.entries.push(format!(
+                    "{}=failed kind={} elapsed_ms={elapsed_ms} detail={:?}",
+                    operation.as_ref(),
+                    error.kind().as_str(),
+                    compact_failure_detail(error.detail())
+                ));
+            }
+        }
     }
 
-    fn render<W: Write>(
+    fn render_if_failed<W: Write>(
         &self,
         writer: &mut W,
-        reconciliation_result: &Result<(), RunError>,
+        event: RuntimeEvent,
+        config: &Config,
+        marker_before: bool,
         marker_after: bool,
     ) -> io::Result<()> {
-        writeln!(writer, "LG Buddy Screen Restore Anomaly:")?;
+        if !self.failed {
+            return Ok(());
+        }
+
+        writeln!(writer, "LG Buddy Screen Restore Failure Context:")?;
         writeln!(
             writer,
             "  context: source={} platform={} configured_input={} marker_before={}",
-            event_source_label(self.source),
-            self.platform,
-            self.configured_input.as_str(),
-            marker_state(self.marker_before),
+            event_source_label(event.source),
+            config.tv_platform,
+            config.input.as_str(),
+            marker_state(marker_before),
         )?;
+        writeln!(writer, "  operations: {}", self.entries.join(" | "))?;
         writeln!(
             writer,
-            "  direct_unblank: {}",
-            self.direct_unblank
-                .as_ref()
-                .map(render_tv_step)
-                .unwrap_or_else(|| "not_attempted".to_string())
-        )?;
-        writeln!(
-            writer,
-            "  wake_packets: {}",
-            render_wake_packets(&self.wake_packets)
-        )?;
-        writeln!(
-            writer,
-            "  input_attempts: {}",
-            render_tv_steps(&self.input_attempts)
-        )?;
-        writeln!(
-            writer,
-            "  recovery_unblank_attempts: {}",
-            render_tv_steps(&self.recovery_unblank_attempts)
-        )?;
-        writeln!(
-            writer,
-            "  power_state_observations: {}",
-            render_power_state_observations(&self.power_state_observations)
-        )?;
-        let reconciliation_result = match reconciliation_result {
-            Ok(()) => "verified_active".to_string(),
-            Err(error) => format!(
-                "failed detail={:?}",
-                compact_failure_detail(&error.to_string())
-            ),
-        };
-        writeln!(
-            writer,
-            "  internal_outcome: reconciliation={} marker_after={} total_elapsed_ms={}",
-            reconciliation_result,
+            "  marker_after={} total_elapsed_ms={}",
             marker_state(marker_after),
             self.started_at.elapsed().as_millis(),
         )
@@ -627,7 +547,6 @@ pub(crate) fn run_screen_on_with_outcome_for_event<
     }
 
     let marker_exists = marker.exists();
-    let mut anomaly = ScreenRestoreAnomaly::new(event, config, marker_exists);
     let start_decision = decide_screen_on_start(config.screen_restore_policy, marker_exists);
     render_screen_on_start_decision(writer, config, marker_exists, &start_decision)?;
     let next = start_decision.next;
@@ -637,12 +556,11 @@ pub(crate) fn run_screen_on_with_outcome_for_event<
     }
 
     let tv = TvDevice::new(deps.tv_client, config.tv_ip);
+    let mut trace = ScreenRestoreTrace::new();
     if next == ScreenOnNext::Unblank
-        && execute_screen_on_unblank(writer, marker, &tv, &mut outcome, &mut anomaly)?
+        && execute_screen_on_unblank(writer, marker, &tv, &mut outcome, &mut trace)?
     {
-        if anomaly.command_failed() {
-            anomaly.render(writer, &Ok(()), marker.exists())?;
-        }
+        trace.render_if_failed(writer, event, config, marker_exists, marker.exists())?;
         return Ok(outcome);
     }
 
@@ -657,9 +575,9 @@ pub(crate) fn run_screen_on_with_outcome_for_event<
             sleeper: deps.sleeper,
         },
         &mut outcome,
-        &mut anomaly,
+        &mut trace,
     );
-    anomaly.render(writer, &fallback_result, marker.exists())?;
+    trace.render_if_failed(writer, event, config, marker_exists, marker.exists())?;
     fallback_result?;
     Ok(outcome)
 }
@@ -823,17 +741,11 @@ fn decide_screen_on_after_unblank(
     observation: ScreenOnUnblankObservation,
 ) -> ScreenPolicyDecision<ScreenOnNext> {
     match observation {
-        ScreenOnUnblankObservation::VerifiedActive => ScreenPolicyDecision::with_outcome(
+        ScreenOnUnblankObservation::Succeeded => ScreenPolicyDecision::with_outcome(
             ScreenOnNext::Stop,
             PolicyOutcome::new().with_state_transition(clear_session_marker(
                 TransitionReasonCode::RestoreCompleted,
             )),
-        ),
-        ScreenOnUnblankObservation::SubstateMismatch(detail) => ScreenPolicyDecision::with_outcome(
-            ScreenOnNext::FullWake,
-            PolicyOutcome::new().with_diagnostic(Diagnostic::warning(format!(
-                "screen unblank rejected because the TV is not in the screen-off substate: {detail}"
-            ))),
         ),
         ScreenOnUnblankObservation::Failed(detail) => ScreenPolicyDecision::with_outcome(
             ScreenOnNext::FullWake,
@@ -1051,87 +963,22 @@ fn execute_screen_on_unblank<W: Write, C: TvClient>(
     marker: &ScreenOwnershipMarker,
     tv: &TvDevice<'_, C>,
     outcome: &mut PolicyOutcome,
-    anomaly: &mut ScreenRestoreAnomaly,
+    trace: &mut ScreenRestoreTrace,
 ) -> Result<bool, RunError> {
-    let initial_power_state = observe_screen_power_state(tv, anomaly, "initial");
-    let (unblank_result, observation) = match initial_power_state {
-        Ok(TvPowerState::Active) => (None, ScreenOnUnblankObservation::VerifiedActive),
-        Ok(TvPowerState::ScreenOff) => {
-            let started_at = Instant::now();
-            let unblank_result = tv.screen().unblank();
-            anomaly.direct_unblank = Some(TimedTvStep {
-                elapsed: started_at.elapsed(),
-                outcome: match &unblank_result {
-                    Ok(()) => TvStepOutcome::Succeeded,
-                    Err(error) => TvStepOutcome::Failed(TvFailureSnapshot::from_error(error)),
-                },
-            });
-            let power_state = observe_screen_power_state(tv, anomaly, "after_direct_unblank");
-            let observation = match &power_state {
-                Ok(TvPowerState::Active) => ScreenOnUnblankObservation::VerifiedActive,
-                Ok(state) => match &unblank_result {
-                    Err(error) if error.indicates_screen_unblank_substate_mismatch() => {
-                        ScreenOnUnblankObservation::SubstateMismatch(format!(
-                            "{error}; TV verification reported `{state}`"
-                        ))
-                    }
-                    Err(error) => ScreenOnUnblankObservation::Failed(format!(
-                        "{error}; TV verification reported `{state}`"
-                    )),
-                    Ok(()) => ScreenOnUnblankObservation::Failed(format!(
-                        "screen unblank was acknowledged but TV verification reported `{state}`"
-                    )),
-                },
-                Err(verification_error) => match &unblank_result {
-                    Err(error) if error.indicates_screen_unblank_substate_mismatch() => {
-                        ScreenOnUnblankObservation::SubstateMismatch(format!(
-                            "{error}; TV verification failed: {verification_error}"
-                        ))
-                    }
-                    Err(error) => ScreenOnUnblankObservation::Failed(format!(
-                        "{error}; TV verification failed: {verification_error}"
-                    )),
-                    Ok(()) => ScreenOnUnblankObservation::Failed(format!(
-                        "screen unblank was acknowledged but TV verification failed: {verification_error}"
-                    )),
-                },
-            };
-            (Some(unblank_result), observation)
-        }
-        Ok(state) => (
-            None,
-            ScreenOnUnblankObservation::Failed(format!(
-                "TV verification reported `{state}` before screen unblank"
-            )),
-        ),
-        Err(error) => (
-            None,
-            ScreenOnUnblankObservation::Failed(format!(
-                "could not observe TV power state before screen unblank: {error}"
-            )),
-        ),
+    let result = tv.screen().unblank();
+    trace.record("direct_unblank", &result);
+    let observation = match result {
+        Ok(()) => ScreenOnUnblankObservation::Succeeded,
+        Err(error) => ScreenOnUnblankObservation::Failed(error.to_string()),
     };
     let decision = decide_screen_on_after_unblank(observation.clone());
     apply_screen_state_transitions(marker, &decision.outcome)?;
 
     match observation {
-        ScreenOnUnblankObservation::VerifiedActive => {
-            if matches!(unblank_result, Some(Ok(()))) {
-                writeln!(
-                    writer,
-                    "LG Buddy Screen On: Screen unblank succeeded. Verified TV power state Active. Clearing wake state."
-                )?;
-            } else {
-                writeln!(
-                    writer,
-                    "LG Buddy Screen On: Verified TV power state Active. Clearing wake state."
-                )?;
-            }
-        }
-        ScreenOnUnblankObservation::SubstateMismatch(_) => {
+        ScreenOnUnblankObservation::Succeeded => {
             writeln!(
                 writer,
-                "LG Buddy Screen On: TV rejected screen unblank because it is not in the screen-off substate. Falling back to full wake."
+                "LG Buddy Screen On: Screen unblank succeeded. Clearing wake state."
             )?;
         }
         ScreenOnUnblankObservation::Failed(_) => {}
@@ -1151,7 +998,7 @@ fn execute_screen_on_full_wake<W: Write, C: TvClient, S: WakeOnLanSender, Sl: Sl
     config: &Config,
     deps: ScreenOnWakeDeps<'_, C, S, Sl>,
     outcome: &mut PolicyOutcome,
-    anomaly: &mut ScreenRestoreAnomaly,
+    trace: &mut ScreenRestoreTrace,
 ) -> Result<(), RunError> {
     writeln!(
         writer,
@@ -1162,14 +1009,14 @@ fn execute_screen_on_full_wake<W: Write, C: TvClient, S: WakeOnLanSender, Sl: Sl
         "LG Buddy Screen On: Sending initial Wake-on-LAN packet..."
     )?;
     outcome.merge(select_screen_on_wake_packet());
-    anomaly.wake_packets.push(send_wake_packet(
+    send_wake_packet(
         writer,
         "LG Buddy Screen On",
         deps.tv,
         deps.wol_sender,
         &config.tv_mac,
         outcome,
-    )?);
+    )?;
     deps.sleeper.sleep(screen_on_initial_wake_delay());
 
     for attempt in 1..=SCREEN_ON_WAKE_ATTEMPTS {
@@ -1180,65 +1027,15 @@ fn execute_screen_on_full_wake<W: Write, C: TvClient, S: WakeOnLanSender, Sl: Sl
         )?;
 
         outcome.merge(select_screen_on_input_restore_attempt());
-        let input_started_at = Instant::now();
-        let input_result = deps.tv.input().set(config.input);
-        anomaly.input_attempts.push(TimedTvStep {
-            elapsed: input_started_at.elapsed(),
-            outcome: match &input_result {
-                Ok(()) => TvStepOutcome::Succeeded,
-                Err(error) => TvStepOutcome::Failed(TvFailureSnapshot::from_error(error)),
-            },
-        });
-
-        let power_state =
-            observe_screen_power_state(deps.tv, anomaly, format!("after_input_attempt_{attempt}"));
-        if matches!(power_state, Ok(TvPowerState::Active)) {
+        if attempt_input_restore(deps.tv, config.input, attempt, trace).is_ok() {
             let success_outcome = decide_screen_on_wake_attempt_succeeded();
             apply_screen_state_transitions(deps.marker, &success_outcome)?;
             writeln!(
                 writer,
-                "LG Buddy Screen On: Wake attempt {attempt} succeeded. Verified TV power state Active. Clearing wake state."
+                "LG Buddy Screen On: Wake attempt {attempt} succeeded. Clearing wake state."
             )?;
             outcome.merge(success_outcome);
             return Ok(());
-        }
-
-        if matches!(power_state, Ok(TvPowerState::ScreenOff)) {
-            if input_result.is_ok() {
-                writeln!(
-                    writer,
-                    "LG Buddy Screen On: Fallback input acknowledgement left the TV in Screen Off; reconciling screen visibility."
-                )?;
-            } else {
-                writeln!(
-                    writer,
-                    "LG Buddy Screen On: Fallback input attempt failed and the TV remains in Screen Off; reconciling screen visibility."
-                )?;
-            }
-            let unblank_started_at = Instant::now();
-            let unblank_result = deps.tv.screen().unblank();
-            anomaly.recovery_unblank_attempts.push(TimedTvStep {
-                elapsed: unblank_started_at.elapsed(),
-                outcome: match &unblank_result {
-                    Ok(()) => TvStepOutcome::Succeeded,
-                    Err(error) => TvStepOutcome::Failed(TvFailureSnapshot::from_error(error)),
-                },
-            });
-            let reconciled_power_state = observe_screen_power_state(
-                deps.tv,
-                anomaly,
-                format!("after_recovery_unblank_attempt_{attempt}"),
-            );
-            if matches!(reconciled_power_state, Ok(TvPowerState::Active)) {
-                let success_outcome = decide_screen_on_wake_attempt_succeeded();
-                apply_screen_state_transitions(deps.marker, &success_outcome)?;
-                writeln!(
-                    writer,
-                    "LG Buddy Screen On: Wake attempt {attempt} succeeded. Verified TV power state Active. Clearing wake state."
-                )?;
-                outcome.merge(success_outcome);
-                return Ok(());
-            }
         }
 
         let retry_delay = screen_on_retry_delay(attempt);
@@ -1248,14 +1045,14 @@ fn execute_screen_on_full_wake<W: Write, C: TvClient, S: WakeOnLanSender, Sl: Sl
             retry_delay.as_secs()
         )?;
         outcome.merge(select_screen_on_wake_packet());
-        anomaly.wake_packets.push(send_wake_packet(
+        send_wake_packet(
             writer,
             "LG Buddy Screen On",
             deps.tv,
             deps.wol_sender,
             &config.tv_mac,
             outcome,
-        )?);
+        )?;
         deps.sleeper.sleep(retry_delay);
     }
 
@@ -1269,6 +1066,31 @@ fn execute_screen_on_full_wake<W: Write, C: TvClient, S: WakeOnLanSender, Sl: Sl
     Err(RunError::Policy(format!(
         "screen-on wake sequence failed after {SCREEN_ON_WAKE_ATTEMPTS} attempts"
     )))
+}
+
+fn attempt_input_restore<C: TvClient>(
+    tv: &TvDevice<'_, C>,
+    input: HdmiInput,
+    attempt: u32,
+    trace: &mut ScreenRestoreTrace,
+) -> Result<(), TvError> {
+    let result = tv.input().set(input);
+    trace.record(format!("input_attempt_{attempt}"), &result);
+
+    let Err(error) = result else {
+        return Ok(());
+    };
+    if !error.indicates_screen_not_visible() {
+        return Err(error);
+    }
+
+    let unblank_result = tv.screen().unblank();
+    trace.record(format!("recovery_unblank_{attempt}"), &unblank_result);
+    unblank_result?;
+
+    let retry_result = tv.input().set(input);
+    trace.record(format!("input_retry_{attempt}"), &retry_result);
+    retry_result
 }
 
 fn log_markerless_restore_notice<W: Write>(writer: &mut W, prefix: &str) -> io::Result<()> {
@@ -1285,133 +1107,18 @@ fn send_wake_packet<W: Write, C: TvClient, S: WakeOnLanSender>(
     wol_sender: &S,
     tv_mac: &MacAddress,
     outcome: &mut PolicyOutcome,
-) -> Result<WakePacketSnapshot, RunError> {
-    let started_at = Instant::now();
-    let error = match tv.power().wake(wol_sender, tv_mac) {
-        Ok(()) => None,
-        Err(err) => {
-            let detail = compact_failure_detail(&err.to_string());
-            outcome.diagnostics.push(Diagnostic::warning(format!(
-                "Wake-on-LAN send failed: {err}"
-            )));
-            writeln!(
-                writer,
-                "{prefix}: Wake-on-LAN send failed. Continuing anyway. {err}"
-            )?;
-            Some(detail)
-        }
-    };
-
-    Ok(WakePacketSnapshot {
-        elapsed: started_at.elapsed(),
-        error,
-    })
-}
-
-fn observe_screen_power_state<C: TvClient>(
-    tv: &TvDevice<'_, C>,
-    anomaly: &mut ScreenRestoreAnomaly,
-    stage: impl Into<String>,
-) -> Result<TvPowerState, TvError> {
-    let started_at = Instant::now();
-    let result = tv.power().state();
-    let snapshot_result = match &result {
-        Ok(state) => Ok(state.clone()),
-        Err(error) => Err(TvFailureSnapshot::from_error(error)),
-    };
-    anomaly
-        .power_state_observations
-        .push(TimedPowerStateObservation {
-            stage: stage.into(),
-            elapsed: started_at.elapsed(),
-            result: snapshot_result,
-        });
-    result
-}
-
-fn render_tv_step(step: &TimedTvStep) -> String {
-    match &step.outcome {
-        TvStepOutcome::Succeeded => {
-            format!("succeeded elapsed_ms={}", step.elapsed.as_millis())
-        }
-        TvStepOutcome::Failed(failure) => format!(
-            "failed kind={} elapsed_ms={} detail={:?}",
-            failure.kind.as_str(),
-            step.elapsed.as_millis(),
-            failure.detail,
-        ),
-    }
-}
-
-fn render_tv_steps(steps: &[TimedTvStep]) -> String {
-    if steps.is_empty() {
-        return "none".to_string();
+) -> Result<(), RunError> {
+    if let Err(err) = tv.power().wake(wol_sender, tv_mac) {
+        outcome.diagnostics.push(Diagnostic::warning(format!(
+            "Wake-on-LAN send failed: {err}"
+        )));
+        writeln!(
+            writer,
+            "{prefix}: Wake-on-LAN send failed. Continuing anyway. {err}"
+        )?;
     }
 
-    steps
-        .iter()
-        .enumerate()
-        .map(|(index, step)| format!("attempt_{}=[{}]", index + 1, render_tv_step(step)))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn render_wake_packets(packets: &[WakePacketSnapshot]) -> String {
-    if packets.is_empty() {
-        return "none".to_string();
-    }
-
-    packets
-        .iter()
-        .enumerate()
-        .map(|(index, packet)| match &packet.error {
-            None => format!(
-                "attempt_{}=[sent elapsed_ms={}]",
-                index + 1,
-                packet.elapsed.as_millis()
-            ),
-            Some(error) => format!(
-                "attempt_{}=[failed elapsed_ms={} detail={error:?}]",
-                index + 1,
-                packet.elapsed.as_millis()
-            ),
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn render_power_state_observation(observation: &TimedPowerStateObservation) -> String {
-    match &observation.result {
-        Ok(state) => format!(
-            "state={:?} elapsed_ms={}",
-            state.to_string(),
-            observation.elapsed.as_millis()
-        ),
-        Err(failure) => format!(
-            "failed kind={} elapsed_ms={} detail={:?}",
-            failure.kind.as_str(),
-            observation.elapsed.as_millis(),
-            failure.detail,
-        ),
-    }
-}
-
-fn render_power_state_observations(observations: &[TimedPowerStateObservation]) -> String {
-    if observations.is_empty() {
-        return "none".to_string();
-    }
-
-    observations
-        .iter()
-        .map(|observation| {
-            format!(
-                "{}=[{}]",
-                observation.stage,
-                render_power_state_observation(observation)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+    Ok(())
 }
 
 fn compact_failure_detail(detail: &str) -> String {
@@ -1525,13 +1232,12 @@ mod tests {
     }
 
     use super::{
-        decide_screen_action_eligibility, decide_screen_off_after_input,
-        decide_screen_on_after_unblank, decide_screen_on_start, run_screen_off_with_outcome,
-        run_screen_off_with_outcome_for_event, run_screen_on_with_outcome,
-        run_screen_on_with_outcome_for_event, NoopSystemLifecycleStatusProvider,
-        ScreenActionBlockReason, ScreenActionEligibilityInput, ScreenEligibilityNext,
-        ScreenOffInputObservation, ScreenOffNext, ScreenOnDeps, ScreenOnNext,
-        ScreenOnUnblankObservation, Sleeper, SystemLifecycleStatusProvider,
+        decide_screen_action_eligibility, decide_screen_off_after_input, decide_screen_on_start,
+        run_screen_off_with_outcome, run_screen_off_with_outcome_for_event,
+        run_screen_on_with_outcome, run_screen_on_with_outcome_for_event,
+        NoopSystemLifecycleStatusProvider, ScreenActionBlockReason, ScreenActionEligibilityInput,
+        ScreenEligibilityNext, ScreenOffInputObservation, ScreenOffNext, ScreenOnDeps,
+        ScreenOnNext, Sleeper, SystemLifecycleStatusProvider,
     };
     use crate::config::{
         Config, HdmiInput, MacAddress, ScreenBackend, ScreenIdleBlankPolicy, ScreenRestorePolicy,
@@ -1693,19 +1399,6 @@ mod tests {
     }
 
     #[test]
-    fn pure_screen_on_policy_does_not_claim_an_unattempted_unblank_failed() {
-        let decision = decide_screen_on_after_unblank(ScreenOnUnblankObservation::Failed(
-            "could not observe the initial TV power state".to_string(),
-        ));
-
-        assert_eq!(decision.next, ScreenOnNext::FullWake);
-        assert_eq!(
-            decision.outcome.diagnostics[0].message,
-            "screen visibility could not be verified: could not observe the initial TV power state"
-        );
-    }
-
-    #[test]
     fn screen_off_outcome_records_blank_action_and_marker_creation() {
         let temp_dir = TestDir::new("screen-outcome-off-success");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
@@ -1815,21 +1508,17 @@ mod tests {
         );
         assert!(outcome.no_actions.is_empty());
         assert!(!marker.exists());
-        assert!(!rendered(&output).contains("LG Buddy Screen Restore Anomaly:"));
+        assert!(!rendered(&output).contains("LG Buddy Screen Restore Failure Context:"));
     }
 
     #[test]
-    fn screen_on_fallback_reconciles_false_success_and_records_the_full_state_sequence() {
-        let temp_dir = TestDir::new("screen-on-false-success-snapshot");
+    fn legacy_screen_on_reconciles_input_acknowledged_while_screen_off() {
+        let temp_dir = TestDir::new("legacy-screen-on-false-success");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
         marker.create().expect("create marker");
-        let mock = MockBscpylgtv::new("screen-on-false-success-snapshot-tv");
+        let mock = MockBscpylgtv::new("legacy-screen-on-false-success-tv");
         mock.set_screen_on(false);
-        mock.queue_error(
-            "turn_screen_on",
-            7,
-            "native-like unblank transport failure\n",
-        );
+        mock.queue_error("turn_screen_on", 1, "unblank transport failure\n");
         mock.queue_set_input_ack_without_screen_on();
         let client = client_for_mock(&mock);
         let wol = RecordingWakeOnLanSender::default();
@@ -1838,45 +1527,36 @@ mod tests {
         let mut output = Vec::new();
         run_screen_on_with_outcome(
             &mut output,
-            &sample_config(HdmiInput::Hdmi2),
+            &sample_config(HdmiInput::Hdmi3),
             &marker,
             &client,
             &wol,
             &sleeper,
         )
-        .expect("reconciler should continue after the false acknowledgement");
+        .expect("legacy adapter should reconcile screen visibility");
 
-        let output = rendered(&output);
-        assert!(output.contains("LG Buddy Screen Restore Anomaly:"));
-        assert!(output.contains(
-            "context: source=cli-api platform=bscpylgtv configured_input=HDMI_2 marker_before=present"
-        ));
-        assert!(output.contains("direct_unblank: failed kind=rejected"));
-        assert!(output.contains("native-like unblank transport failure"));
-        assert!(output.contains("wake_packets: attempt_1=[sent"));
-        assert!(output.contains("input_attempts: attempt_1=[succeeded"));
-        assert!(output.contains("recovery_unblank_attempts: attempt_1=[succeeded"));
-        assert!(output.contains("initial=[state=\"Screen Off\""));
-        assert!(output.contains("after_direct_unblank=[state=\"Screen Off\""));
-        assert!(output.contains("after_input_attempt_1=[state=\"Screen Off\""));
-        assert!(output.contains("after_recovery_unblank_attempt_1=[state=\"Active\""));
-        assert!(
-            output.contains("internal_outcome: reconciliation=verified_active marker_after=absent")
-        );
         assert!(!marker.exists());
         assert!(mock.state_snapshot().screen_on);
         assert_call_commands(
             &mock,
             &[
-                "get_power_state",
                 "turn_screen_on",
                 "get_power_state",
                 "set_input",
                 "get_power_state",
                 "turn_screen_on",
                 "get_power_state",
+                "set_input",
+                "get_power_state",
             ],
         );
+        let output = rendered(&output);
+        assert!(output.contains("LG Buddy Screen Restore Failure Context:"));
+        assert!(output.contains("direct_unblank=failed kind=screen_not_visible"));
+        assert!(output.contains("input_attempt_1=failed kind=screen_not_visible"));
+        assert!(output.contains("recovery_unblank_1=succeeded"));
+        assert!(output.contains("input_retry_1=succeeded"));
+        assert!(output.contains("marker_after=absent"));
     }
 
     #[test]

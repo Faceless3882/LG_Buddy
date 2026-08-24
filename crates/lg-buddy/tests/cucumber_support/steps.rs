@@ -267,6 +267,11 @@ fn next_input_restore_attempt_powers_tv_on(world: &mut LgBuddyWorld) {
     world.tv_mut().queue_set_input_wake_success();
 }
 
+#[given("the next input restore attempt is acknowledged without unblanking")]
+fn next_input_restore_attempt_is_acknowledged_without_unblanking(world: &mut LgBuddyWorld) {
+    world.tv_mut().queue_set_input_ack_without_screen_on();
+}
+
 #[given(regex = r#"the backend override is "([^"]+)""#)]
 fn backend_override(world: &mut LgBuddyWorld, backend: String) {
     world.set_backend_override(&backend);

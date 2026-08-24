@@ -161,8 +161,12 @@ Feature: Native webOS TV platform
     Then the command succeeds
     And stdout contains "Screen visibility could not be verified. Falling back to full wake."
     And stdout does not contain "Screen unblank failed."
-    And stdout contains "Fallback input acknowledgement left the TV in Screen Off; reconciling screen visibility."
-    And stdout contains "Verified TV power state Active. Clearing wake state."
+    And stdout contains "LG Buddy Screen Restore Failure Context:"
+    And stdout contains "operations: direct_unblank=failed kind=screen_not_visible"
+    And stdout contains "input_attempt_1=failed kind=screen_not_visible"
+    And stdout contains "recovery_unblank_1=succeeded"
+    And stdout contains "input_retry_1=succeeded"
+    And stdout contains "marker_after=absent"
     And the session marker is absent
     And the TV screen is visible
     And the native TV registration tokens are "webos-test-access-token,webos-test-access-token,webos-test-access-token"
@@ -177,7 +181,7 @@ Feature: Native webOS TV platform
     And the session marker exists
     When I run the command "screen-on"
     Then the command succeeds
-    And stdout contains "Verified TV power state Active. Clearing wake state."
+    And stdout contains "Screen unblank succeeded. Clearing wake state."
     And stdout does not contain "Sending initial Wake-on-LAN packet"
     And the session marker is absent
     And the TV screen is visible
