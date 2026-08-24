@@ -1,7 +1,7 @@
 use std::env;
 use std::io::{self, Write};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::config::{
     load_config, resolve_config_path_from_env, Config, HdmiInput, MacAddress, ScreenRestorePolicy,
@@ -15,7 +15,7 @@ use crate::policy::{
 use crate::runtime_phase::NoopRuntimePhaseProvider;
 use crate::runtime_phase::{LogindRuntimePhaseProvider, RuntimePhaseProvider, RuntimePhaseRead};
 use crate::state::{ScreenOwnershipMarker, StateScope};
-use crate::tv::{build_tv_client, CurrentInput, TvClient, TvClientBuildOptions, TvDevice};
+use crate::tv::{build_tv_client, CurrentInput, TvClient, TvClientBuildOptions, TvDevice, TvError};
 use crate::wol::{UdpWakeOnLanSender, WakeOnLanSender};
 use crate::RunError;
 
@@ -158,8 +158,73 @@ enum ScreenOnNext {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ScreenOnUnblankObservation {
     Succeeded,
-    SubstateMismatch(String),
     Failed(String),
+}
+
+#[derive(Debug)]
+struct ScreenRestoreTrace {
+    started_at: Instant,
+    entries: Vec<String>,
+    failed: bool,
+}
+
+impl ScreenRestoreTrace {
+    fn new() -> Self {
+        Self {
+            started_at: Instant::now(),
+            entries: Vec::new(),
+            failed: false,
+        }
+    }
+
+    fn record(&mut self, operation: impl AsRef<str>, result: &Result<(), TvError>) {
+        let elapsed_ms = self.started_at.elapsed().as_millis();
+        match result {
+            Ok(()) => self.entries.push(format!(
+                "{}=succeeded elapsed_ms={elapsed_ms}",
+                operation.as_ref()
+            )),
+            Err(error) => {
+                self.failed = true;
+                self.entries.push(format!(
+                    "{}=failed kind={} elapsed_ms={elapsed_ms} detail={:?}",
+                    operation.as_ref(),
+                    error.kind().as_str(),
+                    compact_failure_detail(error.detail())
+                ));
+            }
+        }
+    }
+
+    fn render_if_failed<W: Write>(
+        &self,
+        writer: &mut W,
+        event: RuntimeEvent,
+        config: &Config,
+        marker_before: bool,
+        marker_after: bool,
+    ) -> io::Result<()> {
+        if !self.failed {
+            return Ok(());
+        }
+
+        writeln!(writer, "LG Buddy Screen Restore Failure Context:")?;
+        writeln!(
+            writer,
+            "  context: source={} platform={} configured_input={} marker_before={}",
+            event_source_label(event.source),
+            config.tv_platform,
+            config.input.as_str(),
+            marker_state(marker_before),
+        )?;
+        writeln!(writer, "  operations: {}", self.entries.join(" | "))?;
+        writeln!(
+            writer,
+            "  marker_after={} total_elapsed_ms={}",
+            marker_state(marker_after),
+            self.started_at.elapsed().as_millis(),
+        )
+    }
 }
 
 pub(crate) fn run_screen_off_from_env<W: Write>(writer: &mut W) -> Result<(), RunError> {
@@ -491,13 +556,15 @@ pub(crate) fn run_screen_on_with_outcome_for_event<
     }
 
     let tv = TvDevice::new(deps.tv_client, config.tv_ip);
+    let mut trace = ScreenRestoreTrace::new();
     if next == ScreenOnNext::Unblank
-        && execute_screen_on_unblank(writer, marker, &tv, &mut outcome)?
+        && execute_screen_on_unblank(writer, marker, &tv, &mut outcome, &mut trace)?
     {
+        trace.render_if_failed(writer, event, config, marker_exists, marker.exists())?;
         return Ok(outcome);
     }
 
-    execute_screen_on_full_wake(
+    let fallback_result = execute_screen_on_full_wake(
         writer,
         config,
         ScreenOnWakeDeps {
@@ -508,7 +575,10 @@ pub(crate) fn run_screen_on_with_outcome_for_event<
             sleeper: deps.sleeper,
         },
         &mut outcome,
-    )?;
+        &mut trace,
+    );
+    trace.render_if_failed(writer, event, config, marker_exists, marker.exists())?;
+    fallback_result?;
     Ok(outcome)
 }
 
@@ -677,16 +747,10 @@ fn decide_screen_on_after_unblank(
                 TransitionReasonCode::RestoreCompleted,
             )),
         ),
-        ScreenOnUnblankObservation::SubstateMismatch(detail) => ScreenPolicyDecision::with_outcome(
-            ScreenOnNext::FullWake,
-            PolicyOutcome::new().with_diagnostic(Diagnostic::warning(format!(
-                "screen unblank rejected because the TV is not in the screen-off substate: {detail}"
-            ))),
-        ),
         ScreenOnUnblankObservation::Failed(detail) => ScreenPolicyDecision::with_outcome(
             ScreenOnNext::FullWake,
             PolicyOutcome::new().with_diagnostic(Diagnostic::warning(format!(
-                "screen unblank failed: {detail}"
+                "screen visibility could not be verified: {detail}"
             ))),
         ),
     }
@@ -899,13 +963,13 @@ fn execute_screen_on_unblank<W: Write, C: TvClient>(
     marker: &ScreenOwnershipMarker,
     tv: &TvDevice<'_, C>,
     outcome: &mut PolicyOutcome,
+    trace: &mut ScreenRestoreTrace,
 ) -> Result<bool, RunError> {
-    let observation = match tv.screen().unblank() {
-        Ok(_) => ScreenOnUnblankObservation::Succeeded,
-        Err(err) if err.indicates_screen_unblank_substate_mismatch() => {
-            ScreenOnUnblankObservation::SubstateMismatch(err.to_string())
-        }
-        Err(err) => ScreenOnUnblankObservation::Failed(err.to_string()),
+    let result = tv.screen().unblank();
+    trace.record("direct_unblank", &result);
+    let observation = match result {
+        Ok(()) => ScreenOnUnblankObservation::Succeeded,
+        Err(error) => ScreenOnUnblankObservation::Failed(error.to_string()),
     };
     let decision = decide_screen_on_after_unblank(observation.clone());
     apply_screen_state_transitions(marker, &decision.outcome)?;
@@ -915,12 +979,6 @@ fn execute_screen_on_unblank<W: Write, C: TvClient>(
             writeln!(
                 writer,
                 "LG Buddy Screen On: Screen unblank succeeded. Clearing wake state."
-            )?;
-        }
-        ScreenOnUnblankObservation::SubstateMismatch(_) => {
-            writeln!(
-                writer,
-                "LG Buddy Screen On: TV rejected screen unblank because it is not in the screen-off substate. Falling back to full wake."
             )?;
         }
         ScreenOnUnblankObservation::Failed(_) => {}
@@ -940,10 +998,11 @@ fn execute_screen_on_full_wake<W: Write, C: TvClient, S: WakeOnLanSender, Sl: Sl
     config: &Config,
     deps: ScreenOnWakeDeps<'_, C, S, Sl>,
     outcome: &mut PolicyOutcome,
+    trace: &mut ScreenRestoreTrace,
 ) -> Result<(), RunError> {
     writeln!(
         writer,
-        "LG Buddy Screen On: Screen unblank failed. Falling back to full wake."
+        "LG Buddy Screen On: Screen visibility could not be verified. Falling back to full wake."
     )?;
     writeln!(
         writer,
@@ -968,7 +1027,7 @@ fn execute_screen_on_full_wake<W: Write, C: TvClient, S: WakeOnLanSender, Sl: Sl
         )?;
 
         outcome.merge(select_screen_on_input_restore_attempt());
-        if deps.tv.input().set(config.input).is_ok() {
+        if attempt_input_restore(deps.tv, config.input, attempt, trace).is_ok() {
             let success_outcome = decide_screen_on_wake_attempt_succeeded();
             apply_screen_state_transitions(deps.marker, &success_outcome)?;
             writeln!(
@@ -1009,6 +1068,31 @@ fn execute_screen_on_full_wake<W: Write, C: TvClient, S: WakeOnLanSender, Sl: Sl
     )))
 }
 
+fn attempt_input_restore<C: TvClient>(
+    tv: &TvDevice<'_, C>,
+    input: HdmiInput,
+    attempt: u32,
+    trace: &mut ScreenRestoreTrace,
+) -> Result<(), TvError> {
+    let result = tv.input().set(input);
+    trace.record(format!("input_attempt_{attempt}"), &result);
+
+    let Err(error) = result else {
+        return Ok(());
+    };
+    if !error.indicates_screen_not_visible() {
+        return Err(error);
+    }
+
+    let unblank_result = tv.screen().unblank();
+    trace.record(format!("recovery_unblank_{attempt}"), &unblank_result);
+    unblank_result?;
+
+    let retry_result = tv.input().set(input);
+    trace.record(format!("input_retry_{attempt}"), &retry_result);
+    retry_result
+}
+
 fn log_markerless_restore_notice<W: Write>(writer: &mut W, prefix: &str) -> io::Result<()> {
     writeln!(
         writer,
@@ -1035,6 +1119,36 @@ fn send_wake_packet<W: Write, C: TvClient, S: WakeOnLanSender>(
     }
 
     Ok(())
+}
+
+fn compact_failure_detail(detail: &str) -> String {
+    detail
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .map(str::trim)
+        .unwrap_or("no detail")
+        .to_string()
+}
+
+fn event_source_label(source: EventSource) -> &'static str {
+    match source {
+        EventSource::CliApi => "cli-api",
+        EventSource::LinuxLogind => "linux-logind",
+        EventSource::LinuxNetworkManager => "linux-network-manager",
+        EventSource::LinuxSystemd => "linux-systemd",
+        EventSource::DesktopSession => "desktop-session",
+        EventSource::AuxiliaryInput => "auxiliary-input",
+        EventSource::FuturePlatform => "future-platform",
+    }
+}
+
+fn marker_state(exists: bool) -> &'static str {
+    if exists {
+        "present"
+    } else {
+        "absent"
+    }
 }
 
 fn is_session_screen_source(source: EventSource) -> bool {
@@ -1394,6 +1508,55 @@ mod tests {
         );
         assert!(outcome.no_actions.is_empty());
         assert!(!marker.exists());
+        assert!(!rendered(&output).contains("LG Buddy Screen Restore Failure Context:"));
+    }
+
+    #[test]
+    fn legacy_screen_on_reconciles_input_acknowledged_while_screen_off() {
+        let temp_dir = TestDir::new("legacy-screen-on-false-success");
+        let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
+        marker.create().expect("create marker");
+        let mock = MockBscpylgtv::new("legacy-screen-on-false-success-tv");
+        mock.set_screen_on(false);
+        mock.queue_error("turn_screen_on", 1, "unblank transport failure\n");
+        mock.queue_set_input_ack_without_screen_on();
+        let client = client_for_mock(&mock);
+        let wol = RecordingWakeOnLanSender::default();
+        let sleeper = RecordingSleeper::default();
+
+        let mut output = Vec::new();
+        run_screen_on_with_outcome(
+            &mut output,
+            &sample_config(HdmiInput::Hdmi3),
+            &marker,
+            &client,
+            &wol,
+            &sleeper,
+        )
+        .expect("legacy adapter should reconcile screen visibility");
+
+        assert!(!marker.exists());
+        assert!(mock.state_snapshot().screen_on);
+        assert_call_commands(
+            &mock,
+            &[
+                "turn_screen_on",
+                "get_power_state",
+                "set_input",
+                "get_power_state",
+                "turn_screen_on",
+                "get_power_state",
+                "set_input",
+                "get_power_state",
+            ],
+        );
+        let output = rendered(&output);
+        assert!(output.contains("LG Buddy Screen Restore Failure Context:"));
+        assert!(output.contains("direct_unblank=failed kind=screen_not_visible"));
+        assert!(output.contains("input_attempt_1=failed kind=screen_not_visible"));
+        assert!(output.contains("recovery_unblank_1=succeeded"));
+        assert!(output.contains("input_retry_1=succeeded"));
+        assert!(output.contains("marker_after=absent"));
     }
 
     #[test]

@@ -31,6 +31,22 @@ fn mock_set_input_succeeds_and_updates_state() {
 }
 
 #[test]
+fn set_input_acknowledgement_does_not_claim_success_while_screen_off() {
+    let mock = MockBscpylgtv::new("mock-set-input-screen-off-ack");
+    mock.set_screen_on(false);
+    mock.queue_set_input_ack_without_screen_on();
+    let client = mock_client(&mock);
+
+    let error = client
+        .set_input(HdmiInput::Hdmi3)
+        .expect_err("screen-off acknowledgement must not satisfy input restore");
+
+    assert_eq!(error.kind(), TvErrorKind::ScreenNotVisible);
+    assert!(error.detail().contains("power state `Screen Off`"));
+    assert!(!mock.state_snapshot().screen_on);
+}
+
+#[test]
 fn planned_set_input_success_preserves_normal_state_updates() {
     let mock = MockBscpylgtv::new("mock-planned-set-input");
     mock.set_power_on(false);
@@ -75,24 +91,21 @@ fn mock_get_picture_settings_includes_backlight() {
 }
 
 #[test]
-fn mock_turn_screen_on_substate_error_matches_real_traceback_shape() {
+fn mock_turn_screen_on_is_idempotent_when_already_active() {
     let mock = MockBscpylgtv::new("mock-turn-screen-on-substate");
     let client = mock_client(&mock);
 
-    let err = client
+    client
         .unblank_screen()
-        .expect_err("substate mismatch should fail");
+        .expect("active power-state readback should satisfy unblank");
 
-    assert_eq!(err.kind(), TvErrorKind::ScreenUnblankSubstateMismatch);
-    assert!(
-        err.detail().contains("bscpylgtv.exceptions.PyLGTVCmdError"),
-        "detail was: {}",
-        err.detail()
-    );
-    assert!(
-        err.detail().contains("errorCode': '-102'"),
-        "detail was: {}",
-        err.detail()
+    assert!(mock.state_snapshot().screen_on);
+    assert_eq!(
+        mock.calls()
+            .into_iter()
+            .map(|call| call.command)
+            .collect::<Vec<_>>(),
+        vec!["turn_screen_on", "get_power_state"]
     );
 }
 

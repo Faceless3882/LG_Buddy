@@ -64,6 +64,8 @@ pub(in crate::web_os) enum WebOsTestScenario {
     BacklightWriteAcknowledgedWithoutChange,
     CloseAfterFirstInputWrite,
     StallFirstRequest,
+    SameInputWriteAcknowledgedWhileScreenOff,
+    RestoreSessionInterruptedAndInputAckLeavesScreenOff,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,6 +140,7 @@ impl WebOsTestTv {
         request: &Value,
         permissions: &WebOsTestPermissions,
         apply_backlight_write: bool,
+        acknowledge_same_input_while_screen_off: bool,
     ) -> Value {
         assert_eq!(request["type"], "request", "expected webOS request frame");
         let request_id = request["id"].as_str().expect("webOS request ID");
@@ -225,12 +228,24 @@ impl WebOsTestTv {
                 if !permissions.top_level.contains("LAUNCH") {
                     return webos_error(request_id, "401 insufficient permissions", json!({}));
                 }
-                assert_eq!(self.power_state, WebOsPowerState::Active);
                 let input_id = payload["inputId"]
                     .as_str()
                     .expect("switch-input request input ID");
                 assert_eq!(payload, &json!({"inputId": input_id}));
-                self.input = WebOsTestInput::from_input_id(input_id);
+                let requested_input = WebOsTestInput::from_input_id(input_id);
+                if self.power_state == WebOsPowerState::ScreenOff {
+                    assert!(
+                        acknowledge_same_input_while_screen_off,
+                        "no real-TV observation exists for switching input while Screen Off"
+                    );
+                    assert_eq!(
+                        requested_input, self.input,
+                        "the real-TV Screen Off observation only covers acknowledging the current input"
+                    );
+                    return response(request_id, json!({"returnValue": true}));
+                }
+                assert_eq!(self.power_state, WebOsPowerState::Active);
+                self.input = requested_input;
                 self.backlight = self.input.backlight();
                 response(request_id, json!({"returnValue": true}))
             }
@@ -295,6 +310,7 @@ struct WebOsTestRuntime {
     registration_tokens: Vec<Option<String>>,
     ambiguous_input_write_injected: bool,
     stalled_request_injected: bool,
+    restore_session_interruption_injected: bool,
 }
 
 pub(in crate::web_os) struct WebOsTestServer {
@@ -397,6 +413,7 @@ impl WebOsTestServer {
             registration_tokens: Vec::new(),
             ambiguous_input_write_injected: false,
             stalled_request_injected: false,
+            restore_session_interruption_injected: false,
         }));
         let active_connection = Arc::new(Mutex::new(None));
         let stop = Arc::new(AtomicBool::new(false));
@@ -565,6 +582,23 @@ fn serve_connection<S>(
         }
 
         let scenario = runtime.lock().expect("webOS test server state").scenario;
+        if scenario == WebOsTestScenario::RestoreSessionInterruptedAndInputAckLeavesScreenOff {
+            let should_interrupt = {
+                let mut runtime = runtime.lock().expect("webOS test server state");
+                if runtime.restore_session_interruption_injected {
+                    false
+                } else {
+                    runtime.restore_session_interruption_injected = true;
+                    true
+                }
+            };
+            if should_interrupt {
+                socket
+                    .send(Message::Close(None))
+                    .expect("interrupt first webOS restore session");
+                return;
+            }
+        }
         if scenario == WebOsTestScenario::StallFirstRequest {
             let should_stall = {
                 let mut runtime = runtime.lock().expect("webOS test server state");
@@ -587,40 +621,48 @@ fn serve_connection<S>(
             | WebOsTestScenario::PowerStatePermissionDenied
             | WebOsTestScenario::BacklightWriteAcknowledgedWithoutChange
             | WebOsTestScenario::CloseAfterFirstInputWrite
-            | WebOsTestScenario::StallFirstRequest => {
-                let response =
+            | WebOsTestScenario::StallFirstRequest
+            | WebOsTestScenario::SameInputWriteAcknowledgedWhileScreenOff
+            | WebOsTestScenario::RestoreSessionInterruptedAndInputAckLeavesScreenOff => {
+                let response = {
+                    let mut runtime = runtime.lock().expect("webOS test server state");
+                    if scenario == WebOsTestScenario::PowerStatePermissionDenied
+                        && request["uri"] == GET_POWER_STATE_URI
                     {
-                        let mut runtime = runtime.lock().expect("webOS test server state");
-                        if scenario == WebOsTestScenario::PowerStatePermissionDenied
-                            && request["uri"] == GET_POWER_STATE_URI
-                        {
-                            Some(webos_error_without_payload(
-                                request["id"].as_str().expect("webOS request ID"),
-                                "-401 not permitted",
-                            ))
-                        } else if scenario == WebOsTestScenario::CloseAfterFirstInputWrite
-                            && request["uri"] == SET_INPUT_URI
-                            && !runtime.ambiguous_input_write_injected
-                        {
-                            runtime.tv.handle_request(
-                                &request,
-                                permissions
-                                    .as_ref()
-                                    .expect("webOS request sent before registration"),
-                                true,
-                            );
-                            runtime.ambiguous_input_write_injected = true;
-                            None
-                        } else {
-                            Some(runtime.tv.handle_request(
+                        Some(webos_error_without_payload(
+                            request["id"].as_str().expect("webOS request ID"),
+                            "-401 not permitted",
+                        ))
+                    } else if scenario == WebOsTestScenario::CloseAfterFirstInputWrite
+                        && request["uri"] == SET_INPUT_URI
+                        && !runtime.ambiguous_input_write_injected
+                    {
+                        runtime.tv.handle_request(
                             &request,
                             permissions
                                 .as_ref()
                                 .expect("webOS request sent before registration"),
-                            scenario != WebOsTestScenario::BacklightWriteAcknowledgedWithoutChange,
-                        ))
-                        }
-                    };
+                            true,
+                            false,
+                        );
+                        runtime.ambiguous_input_write_injected = true;
+                        None
+                    } else {
+                        Some(runtime.tv.handle_request(
+                                &request,
+                                permissions
+                                    .as_ref()
+                                    .expect("webOS request sent before registration"),
+                                scenario
+                                    != WebOsTestScenario::BacklightWriteAcknowledgedWithoutChange,
+                                matches!(
+                                    scenario,
+                                    WebOsTestScenario::SameInputWriteAcknowledgedWhileScreenOff
+                                        | WebOsTestScenario::RestoreSessionInterruptedAndInputAckLeavesScreenOff
+                                ),
+                            ))
+                    }
+                };
                 match response {
                     Some(response) => {
                         send_json(&mut socket, response);
@@ -694,15 +736,19 @@ where
         | WebOsTestScenario::PowerStatePermissionDenied
         | WebOsTestScenario::BacklightWriteAcknowledgedWithoutChange
         | WebOsTestScenario::CloseAfterFirstInputWrite
-        | WebOsTestScenario::StallFirstRequest => match payload["client-key"].as_str() {
-            Some(token) => send_json(socket, registration_response(request_id, token)),
-            None if payload["client-key"].is_null() => {
-                record_pairing_prompt(runtime);
-                send_json(socket, pairing_prompt_response(request_id));
-                send_json(socket, registration_response(request_id, TEST_ACCESS_TOKEN));
+        | WebOsTestScenario::StallFirstRequest
+        | WebOsTestScenario::SameInputWriteAcknowledgedWhileScreenOff
+        | WebOsTestScenario::RestoreSessionInterruptedAndInputAckLeavesScreenOff => {
+            match payload["client-key"].as_str() {
+                Some(token) => send_json(socket, registration_response(request_id, token)),
+                None if payload["client-key"].is_null() => {
+                    record_pairing_prompt(runtime);
+                    send_json(socket, pairing_prompt_response(request_id));
+                    send_json(socket, registration_response(request_id, TEST_ACCESS_TOKEN));
+                }
+                None => panic!("registration access token is neither a string nor null"),
             }
-            None => panic!("registration access token is neither a string nor null"),
-        },
+        }
         WebOsTestScenario::StoredTokenReplacement => {
             payload["client-key"]
                 .as_str()
@@ -825,7 +871,9 @@ where
         | WebOsTestScenario::PowerStatePermissionDenied
         | WebOsTestScenario::BacklightWriteAcknowledgedWithoutChange
         | WebOsTestScenario::CloseAfterFirstInputWrite
-        | WebOsTestScenario::StallFirstRequest => {
+        | WebOsTestScenario::StallFirstRequest
+        | WebOsTestScenario::SameInputWriteAcknowledgedWhileScreenOff
+        | WebOsTestScenario::RestoreSessionInterruptedAndInputAckLeavesScreenOff => {
             panic!("scenario `{scenario:?}` requires registered stateful handling")
         }
     }

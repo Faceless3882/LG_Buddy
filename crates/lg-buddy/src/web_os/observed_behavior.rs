@@ -84,6 +84,35 @@ fn input_switch_changes_the_observed_foreground_app_and_picture_state() {
 }
 
 // Real-TV wire observation:
+// https://github.com/Staphylococcus/LG_Buddy/issues/70
+#[test]
+fn same_input_switch_is_acknowledged_without_waking_screen_off_tv() {
+    let server = WebOsTestServer::screen_off(WebOsTestInput::Hdmi3);
+    server.set_scenario(WebOsTestScenario::SameInputWriteAcknowledgedWhileScreenOff);
+    let mut client = server
+        .connect_authenticated()
+        .expect("connect to observed Screen Off webOS TV");
+
+    assert_eq!(
+        client.power_state().expect("read initial power state"),
+        WebOsPowerState::ScreenOff
+    );
+    client
+        .switch_input(&WebOsInputId::new("HDMI_3").expect("input ID"))
+        .expect("switch to the current input while Screen Off");
+    assert_eq!(
+        client.power_state().expect("read resulting power state"),
+        WebOsPowerState::ScreenOff
+    );
+    let snapshot = server.snapshot();
+    assert_eq!(snapshot.power_state, WebOsPowerState::ScreenOff);
+    assert_eq!(snapshot.input, WebOsTestInput::Hdmi3);
+
+    drop(client);
+    server.finish();
+}
+
+// Real-TV wire observation:
 // https://github.com/Staphylococcus/LG_Buddy/issues/52#issuecomment-5181831148
 #[test]
 fn backlight_write_is_acknowledged_and_verified_through_independent_readback() {

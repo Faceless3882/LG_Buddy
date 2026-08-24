@@ -127,6 +127,20 @@ impl MockBscpylgtv {
         );
     }
 
+    pub fn queue_set_input_ack_without_screen_on(&self) {
+        self.queue_step(
+            "set_input",
+            json!({
+                "result": "success",
+                "stdout": "{'returnValue': True}\n",
+                "state_update": {
+                    "power_on": true,
+                    "screen_on": false
+                }
+            }),
+        );
+    }
+
     pub fn calls(&self) -> Vec<MockInvocation> {
         self.load_state()
             .get("calls")

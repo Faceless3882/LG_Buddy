@@ -229,6 +229,11 @@ exit 1\n",
         self.webos_tv().stall_first_tv_response();
     }
 
+    pub fn make_native_restore_ambiguous(&self) {
+        self.webos_tv()
+            .interrupt_restore_and_ack_input_without_unblanking();
+    }
+
     pub fn configure_system_logind(&mut self, preparing_for_sleep: bool) {
         let logind = MockSystemLogind::new("cucumber-system-logind");
         logind.reset();

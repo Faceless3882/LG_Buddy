@@ -145,6 +145,49 @@ Feature: Native webOS TV platform
     And the native TV registration tokens are "webos-test-access-token,webos-test-access-token"
     And the native TV pairing prompt count is 0
 
+  Scenario: Native restoration verifies visibility after an ambiguous fallback acknowledgement
+    Given a temporary LG Buddy config using input HDMI_2
+    And the existing config selects TV platform "lg_webos"
+    And LG Buddy session runtime is isolated
+    And a native webOS TV on input HDMI_2 with brightness 90
+    And a valid native TV access token is stored
+    When I run the command "screen-off"
+    Then the command succeeds
+    And the session marker exists
+    And the TV screen is blanked
+    Given the native webOS TV interrupts the first restore session and acknowledges input without unblanking
+    And screen wake delays are disabled
+    When I run the command "screen-on"
+    Then the command succeeds
+    And stdout contains "Screen visibility could not be verified. Falling back to full wake."
+    And stdout does not contain "Screen unblank failed."
+    And stdout contains "LG Buddy Screen Restore Failure Context:"
+    And stdout contains "operations: direct_unblank=failed kind=screen_not_visible"
+    And stdout contains "input_attempt_1=failed kind=screen_not_visible"
+    And stdout contains "recovery_unblank_1=succeeded"
+    And stdout contains "input_retry_1=succeeded"
+    And stdout contains "marker_after=absent"
+    And the session marker is absent
+    And the TV screen is visible
+    And the native TV registration tokens are "webos-test-access-token,webos-test-access-token,webos-test-access-token"
+    And the native TV pairing prompt count is 0
+
+  Scenario: Native restoration retires a stale marker when the TV is already visible
+    Given a temporary LG Buddy config using input HDMI_2
+    And the existing config selects TV platform "lg_webos"
+    And LG Buddy session runtime is isolated
+    And a native webOS TV on input HDMI_2 with brightness 90
+    And a valid native TV access token is stored
+    And the session marker exists
+    When I run the command "screen-on"
+    Then the command succeeds
+    And stdout contains "Screen unblank succeeded. Clearing wake state."
+    And stdout does not contain "Sending initial Wake-on-LAN packet"
+    And the session marker is absent
+    And the TV screen is visible
+    And the native TV connection count is 1
+    And the native TV pairing prompt count is 0
+
   Scenario: Native GNOME inactivity follows the LG Buddy timeout
     Given a temporary LG Buddy config using input HDMI_2
     And the existing config selects TV platform "lg_webos"

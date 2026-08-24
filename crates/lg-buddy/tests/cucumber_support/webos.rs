@@ -56,6 +56,11 @@ impl MockWebOsTv {
             .set_scenario(WebOsTestScenario::StallFirstRequest);
     }
 
+    pub fn interrupt_restore_and_ack_input_without_unblanking(&self) {
+        self.server
+            .set_scenario(WebOsTestScenario::RestoreSessionInterruptedAndInputAckLeavesScreenOff);
+    }
+
     pub fn snapshot(&self) -> MockWebOsTvSnapshot {
         self.assert_healthy();
         let snapshot = self.server.snapshot();
