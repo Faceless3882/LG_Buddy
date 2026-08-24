@@ -47,6 +47,34 @@ main.rs
            -> tv.rs / wol.rs / state.rs
 ```
 
+## Semantic Abstraction Ladder
+
+LG Buddy is organized as a semantic abstraction ladder. Each rung translates
+implementation-specific observations and outcomes into a smaller, stable
+semantic contract for the rung above. For example:
+
+- G923 HID reports become gamepad control observations, then `UserActivity`,
+  then inactivity decisions and screen actions.
+- webOS messages and power states become TV operation outcomes, which screen
+  and lifecycle policy use without knowing the underlying protocol.
+
+Each rung owns the interpretation, validation, postcondition verification, and
+recovery that are fully scoped to its abstraction. It exports stable semantics,
+not its internal representation. Decisions that require broader product context
+remain with the higher-level policy layer.
+
+This confines complexity rather than bubbling it upward. If every low-level
+detail reaches the top, policy must understand every device, provider,
+transport, and platform quirk, making the core progressively harder to reason
+about and change. Allowing each layer to operate at its own altitude limits how
+much of the system any one component must understand, localizes changes and
+tests, and lets new implementations satisfy existing contracts without teaching
+policy their mechanics.
+
+This is the project-wide application of information hiding, Design by Contract,
+and separation of policy from mechanism. The session rule to unify providers
+semantically rather than mechanically is one instance of this principle.
+
 ## System Diagram
 
 The current runtime can be visualized as several consumer paths into the Rust
