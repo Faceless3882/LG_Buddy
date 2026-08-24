@@ -64,6 +64,7 @@ pub(in crate::web_os) enum WebOsTestScenario {
     BacklightWriteAcknowledgedWithoutChange,
     CloseAfterFirstInputWrite,
     StallFirstRequest,
+    SameInputWriteAcknowledgedWhileScreenOff,
     RestoreSessionInterruptedAndInputAckLeavesScreenOff,
 }
 
@@ -139,7 +140,7 @@ impl WebOsTestTv {
         request: &Value,
         permissions: &WebOsTestPermissions,
         apply_backlight_write: bool,
-        allow_input_while_screen_off: bool,
+        acknowledge_same_input_while_screen_off: bool,
     ) -> Value {
         assert_eq!(request["type"], "request", "expected webOS request frame");
         let request_id = request["id"].as_str().expect("webOS request ID");
@@ -227,19 +228,24 @@ impl WebOsTestTv {
                 if !permissions.top_level.contains("LAUNCH") {
                     return webos_error(request_id, "401 insufficient permissions", json!({}));
                 }
-                if allow_input_while_screen_off {
-                    assert!(matches!(
-                        self.power_state,
-                        WebOsPowerState::Active | WebOsPowerState::ScreenOff
-                    ));
-                } else {
-                    assert_eq!(self.power_state, WebOsPowerState::Active);
-                }
                 let input_id = payload["inputId"]
                     .as_str()
                     .expect("switch-input request input ID");
                 assert_eq!(payload, &json!({"inputId": input_id}));
-                self.input = WebOsTestInput::from_input_id(input_id);
+                let requested_input = WebOsTestInput::from_input_id(input_id);
+                if self.power_state == WebOsPowerState::ScreenOff {
+                    assert!(
+                        acknowledge_same_input_while_screen_off,
+                        "no real-TV observation exists for switching input while Screen Off"
+                    );
+                    assert_eq!(
+                        requested_input, self.input,
+                        "the real-TV Screen Off observation only covers acknowledging the current input"
+                    );
+                    return response(request_id, json!({"returnValue": true}));
+                }
+                assert_eq!(self.power_state, WebOsPowerState::Active);
+                self.input = requested_input;
                 self.backlight = self.input.backlight();
                 response(request_id, json!({"returnValue": true}))
             }
@@ -616,6 +622,7 @@ fn serve_connection<S>(
             | WebOsTestScenario::BacklightWriteAcknowledgedWithoutChange
             | WebOsTestScenario::CloseAfterFirstInputWrite
             | WebOsTestScenario::StallFirstRequest
+            | WebOsTestScenario::SameInputWriteAcknowledgedWhileScreenOff
             | WebOsTestScenario::RestoreSessionInterruptedAndInputAckLeavesScreenOff => {
                 let response = {
                     let mut runtime = runtime.lock().expect("webOS test server state");
@@ -648,8 +655,11 @@ fn serve_connection<S>(
                                     .expect("webOS request sent before registration"),
                                 scenario
                                     != WebOsTestScenario::BacklightWriteAcknowledgedWithoutChange,
-                                scenario
-                                    == WebOsTestScenario::RestoreSessionInterruptedAndInputAckLeavesScreenOff,
+                                matches!(
+                                    scenario,
+                                    WebOsTestScenario::SameInputWriteAcknowledgedWhileScreenOff
+                                        | WebOsTestScenario::RestoreSessionInterruptedAndInputAckLeavesScreenOff
+                                ),
                             ))
                     }
                 };
@@ -727,6 +737,7 @@ where
         | WebOsTestScenario::BacklightWriteAcknowledgedWithoutChange
         | WebOsTestScenario::CloseAfterFirstInputWrite
         | WebOsTestScenario::StallFirstRequest
+        | WebOsTestScenario::SameInputWriteAcknowledgedWhileScreenOff
         | WebOsTestScenario::RestoreSessionInterruptedAndInputAckLeavesScreenOff => {
             match payload["client-key"].as_str() {
                 Some(token) => send_json(socket, registration_response(request_id, token)),
@@ -861,6 +872,7 @@ where
         | WebOsTestScenario::BacklightWriteAcknowledgedWithoutChange
         | WebOsTestScenario::CloseAfterFirstInputWrite
         | WebOsTestScenario::StallFirstRequest
+        | WebOsTestScenario::SameInputWriteAcknowledgedWhileScreenOff
         | WebOsTestScenario::RestoreSessionInterruptedAndInputAckLeavesScreenOff => {
             panic!("scenario `{scenario:?}` requires registered stateful handling")
         }
