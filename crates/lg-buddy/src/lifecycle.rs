@@ -630,15 +630,7 @@ pub(crate) fn run_startup_with_outcome<
 
     let mut outcome = PolicyOutcome::new();
     let tv = TvDevice::new(deps.tv_client, config.tv_ip);
-    if let Err(err) = deps.network_waiter.wait_for_network() {
-        outcome
-            .diagnostics
-            .push(Diagnostic::warning(format!("network wait failed: {err}")));
-        writeln!(
-            writer,
-            "LG Buddy Startup: Network wait failed. Continuing anyway. {err}"
-        )?;
-    }
+    wait_for_tv_network(writer, deps.network_waiter, config.tv_ip, &mut outcome)?;
 
     match mode {
         StartupMode::Boot => {
@@ -1360,7 +1352,7 @@ pub(crate) fn restore_after_system_sleep_with_outcome<
         return Ok(outcome);
     }
 
-    wait_for_restore_network(writer, network_waiter, config.tv_ip, &mut outcome)?;
+    wait_for_tv_network(writer, network_waiter, config.tv_ip, &mut outcome)?;
     apply_system_screen_marker_transitions(marker, &start_decision.outcome)?;
     outcome.merge(start_decision.outcome);
     writeln!(writer, "LG Buddy Startup: Sending Wake-on-LAN packet...")?;
@@ -1431,7 +1423,7 @@ pub(crate) fn restore_after_system_sleep_with_outcome<
     Ok(outcome)
 }
 
-fn wait_for_restore_network<W: Write, N: NetworkWaiter>(
+fn wait_for_tv_network<W: Write, N: NetworkWaiter>(
     writer: &mut W,
     network_waiter: &N,
     tv_ip: Ipv4Addr,
@@ -1836,17 +1828,35 @@ fn system_sleep_retry_delay() -> Duration {
 }
 
 fn wait_for_route_to_target(target: Ipv4Addr) -> io::Result<()> {
-    let attempts = tv_route_wait_attempts();
-    let retry_delay = tv_route_wait_delay();
+    wait_for_route_to_target_with(
+        target,
+        tv_route_wait_attempts(),
+        tv_route_wait_delay(),
+        check_route_to_target,
+        thread::sleep,
+    )
+}
+
+fn wait_for_route_to_target_with<P, S>(
+    target: Ipv4Addr,
+    attempts: u32,
+    retry_delay: Duration,
+    mut probe: P,
+    mut sleep: S,
+) -> io::Result<()>
+where
+    P: FnMut(Ipv4Addr) -> io::Result<()>,
+    S: FnMut(Duration),
+{
     let mut last_error = None;
 
     for attempt in 1..=attempts {
-        match check_route_to_target(target) {
+        match probe(target) {
             Ok(()) => return Ok(()),
             Err(err) => {
                 last_error = Some(err);
                 if attempt < attempts {
-                    thread::sleep(retry_delay);
+                    sleep(retry_delay);
                 }
             }
         }
@@ -1884,11 +1894,11 @@ mod tests {
         decide_system_sleep_power_off_result, handle_network_teardown_with_outcome,
         handle_system_suspend_with_outcome, nm_online_status_result,
         restore_after_system_sleep_with_outcome, run_shutdown_with_outcome,
-        run_startup_with_outcome, LifecycleEvent, NetworkTeardownDeps, NetworkTeardownNext,
-        NetworkTeardownPolicyInput, NetworkWaiter, RebootDetector, RebootObservation, RestoreNext,
-        ShutdownNext, Sleeper, StartupDeps, StartupRoute, SuspendRailDisposition,
-        SystemSleepAttemptNext, SystemSleepNext, SystemSleepPowerOffContext, TvEffectObservation,
-        TvInputObservation,
+        run_startup_with_outcome, wait_for_route_to_target_with, LifecycleEvent,
+        NetworkTeardownDeps, NetworkTeardownNext, NetworkTeardownPolicyInput, NetworkWaiter,
+        RebootDetector, RebootObservation, RestoreNext, ShutdownNext, Sleeper, StartupDeps,
+        StartupRoute, SuspendRailDisposition, SystemSleepAttemptNext, SystemSleepNext,
+        SystemSleepPowerOffContext, TvEffectObservation, TvInputObservation,
     };
     use crate::config::{
         Config, HdmiInput, MacAddress, ScreenBackend, ScreenIdleBlankPolicy, ScreenRestorePolicy,
@@ -2129,6 +2139,36 @@ mod tests {
 
         assert_eq!(err.kind(), io::ErrorKind::TimedOut);
         assert!(err.to_string().contains("nm-online exited with"));
+    }
+
+    #[test]
+    fn route_wait_retries_until_tv_route_becomes_available() {
+        let target = ip("192.0.2.42");
+        let retry_delay = Duration::from_millis(500);
+        let mut probes = Vec::new();
+        let mut sleeps = Vec::new();
+
+        wait_for_route_to_target_with(
+            target,
+            3,
+            retry_delay,
+            |candidate| {
+                probes.push(candidate);
+                if probes.len() < 3 {
+                    Err(io::Error::new(
+                        io::ErrorKind::NetworkUnreachable,
+                        "route not ready",
+                    ))
+                } else {
+                    Ok(())
+                }
+            },
+            |duration| sleeps.push(duration),
+        )
+        .expect("route should become available on the third probe");
+
+        assert_eq!(probes, vec![target, target, target]);
+        assert_eq!(sleeps, vec![retry_delay, retry_delay]);
     }
 
     #[test]
@@ -2844,8 +2884,72 @@ mod tests {
         );
         assert!(!marker.exists());
         assert_eq!(network.calls(), 1);
-        assert!(network.route_targets().is_empty());
+        assert_eq!(network.route_targets(), vec![ip("192.0.2.42")]);
         assert_call_commands(&mock, &["set_input", "get_power_state"]);
+    }
+
+    #[test]
+    fn startup_boot_waits_for_tv_route_before_wake_on_lan() {
+        let temp_dir = TestDir::new("lifecycle-startup-route-before-wol");
+        let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
+        let mock = MockBscpylgtv::new("lifecycle-startup-route-before-wol-tv");
+        let client = client_for_mock(&mock);
+        let events = RefCell::new(Vec::new());
+        let wol = OrderedWakeOnLanSender { events: &events };
+        let sleeper = RecordingSleeper::default();
+        let network = OrderedNetworkWaiter { events: &events };
+
+        let mut output = Vec::new();
+        run_startup_with_outcome(
+            &mut output,
+            &sample_config(HdmiInput::Hdmi2),
+            &marker,
+            StartupDeps {
+                tv_client: &client,
+                wol_sender: &wol,
+                sleeper: &sleeper,
+                network_waiter: &network,
+            },
+            StartupMode::Boot,
+        )
+        .expect("startup boot should succeed");
+
+        assert_eq!(*events.borrow(), vec!["network", "route", "wol"]);
+    }
+
+    #[test]
+    fn startup_boot_logs_route_wait_failure_and_still_attempts_restore() {
+        let temp_dir = TestDir::new("lifecycle-startup-route-wait-failure");
+        let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
+        let mock = MockBscpylgtv::new("lifecycle-startup-route-wait-failure-tv");
+        let client = client_for_mock(&mock);
+        let wol = RecordingWakeOnLanSender::default();
+        let sleeper = RecordingSleeper::default();
+        let network =
+            FakeNetworkWaiter::failing_route(io::ErrorKind::NetworkUnreachable, "no route");
+
+        let mut output = Vec::new();
+        run_startup_with_outcome(
+            &mut output,
+            &sample_config(HdmiInput::Hdmi2),
+            &marker,
+            StartupDeps {
+                tv_client: &client,
+                wol_sender: &wol,
+                sleeper: &sleeper,
+                network_waiter: &network,
+            },
+            StartupMode::Boot,
+        )
+        .expect("route wait failure should not block startup restore");
+
+        assert_eq!(network.calls(), 1);
+        assert_eq!(network.route_targets(), vec![ip("192.0.2.42")]);
+        assert_eq!(wol.calls().len(), 1);
+        assert_call_commands(&mock, &["set_input", "get_power_state"]);
+        let rendered = rendered(&output);
+        assert!(rendered.contains("Waiting for route to TV at 192.0.2.42"));
+        assert!(rendered.contains("TV route wait failed. Continuing anyway."));
     }
 
     #[test]
@@ -2936,6 +3040,17 @@ mod tests {
     impl WakeOnLanSender for RecordingWakeOnLanSender {
         fn send_magic_packet(&self, mac: &MacAddress) -> Result<(), WakeOnLanError> {
             self.calls.borrow_mut().push(*mac);
+            Ok(())
+        }
+    }
+
+    struct OrderedWakeOnLanSender<'a> {
+        events: &'a RefCell<Vec<&'static str>>,
+    }
+
+    impl WakeOnLanSender for OrderedWakeOnLanSender<'_> {
+        fn send_magic_packet(&self, _mac: &MacAddress) -> Result<(), WakeOnLanError> {
+            self.events.borrow_mut().push("wol");
             Ok(())
         }
     }
@@ -3032,6 +3147,22 @@ mod tests {
                 Ok(()) => Ok(()),
                 Err(err) => Err(io::Error::new(err.kind(), err.to_string())),
             }
+        }
+    }
+
+    struct OrderedNetworkWaiter<'a> {
+        events: &'a RefCell<Vec<&'static str>>,
+    }
+
+    impl NetworkWaiter for OrderedNetworkWaiter<'_> {
+        fn wait_for_network(&self) -> io::Result<()> {
+            self.events.borrow_mut().push("network");
+            Ok(())
+        }
+
+        fn wait_for_route_to(&self, _target: Ipv4Addr) -> io::Result<()> {
+            self.events.borrow_mut().push("route");
+            Ok(())
         }
     }
 

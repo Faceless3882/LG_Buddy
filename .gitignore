@@ -23,3 +23,6 @@ target/
 
 # Generated release bundles
 dist/
+
+# Repository-local scratch artifacts
+/tmp/
