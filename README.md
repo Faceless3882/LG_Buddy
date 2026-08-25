@@ -55,7 +55,8 @@ The GNOME monitor also observes readable Linux gamepad input devices so
 controller activity can keep the TV output awake even when GNOME does not count
 that input as desktop activity. It refreshes the watched device set when Linux
 reports input-device add, remove, or change events, with a periodic
-reconciliation scan as a fallback.
+reconciliation scan as a fallback. For the Logitech G923 raw HID path, only
+meaningful control changes count as activity; unsolicited status reports do not.
 
 Typical package installs:
 
@@ -118,7 +119,8 @@ LG Buddy is mostly automatic after installation.
   `--notify` to send a desktop notification when an update is available
 - Weekly background update checks are installed by default; opt out with
   `lg-buddy settings set updates.auto_check disabled`
-- To rerun full setup for TV IP, MAC address, or HDMI input, run `./configure.sh`
+- To rerun full setup for TV identity, control platform, or idle behavior, run
+  `./configure.sh`
 - To check the user-session service, run `systemctl --user status LG_Buddy_screen.service`
 - To remove LG Buddy, run `./uninstall.sh`
 
@@ -176,6 +178,14 @@ pairing. Switch back with `lg-buddy settings set tv.platform bscpylgtv`.
 Use the settings command for native opt-in rather than editing
 `tvs_primary_platform` directly, because a direct edit bypasses credential
 preflight.
+
+The native driver keeps the selected TV-control path inside the Rust runtime
+and does not depend on the Python client for those operations. This makes it a
+useful building block for declarative or immutable distributions such as
+NixOS. The current shell installer is not yet a first-class NixOS installation
+path: it still provisions the legacy fallback and writes conventional mutable
+system locations. That packaging work is tracked in
+[issue #24](https://github.com/Staphylococcus/LG_Buddy/issues/24).
 
 If a direct `config.env` edit leaves a value malformed, `lg-buddy settings list`
 and `describe` show it as invalid instead of silently treating it as default or

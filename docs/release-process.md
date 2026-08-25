@@ -5,9 +5,8 @@ with `v` followed by a digit, such as `v1.0.0` or `v1.0.0-beta.1`.
 
 ## What the release workflow does
 
-1. Runs the same validation as CI:
-   - `cargo test -p lg-buddy --lib`
-   - `cargo test -p lg-buddy --test cucumber`
+1. Runs the release validation suite:
+   - `cargo test -p lg-buddy`
    - `cargo clippy -p lg-buddy --all-targets --all-features -- -D warnings`
    - `bash -n install.sh uninstall.sh configure.sh bin/LG_Buddy_Common scripts/build-release-bundle.sh scripts/test-release-bundle.sh scripts/publish-release-assets.sh`
 2. Builds a static Linux binary for `x86_64-unknown-linux-musl`.
@@ -27,15 +26,22 @@ with `v` followed by a digit, such as `v1.0.0` or `v1.0.0-beta.1`.
 
 `install.sh` is only an installer. It does not build the runtime.
 
+The tagged commit should already have passed normal branch CI. Branch CI also
+runs the privileged root-ownership tests; the tag workflow does not repeat
+those two checks.
+
 ## Creating a release
 
 1. Make sure the branch you want to release has passed CI.
-2. Create a tag such as `v0.7.0`.
+2. Create a tag such as `v1.2.0`.
 3. Push the tag.
+4. After the workflow publishes the release, verify the archive against
+   `sha256sums.txt` and replace the generated generic description with concise
+   release-specific notes.
 
 ```bash
-git tag v0.7.0
-git push origin v0.7.0
+git tag v1.2.0
+git push origin v1.2.0
 ```
 
 ## Installing from a release bundle

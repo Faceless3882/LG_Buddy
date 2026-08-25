@@ -4,8 +4,14 @@ This document covers building, local installation, validation, release tooling, 
 
 ## Build Prerequisites
 
+Compiling the Rust runtime requires:
+
 - a Rust toolchain with `cargo`
 - a working C toolchain
+
+Running the interactive installer, exercising the legacy TV fallback, and
+testing release bundles also requires:
+
 - `python3-venv`
 - `python3-pip`
 - `zenity`
@@ -41,7 +47,7 @@ cargo build --release -p lg-buddy
 Official release builds inject version identity into the binary:
 
 ```bash
-LG_BUDDY_RELEASE_VERSION=1.1.0 LG_BUDDY_BUILD_COMMIT="$(git rev-parse HEAD)" cargo build --release -p lg-buddy
+LG_BUDDY_RELEASE_VERSION=1.2.0 LG_BUDDY_BUILD_COMMIT="$(git rev-parse HEAD)" cargo build --release -p lg-buddy
 ```
 
 Without those environment variables, `lg-buddy --version` reports the Cargo
@@ -119,7 +125,10 @@ Smoke test a generated release bundle with:
 ./scripts/test-release-bundle.sh --archive ./dist/lg-buddy-0.0.0-dev-x86_64-unknown-linux-gnu.tar.gz
 ```
 
-The smoke test unpacks the archive, verifies expected files are present, runs a non-interactive install into a temporary root, and then runs uninstall assertions against that temporary install.
+The smoke test unpacks the archive, verifies expected files, and installs into a
+temporary root. It checks both TV platforms, native credential preservation
+across upgrades, lifecycle and NetworkManager hook topology, and uninstall
+cleanup without mutating the host installation.
 
 Dry-run the GitHub release publish step with:
 

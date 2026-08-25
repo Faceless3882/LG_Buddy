@@ -203,8 +203,8 @@ flowchart LR
     SCREEN --> WOL
     LIFECYCLE --> WOL
 
-    TV -->|"production-selected"| BSCPY --> LGTV
-    TV -.->|"internal / test"| WEBOS --> LGTV
+    TV -->|"tv.platform=bscpylgtv"| BSCPY --> LGTV
+    TV -->|"tv.platform=lg_webos"| WEBOS --> LGTV
     WOL -->|"magic packet"| LGTV
 ```
 
@@ -263,6 +263,7 @@ The intended split is:
 - `tv.rs`
   - TV transport abstraction
   - profile-bound `bscpylgtvcommand` adapter
+  - configured selection between the compatibility and native adapters
   - adapter-neutral errors and selected-client construction
   - typed facade for input, screen, power, and brightness operations
 - `web_os/adapter.rs`
@@ -553,9 +554,11 @@ outcomes such as the screen not being visible, but transport and platform state
 remain inside the adapter. Wake-on-LAN keeps the configured network identity at
 `TvDevice`; adapter operations do not accept targeting data.
 
-### Transitional Backend
+### TV Implementations
 
-The current production-side TV backend is still `bscpylgtvcommand`.
+`tv.platform` selects the production TV implementation. `bscpylgtvcommand`
+remains the compatibility default, including when an existing profile has no
+platform value. `lg_webos` explicitly selects the native Rust implementation.
 
 The Rust runtime talks to it through `BscpylgtvCommandClient`, which:
 
@@ -574,6 +577,14 @@ may reconnect for safe read-only verification, but it never replays the
 effectful operation. The legacy adapter performs its equivalent power-state
 readback through `bscpylgtvcommand`; neither implementation exposes webOS power
 states to policy code.
+
+Keeping native TV control within the Rust runtime removes the Python client
+from that selected operation path. This is useful groundwork for declarative or
+immutable distributions such as NixOS, but it is not yet first-class NixOS
+installation support. The shell installer still provisions the compatibility
+fallback and writes conventional mutable system locations; alternative install
+layouts are tracked in
+[issue #24](https://github.com/Staphylococcus/LG_Buddy/issues/24).
 
 ## State Model
 
@@ -721,17 +732,23 @@ The test strategy has three layers:
 - subprocess-backed integration tests for TV behavior
 - manual hardware probes when exact external behavior is unclear
 
-The important current design choice is that TV-facing tests now run against a stateful subprocess mock rather than an in-memory fake.
+TV-facing tests exercise the production protocol boundaries instead of relying
+only on in-memory fakes. The compatibility adapter uses a stateful subprocess
+mock, while the native adapter uses a centralized stateful webOS test server.
 
 Relevant test assets:
 
 - `tools/mock_bscpylgtvcommand.py`
 - `crates/lg-buddy/tests/support/mod.rs`
 - `crates/lg-buddy/tests/mock_bscpylgtvcommand.rs`
+- `crates/lg-buddy/src/web_os/test_support/test_server.rs`
+- `crates/lg-buddy/src/web_os/observed_behavior.rs`
+- `crates/lg-buddy/tests/features/webos.feature`
 
-That mock preserves the real command/response shapes we have already observed
-from the installed TV client, so TV-policy tests exercise the same subprocess
-boundary the runtime uses in production.
+The legacy mock preserves the command and response shapes observed from the
+installed client. Native behavior claimed as real is linked to hardware
+evidence and modeled by the centralized server; defensive protocol faults are
+identified separately. See [Native webOS testing](webos-testing.md).
 
 ## Current Boundary
 
@@ -761,6 +778,7 @@ What is still not implemented:
 
 - `swayidle` `before-sleep`, `after-resume`, `lock`, and `unlock` handling
 - additional desktop backends
-- native WebOS transport
+- an immutable-distribution install layout that avoids conventional `/usr`
+  writes
 
 So the current architecture should be read as a Rust-owned runtime with a thin shell setup surface.

@@ -110,7 +110,8 @@ refreshed when Linux reports input-device add, remove, or change events, and
 periodically reconciled so hot-plugged controllers can be picked up without
 restarting the service. Standard controllers are read through evdev. The
 Logitech G923 also has a raw HID fallback for wheel and pedal activity that is
-not exposed as evdev events on some Linux hosts.
+not exposed as evdev events on some Linux hosts. That fallback reports activity
+only for meaningful control changes, not unsolicited vendor or status reports.
 
 Gamepad activity detection requires the user session running
 `LG_Buddy_screen.service` to have read access to the relevant `/dev/input/event*`
@@ -176,6 +177,7 @@ To change supported settings:
 
 ```bash
 lg-buddy settings set tv.input HDMI_2
+lg-buddy settings set tv.platform lg_webos
 lg-buddy settings set screen.idle_blank disabled
 lg-buddy settings set screen.idle_timeout 600
 lg-buddy settings set screen.restore_policy aggressive
@@ -188,12 +190,13 @@ lg-buddy settings unset screen.restore_policy
 runtime apply step is needed. User-session screen settings restart
 `LG_Buddy_screen.service` when the user service is installed and active or
 enabled. `updates.auto_check` enables or disables the installed user timer for
-background update checks. TV identity, system sleep/wake policy, and update
-channel changes are read by later runtime actions and do not require a service
-restart.
+background update checks. Selecting `tv.platform` performs a foreground
+credential preflight before writing the setting. TV identity, system sleep/wake
+policy, and update channel changes are read by later runtime actions and do not
+require a service restart.
 
-To rerun full setup for TV IP, MAC address, HDMI input, or install-time service
-wiring:
+To rerun full setup for TV identity, control platform, idle behavior, or
+install-time service wiring:
 
 ```bash
 ./configure.sh
@@ -211,6 +214,7 @@ Current config keys:
 - `tvs_primary_ip`
 - `tvs_primary_mac`
 - `tvs_primary_input`
+- `tvs_primary_platform`
 - `screen_idle_blank`
 - `screen_backend`
 - `screen_idle_timeout`
@@ -236,6 +240,7 @@ Current structured settings:
 | `tv.ip` | `tvs_primary_ip` | `get`, `describe`, `set` |
 | `tv.mac` | `tvs_primary_mac` | `get`, `describe`, `set` |
 | `tv.input` | `tvs_primary_input` | `get`, `describe`, `set` |
+| `tv.platform` | `tvs_primary_platform` | `get`, `describe`, `set`, `unset` |
 | `screen.backend` | `screen_backend` | `get`, `describe`, `set`, `unset` |
 | `screen.idle_blank` | `screen_idle_blank` | `get`, `describe`, `set`, `unset` |
 | `screen.idle_timeout` | `screen_idle_timeout` | `get`, `describe`, `set`, `unset` |
@@ -246,8 +251,31 @@ Current structured settings:
 
 The `tv.*` settings expose the single supported TV in the public API. Their
 storage keys are profile-shaped only to leave room for future storage growth;
-this version does not expose multiple TVs or TV profile selection. These values
-are required, so `unset` is not supported.
+this version does not expose multiple TVs or TV profile selection. TV identity
+values are required, so `unset` is not supported for them. Unsetting
+`tv.platform` removes its storage key and restores the `bscpylgtv` default.
+
+`tv.platform` selects one of two control implementations:
+
+- `bscpylgtv`: compatibility default, including existing profiles without a
+  platform value
+- `lg_webos`: experimental native Rust webOS driver
+
+Selecting `lg_webos` through `lg-buddy settings set` connects in the foreground,
+reuses or acquires the profile credential, and verifies it with a safe TV state
+read before saving the choice. Accept the pairing prompt on the TV. Ordinary
+foreground TV operations can also pair or repair credentials when needed.
+Unattended startup, shutdown, suspend, resume, and network-teardown commands
+never initiate pairing: they use a stored credential or skip promptly when one
+is unavailable. Editing `tvs_primary_platform` directly bypasses the selection
+preflight.
+
+The native path removes the Python TV client from selected runtime operations,
+which makes it useful groundwork for declarative or immutable distributions
+such as NixOS. The current installer still provisions the legacy fallback and
+writes conventional mutable system locations, so first-class NixOS packaging is
+future work tracked in
+[issue #24](https://github.com/Staphylococcus/LG_Buddy/issues/24).
 
 `screen_idle_blank` controls whether the user-session service performs automatic
 idle-driven blank/restore behavior:
@@ -305,6 +333,7 @@ Example:
 tvs_primary_ip=192.168.1.100
 tvs_primary_mac=aa:bb:cc:dd:ee:ff
 tvs_primary_input=HDMI_2
+tvs_primary_platform=bscpylgtv
 screen_idle_blank=enabled
 screen_backend=auto
 screen_idle_timeout=300
@@ -325,4 +354,6 @@ chmod +x ./uninstall.sh
 ./uninstall.sh
 ```
 
-This removes the installed services, desktop entry, Rust runtime binary, Python TV-control environment, and optionally the user config file.
+This removes the installed services, desktop entry, Rust runtime binary, and
+Python TV-control environment. If you choose to remove user configuration, it
+also removes the config file and profile-scoped native TV credentials.
