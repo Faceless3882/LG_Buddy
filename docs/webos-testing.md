@@ -44,20 +44,52 @@ scenarios.
 Its stateful TV behavior includes:
 
 - changing the foreground application after an input switch
-- changing picture backlight after an authorized write and exposing the numeric
-  result through a later read
+- applying a picture-backlight Luna callback when its temporary alert closes,
+  then exposing the numeric result through a later SSAP read
 - moving between `Active` and `Screen Off`
 - moving to `Power Off` and rejecting an immediate new registration
+
+The server has exact firmware profiles for observed device behavior:
+
+- `WebOs24Version92261` is the local webOS24 / 9.2.2-61 baseline. It accepts the
+  legacy signed envelope and its direct SSAP brightness write, and it also
+  accepts the unsigned manifest plus alert-backed Luna route. With the unsigned
+  manifest, omitting `WRITE_NOTIFICATION_TOAST` makes `createAlert` return 401.
+  See the earlier [direct-SSAP observation][webos24-direct-ssap] and the current
+  [unsigned/Luna characterization][webos24-luna].
+- `WebOs26Firmware432160` represents external webOS26 / 43.21.60 reports. It
+  rejects the legacy signed registration certificate and direct SSAP brightness
+  writes, while accepting unsigned registration and the alert-backed Luna
+  route. See the external [registration and direct-SSAP report][webos26-direct]
+  and [working Luna-route confirmation][webos26-luna].
+
+Picture writes therefore have two modeled service-invocation paths, but not two
+network transports:
+
+- direct SSAP sends `ssap://settings/setSystemSettings` over the TV websocket
+- alert-backed Luna sends `createAlert` and `closeAlert` over that same
+  websocket, with
+  `luna://com.webos.settingsservice/setSystemSettings` as the on-TV callback
+
+Production always uses the alert-backed Luna path. It does not probe direct
+SSAP, detect firmware, or fall back between paths. The mock retains direct SSAP
+only to preserve the observed version difference and to prove that production
+does not depend on the path rejected by affected firmware.
+
+Profiles represent observations, not a guessed version range. Production does
+not infer behavior for neighboring versions. Named scenarios remain transient
+fault injection layered on top of a selected profile.
 
 The server validates the request URI and payload sent by the client before it
 responds. Controls mutate server state, and later reads expose that state. This
 lets tests verify an operation through an independent observation instead of
 only accepting its immediate acknowledgement.
 
-Tests select semantic scenarios such as registration rejection, response
-timeout, malformed frame, or permission denial. They cannot author raw server
-frames. Successful responses, rejected operations, accepted operations with no
-state change, and transport failures therefore have the same response owner.
+Tests select a firmware profile plus semantic scenarios such as registration
+rejection, response timeout, malformed frame, or permission denial. They cannot
+author raw server frames. Successful responses, rejected operations, accepted
+operations with no state change, and transport failures therefore have the same
+response owner.
 
 Whether a behavior was observed on hardware or introduced as defensive fault
 injection is documented by the test and its evidence link. Provenance does not
@@ -137,8 +169,10 @@ about a device quirk:
 2. Record the initial state, request, response, and resulting state in the
    relevant GitHub issue. Remove access tokens and other secrets.
 3. Add or update an evidence-linked characterization test.
-4. Extend the centralized stateful server with the observed response and state
-   transition. Preserve exact quirks when LG Buddy behavior depends on them.
+4. Extend the matching exact firmware profile in the centralized stateful
+   server with the observed response and state transition. Preserve exact quirks
+   when LG Buddy behavior depends on them; do not infer a version range from one
+   observation.
 5. Add named server scenarios or parser tests for defensive behavior that
    cannot be claimed as an observation.
 6. Use the refined server in the LG Buddy functionality tests for the new
@@ -163,6 +197,11 @@ use the same server and response construction.
 Keeping transport assertions and device-semantics assertions in distinct tests
 makes failures diagnostic: a characterization failure points to device
 semantics, while a WSS test failure points to transport setup.
+
+[webos24-direct-ssap]: https://github.com/Staphylococcus/LG_Buddy/issues/52#issuecomment-5183221492
+[webos24-luna]: https://github.com/Staphylococcus/LG_Buddy/issues/76#issuecomment-5420796570
+[webos26-direct]: https://github.com/JPersson77/LGTVCompanion/issues/351#issuecomment-5277399395
+[webos26-luna]: https://github.com/JPersson77/LGTVCompanion/issues/351#issuecomment-5309740894
 
 ## Review Checklist
 

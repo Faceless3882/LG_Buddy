@@ -5,7 +5,7 @@ Feature: Native webOS TV platform
 
   Scenario: Initial configuration selects and pairs the native platform
     Given an empty temporary LG Buddy config path
-    And a native webOS TV on input HDMI_2 with brightness 90
+    And a native webOS26 TV on firmware 43.21.60 on input HDMI_2 with brightness 90
     When I choose native webOS during initial configuration
     Then the command succeeds
     And stdout contains "TV Platform:         lg_webos"
@@ -114,10 +114,22 @@ Feature: Native webOS TV platform
     And the native TV connection count is 1
     And the native TV registration tokens are "none"
 
-  Scenario: Native brightness writes use the observed signed protocol and update the TV
+  Scenario: Native brightness writes use the Luna bridge on available webOS24
     Given a temporary LG Buddy config using input HDMI_2
     And the existing config selects TV platform "lg_webos"
     And a native webOS TV on input HDMI_2 with brightness 90
+    And a valid native TV access token is stored
+    When I run the command "brightness set 66"
+    Then the command succeeds
+    And stdout contains "Set OLED pixel brightness to 66%."
+    And the TV brightness is 66
+    And the native TV registration tokens are "webos-test-access-token"
+    And the native TV pairing prompt count is 0
+
+  Scenario: Native brightness writes use the Luna bridge on affected webOS26 firmware
+    Given a temporary LG Buddy config using input HDMI_2
+    And the existing config selects TV platform "lg_webos"
+    And a native webOS26 TV on firmware 43.21.60 on input HDMI_2 with brightness 90
     And a valid native TV access token is stored
     When I run the command "brightness set 66"
     Then the command succeeds

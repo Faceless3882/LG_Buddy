@@ -56,6 +56,13 @@ fn native_webos_tv(world: &mut LgBuddyWorld, input: String, brightness: u8) {
     world.create_native_webos_tv(&input, brightness);
 }
 
+#[given(
+    regex = r#"a native webOS26 TV on firmware 43\.21\.60 on input (HDMI_[23]) with brightness (\d+)"#
+)]
+fn webos26_firmware_43_21_60_tv(world: &mut LgBuddyWorld, input: String, brightness: u8) {
+    world.create_webos26_firmware_43_21_60_tv(&input, brightness);
+}
+
 #[given(regex = r#"the existing config selects TV platform \"(bscpylgtv|lg_webos)\""#)]
 fn existing_tv_platform(world: &mut LgBuddyWorld, platform: String) {
     world.select_tv_platform(&platform);

@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 
 const REGISTRATION_MESSAGE_TYPE: &str = "register";
 const PAIRING_PROMPT_TYPE: &str = "PROMPT";
-// Keep grants limited to envelopes confirmed by hardware characterization.
+// Keep grants limited to permissions exercised by LG Buddy.
 // Changing this manifest may invalidate stored client keys and require re-pairing.
 const REGISTRATION_MANIFEST_JSON: &str = include_str!("registration_manifest.json");
 
@@ -349,7 +349,7 @@ mod tests {
     }
 
     #[test]
-    fn registration_request_without_token_uses_observed_write_capable_manifest() {
+    fn registration_request_without_token_uses_unsigned_minimal_manifest() {
         let request =
             WebOsRegistrationRequest::new(REQUEST_ID, None).expect("registration request");
         let value = request.to_json_value();
@@ -360,7 +360,6 @@ mod tests {
         assert_eq!(value["payload"]["client-key"], Value::Null);
         assert_eq!(value["payload"]["forcePairing"], false);
         assert_eq!(value["payload"]["pairingType"], "PROMPT");
-        assert_eq!(manifest["appVersion"], "1.1");
         assert_eq!(manifest["manifestVersion"], 1);
         assert_eq!(
             manifest["permissions"],
@@ -370,36 +369,14 @@ mod tests {
                 "LAUNCH",
                 "READ_POWER_STATE",
                 "READ_RUNNING_APPS",
-                "READ_SETTINGS"
-            ])
-        );
-        assert_eq!(manifest["signatures"][0]["signatureVersion"], 1);
-        assert!(manifest["signatures"][0]["signature"]
-            .as_str()
-            .is_some_and(|signature| !signature.is_empty()));
-        assert_eq!(manifest["signed"]["appId"], "com.lge.test");
-        assert_eq!(manifest["signed"]["vendorId"], "com.lge");
-        assert_eq!(
-            manifest["signed"]["permissions"],
-            json!([
-                "TEST_SECURE",
-                "CONTROL_INPUT_TEXT",
-                "CONTROL_MOUSE_AND_KEYBOARD",
-                "READ_INSTALLED_APPS",
-                "READ_LGE_SDX",
-                "READ_NOTIFICATIONS",
-                "SEARCH",
-                "WRITE_SETTINGS",
+                "READ_SETTINGS",
                 "WRITE_NOTIFICATION_ALERT",
-                "CONTROL_POWER",
-                "READ_CURRENT_CHANNEL",
-                "READ_RUNNING_APPS",
-                "READ_UPDATE_INFO",
-                "UPDATE_FROM_REMOTE_APP",
-                "READ_LGE_TV_INPUT_EVENTS",
-                "READ_TV_CURRENT_TIME"
+                "WRITE_NOTIFICATION_TOAST",
+                "WRITE_SETTINGS"
             ])
         );
+        assert!(manifest.get("signed").is_none());
+        assert!(manifest.get("signatures").is_none());
         assert_eq!(value["payload"]["manifest"], *manifest);
         assert_eq!(
             serde_json::from_str::<Value>(&request.to_json_string())

@@ -560,7 +560,8 @@ fn set_backlight_brightness_failure(
 ) -> WebOsAdapterFailure {
     let detail = error.to_string();
     match error {
-        WebOsSetBacklightBrightnessError::Control { source } => {
+        WebOsSetBacklightBrightnessError::CreateLunaBridge { source }
+        | WebOsSetBacklightBrightnessError::CloseLunaBridge { source } => {
             let mut failure = control_failure(source);
             failure.detail = detail;
             failure
@@ -573,9 +574,9 @@ fn set_backlight_brightness_failure(
         WebOsSetBacklightBrightnessError::NotApplied { .. } => {
             WebOsAdapterFailure::new(TvErrorKind::Rejected, detail, false)
         }
-        WebOsSetBacklightBrightnessError::MissingMethod
-        | WebOsSetBacklightBrightnessError::InvalidMethod
-        | WebOsSetBacklightBrightnessError::UnexpectedMethod { .. } => {
+        WebOsSetBacklightBrightnessError::MissingAlertId
+        | WebOsSetBacklightBrightnessError::InvalidAlertId { .. }
+        | WebOsSetBacklightBrightnessError::UnexpectedAlertId { .. } => {
             WebOsAdapterFailure::new(TvErrorKind::InvalidResponse, detail, false)
         }
     }
@@ -600,7 +601,7 @@ mod tests {
     use crate::config::HdmiInput;
     use crate::tv::{CurrentInput, OledBrightness, SelectedTvClient, TvClient, TvErrorKind};
     use crate::web_os::test_support::{
-        TestAccessTokenStore, WebOsTestInput, WebOsTestScenario, WebOsTestServer,
+        TestAccessTokenStore, WebOsTestInput, WebOsTestScenario, WebOsTestServer, WebOsTestVersion,
     };
     use crate::web_os::WebOsPowerState;
     use std::fs;
@@ -611,7 +612,8 @@ mod tests {
 
     #[test]
     fn ordinary_operation_pairs_and_persists_a_missing_token() {
-        let server = WebOsTestServer::active(WebOsTestInput::Hdmi3);
+        let server =
+            WebOsTestServer::active(WebOsTestVersion::WebOs24Version92261, WebOsTestInput::Hdmi3);
         let token_fixture = TestAccessTokenStore::new();
         fs::remove_file(token_fixture.store().token_path()).expect("remove stored token");
         let client = client_for_server(&server, &token_fixture);
@@ -631,7 +633,10 @@ mod tests {
 
     #[test]
     fn ordinary_operation_repairs_a_rejected_token() {
-        let server = WebOsTestServer::for_scenario(WebOsTestScenario::StoredTokenPairingPrompt);
+        let server = WebOsTestServer::for_scenario(
+            WebOsTestVersion::WebOs24Version92261,
+            WebOsTestScenario::StoredTokenPairingPrompt,
+        );
         let token_fixture = TestAccessTokenStore::new();
         let client = client_for_server(&server, &token_fixture);
 
@@ -650,7 +655,8 @@ mod tests {
 
     #[test]
     fn stored_token_only_operation_returns_immediately_when_token_is_missing() {
-        let server = WebOsTestServer::active(WebOsTestInput::Hdmi3);
+        let server =
+            WebOsTestServer::active(WebOsTestVersion::WebOs24Version92261, WebOsTestInput::Hdmi3);
         let token_fixture = TestAccessTokenStore::new();
         fs::remove_file(token_fixture.store().token_path()).expect("remove stored token");
         let client = client_for_server_with_policy(
@@ -671,7 +677,10 @@ mod tests {
 
     #[test]
     fn stored_token_only_operation_does_not_repair_a_rejected_token() {
-        let server = WebOsTestServer::for_scenario(WebOsTestScenario::StoredTokenPairingPrompt);
+        let server = WebOsTestServer::for_scenario(
+            WebOsTestVersion::WebOs24Version92261,
+            WebOsTestScenario::StoredTokenPairingPrompt,
+        );
         let token_fixture = TestAccessTokenStore::new();
         let original = token_fixture
             .store()
@@ -699,7 +708,10 @@ mod tests {
 
     #[test]
     fn effectful_operation_does_not_retry_a_definitive_authentication_failure() {
-        let server = WebOsTestServer::for_scenario(WebOsTestScenario::StoredTokenPairingPrompt);
+        let server = WebOsTestServer::for_scenario(
+            WebOsTestVersion::WebOs24Version92261,
+            WebOsTestScenario::StoredTokenPairingPrompt,
+        );
         let token_fixture = TestAccessTokenStore::new();
         let client = client_for_server_with_policy(
             &server,
@@ -718,7 +730,8 @@ mod tests {
 
     #[test]
     fn complete_tv_contract_reuses_one_authenticated_session() {
-        let server = WebOsTestServer::active(WebOsTestInput::Hdmi3);
+        let server =
+            WebOsTestServer::active(WebOsTestVersion::WebOs24Version92261, WebOsTestInput::Hdmi3);
         let token_fixture = TestAccessTokenStore::new();
         let client = SelectedTvClient::WebOs(Box::new(client_for_server(&server, &token_fixture)));
 
@@ -767,7 +780,10 @@ mod tests {
 
     #[test]
     fn ambiguous_write_is_not_replayed_and_safe_readback_resolves_success() {
-        let server = WebOsTestServer::for_scenario(WebOsTestScenario::CloseAfterFirstInputWrite);
+        let server = WebOsTestServer::for_scenario(
+            WebOsTestVersion::WebOs24Version92261,
+            WebOsTestScenario::CloseAfterFirstInputWrite,
+        );
         let token_fixture = TestAccessTokenStore::new();
         let client = client_for_server(&server, &token_fixture);
 
@@ -797,7 +813,8 @@ mod tests {
 
     #[test]
     fn unblank_is_idempotent_when_the_screen_is_already_active() {
-        let server = WebOsTestServer::active(WebOsTestInput::Hdmi3);
+        let server =
+            WebOsTestServer::active(WebOsTestVersion::WebOs24Version92261, WebOsTestInput::Hdmi3);
         let token_fixture = TestAccessTokenStore::new();
         let client = client_for_server(&server, &token_fixture);
 
@@ -816,7 +833,8 @@ mod tests {
 
     #[test]
     fn set_input_reports_screen_not_visible_when_screen_off_ack_changes_nothing() {
-        let server = WebOsTestServer::active(WebOsTestInput::Hdmi3);
+        let server =
+            WebOsTestServer::active(WebOsTestVersion::WebOs24Version92261, WebOsTestInput::Hdmi3);
         let token_fixture = TestAccessTokenStore::new();
         let client = client_for_server(&server, &token_fixture);
         client.blank_screen().expect("blank screen");
@@ -834,7 +852,10 @@ mod tests {
 
     #[test]
     fn power_off_requires_active_state_and_keeps_rejected_session_usable() {
-        let server = WebOsTestServer::screen_off(WebOsTestInput::Hdmi3);
+        let server = WebOsTestServer::screen_off(
+            WebOsTestVersion::WebOs24Version92261,
+            WebOsTestInput::Hdmi3,
+        );
         let token_fixture = TestAccessTokenStore::new();
         let client = client_for_server(&server, &token_fixture);
 

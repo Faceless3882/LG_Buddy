@@ -2,7 +2,7 @@ use crate::support::{
     ExecutableScript, MockBscpylgtv, MockNmOnline, MockSessionBusIdleMonitor, MockSwayidle,
     MockSystemLogind, RuntimeStateLayout, TestConfigFile, TestEnv,
 };
-use crate::web_os::{MockWebOsTv, MockWebOsTvSnapshot, VALID_WEBOS_ACCESS_TOKEN};
+use crate::web_os::{MockWebOsTv, MockWebOsTvSnapshot, MockWebOsVersion, VALID_WEBOS_ACCESS_TOKEN};
 use cucumber::World;
 use lg_buddy::auth::resolve_bscpylgtv_auth_context_from_env;
 use std::fmt;
@@ -190,10 +190,31 @@ exit 1\n",
     }
 
     pub fn create_native_webos_tv(&mut self, input: &str, backlight: u8) {
+        self.create_native_webos_tv_with_version(
+            MockWebOsVersion::WebOs24Version92261,
+            input,
+            backlight,
+        );
+    }
+
+    pub fn create_webos26_firmware_43_21_60_tv(&mut self, input: &str, backlight: u8) {
+        self.create_native_webos_tv_with_version(
+            MockWebOsVersion::WebOs26Firmware432160,
+            input,
+            backlight,
+        );
+    }
+
+    fn create_native_webos_tv_with_version(
+        &mut self,
+        version: MockWebOsVersion,
+        input: &str,
+        backlight: u8,
+    ) {
         if self.config().path().exists() {
             self.config().set_value("tvs_primary_ip", "127.0.0.1");
         }
-        let tv = MockWebOsTv::new(input);
+        let tv = MockWebOsTv::with_version(version, input);
         assert_eq!(
             tv.snapshot().backlight,
             backlight,

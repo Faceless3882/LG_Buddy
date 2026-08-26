@@ -578,6 +578,20 @@ effectful operation. The legacy adapter performs its equivalent power-state
 readback through `bscpylgtvcommand`; neither implementation exposes webOS power
 states to policy code.
 
+Native picture settings have two known service-invocation paths. A direct SSAP
+write sends `ssap://settings/setSystemSettings` on the websocket. The Luna path
+uses that same websocket to create and close a temporary notification alert;
+the alert callback invokes
+`luna://com.webos.settingsservice/setSystemSettings` inside the TV. Luna is
+therefore not a second network transport.
+
+LG Buddy uses only the alert-backed Luna path for brightness writes. It does not
+try direct SSAP first, select a path from detected firmware, or fall back between
+the two. Direct SSAP is rejected on affected firmware, while the Luna path is
+the one supported by both evidence-backed firmware profiles. The direct path
+remains represented in tests only so the mock can preserve the observed
+firmware difference.
+
 Keeping native TV control within the Rust runtime removes the Python client
 from that selected operation path. This is useful groundwork for declarative or
 immutable distributions such as NixOS, but it is not yet first-class NixOS

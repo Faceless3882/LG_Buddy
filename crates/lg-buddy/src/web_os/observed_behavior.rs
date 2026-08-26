@@ -1,4 +1,4 @@
-use super::test_support::{WebOsTestInput, WebOsTestScenario, WebOsTestServer};
+use super::test_support::{WebOsTestInput, WebOsTestScenario, WebOsTestServer, WebOsTestVersion};
 use super::{
     WebOsAuthenticatedClientError, WebOsBacklightBrightness, WebOsClientError,
     WebOsClientRegistrationError, WebOsControlError, WebOsInputId, WebOsPowerState,
@@ -15,7 +15,8 @@ const TURN_ON_SCREEN_LEGACY_URI: &str = "ssap://com.webos.service.tv.power/turnO
 // https://github.com/Staphylococcus/LG_Buddy/issues/50#issuecomment-5102531370
 #[test]
 fn read_operations_return_the_observed_active_tv_state() {
-    let server = WebOsTestServer::active(WebOsTestInput::Hdmi3);
+    let server =
+        WebOsTestServer::active(WebOsTestVersion::WebOs24Version92261, WebOsTestInput::Hdmi3);
     let mut client = server
         .connect_authenticated()
         .expect("connect to observed webOS TV");
@@ -48,7 +49,8 @@ fn read_operations_return_the_observed_active_tv_state() {
 // https://github.com/Staphylococcus/LG_Buddy/issues/50#issuecomment-5179994257
 #[test]
 fn input_switch_changes_the_observed_foreground_app_and_picture_state() {
-    let server = WebOsTestServer::active(WebOsTestInput::Hdmi3);
+    let server =
+        WebOsTestServer::active(WebOsTestVersion::WebOs24Version92261, WebOsTestInput::Hdmi3);
     let mut client = server
         .connect_authenticated()
         .expect("connect to observed webOS TV");
@@ -87,7 +89,8 @@ fn input_switch_changes_the_observed_foreground_app_and_picture_state() {
 // https://github.com/Staphylococcus/LG_Buddy/issues/70
 #[test]
 fn same_input_switch_is_acknowledged_without_waking_screen_off_tv() {
-    let server = WebOsTestServer::screen_off(WebOsTestInput::Hdmi3);
+    let server =
+        WebOsTestServer::screen_off(WebOsTestVersion::WebOs24Version92261, WebOsTestInput::Hdmi3);
     server.set_scenario(WebOsTestScenario::SameInputWriteAcknowledgedWhileScreenOff);
     let mut client = server
         .connect_authenticated()
@@ -112,43 +115,53 @@ fn same_input_switch_is_acknowledged_without_waking_screen_off_tv() {
     server.finish();
 }
 
-// Real-TV wire observation:
-// https://github.com/Staphylococcus/LG_Buddy/issues/52#issuecomment-5181831148
+// Local webOS24 observation:
+// https://github.com/Staphylococcus/LG_Buddy/issues/76#issuecomment-5420796570
+// External webOS26 wire observation and hardware confirmation:
+// https://github.com/JPersson77/LGTVCompanion/issues/351#issuecomment-5308314909
+// https://github.com/JPersson77/LGTVCompanion/issues/351#issuecomment-5309740894
 #[test]
-fn backlight_write_is_acknowledged_and_verified_through_independent_readback() {
-    let server = WebOsTestServer::active(WebOsTestInput::Hdmi2);
-    let mut client = server
-        .connect_authenticated()
-        .expect("connect to observed webOS TV");
-    let requested = WebOsBacklightBrightness::new(75).expect("backlight brightness");
+fn luna_backlight_write_is_verified_on_each_observed_firmware_profile() {
+    for version in [
+        WebOsTestVersion::WebOs24Version92261,
+        WebOsTestVersion::WebOs26Firmware432160,
+    ] {
+        let server = WebOsTestServer::active(version, WebOsTestInput::Hdmi2);
+        let mut client = server
+            .connect_authenticated()
+            .expect("connect to observed webOS TV profile");
+        let requested = WebOsBacklightBrightness::new(75).expect("backlight brightness");
 
-    assert_eq!(
+        assert_eq!(
+            client
+                .backlight_brightness()
+                .expect("read initial backlight brightness")
+                .as_percent(),
+            90
+        );
         client
-            .backlight_brightness()
-            .expect("read initial backlight brightness")
-            .as_percent(),
-        90
-    );
-    client
-        .set_backlight_brightness(requested)
-        .expect("set and verify backlight brightness");
-    assert_eq!(
-        client
-            .backlight_brightness()
-            .expect("read resulting backlight brightness"),
-        requested
-    );
+            .set_backlight_brightness(requested)
+            .expect("set and verify backlight brightness through Luna bridge");
+        assert_eq!(
+            client
+                .backlight_brightness()
+                .expect("read resulting backlight brightness"),
+            requested
+        );
 
-    drop(client);
-    server.finish();
+        drop(client);
+        server.finish();
+    }
 }
 
 // Synthetic fault injection: the real TV applied the observed acknowledged write,
 // but callers must still detect a device that acknowledges without changing state.
 #[test]
 fn acknowledged_backlight_write_with_unchanged_state_is_typed_failure() {
-    let server =
-        WebOsTestServer::for_scenario(WebOsTestScenario::BacklightWriteAcknowledgedWithoutChange);
+    let server = WebOsTestServer::for_scenario(
+        WebOsTestVersion::WebOs24Version92261,
+        WebOsTestScenario::BacklightWriteAcknowledgedWithoutChange,
+    );
     let mut client = server
         .connect_authenticated()
         .expect("connect to synthetic unchanged-state TV");
@@ -168,7 +181,8 @@ fn acknowledged_backlight_write_with_unchanged_state_is_typed_failure() {
 // https://github.com/Staphylococcus/LG_Buddy/issues/51#issuecomment-5176461983
 #[test]
 fn screen_off_transitions_active_tv_to_screen_off() {
-    let server = WebOsTestServer::active(WebOsTestInput::Hdmi3);
+    let server =
+        WebOsTestServer::active(WebOsTestVersion::WebOs24Version92261, WebOsTestInput::Hdmi3);
     let mut client = server
         .connect_authenticated()
         .expect("connect to observed webOS TV");
@@ -195,7 +209,8 @@ fn screen_off_transitions_active_tv_to_screen_off() {
 // https://github.com/Staphylococcus/LG_Buddy/issues/51#issuecomment-5176461983
 #[test]
 fn screen_on_transitions_screen_off_tv_to_active() {
-    let server = WebOsTestServer::screen_off(WebOsTestInput::Hdmi3);
+    let server =
+        WebOsTestServer::screen_off(WebOsTestVersion::WebOs24Version92261, WebOsTestInput::Hdmi3);
     let mut client = server
         .connect_authenticated()
         .expect("connect to observed webOS TV");
@@ -222,7 +237,8 @@ fn screen_on_transitions_screen_off_tv_to_active() {
 // https://github.com/Staphylococcus/LG_Buddy/issues/51#issuecomment-5176461983
 #[test]
 fn screen_on_while_active_preserves_the_observed_substate_error() {
-    let server = WebOsTestServer::active(WebOsTestInput::Hdmi3);
+    let server =
+        WebOsTestServer::active(WebOsTestVersion::WebOs24Version92261, WebOsTestInput::Hdmi3);
     let mut client = server
         .connect_authenticated()
         .expect("connect to observed webOS TV");
@@ -254,7 +270,8 @@ fn screen_on_while_active_preserves_the_observed_substate_error() {
 // https://github.com/Staphylococcus/LG_Buddy/issues/51#issuecomment-5176461983
 #[test]
 fn legacy_screen_endpoints_are_unavailable_and_do_not_change_state() {
-    let server = WebOsTestServer::active(WebOsTestInput::Hdmi3);
+    let server =
+        WebOsTestServer::active(WebOsTestVersion::WebOs24Version92261, WebOsTestInput::Hdmi3);
     let mut client = server
         .connect_authenticated()
         .expect("connect to observed webOS TV");
@@ -282,7 +299,8 @@ fn legacy_screen_endpoints_are_unavailable_and_do_not_change_state() {
 // https://github.com/Staphylococcus/LG_Buddy/issues/51#issuecomment-5176463406
 #[test]
 fn power_off_transitions_active_tv_and_rejects_immediate_registration() {
-    let server = WebOsTestServer::active(WebOsTestInput::Hdmi3);
+    let server =
+        WebOsTestServer::active(WebOsTestVersion::WebOs24Version92261, WebOsTestInput::Hdmi3);
     let mut client = server
         .connect_authenticated()
         .expect("connect to observed webOS TV");
