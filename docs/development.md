@@ -47,7 +47,7 @@ cargo build --release -p lg-buddy
 Official release builds inject version identity into the binary:
 
 ```bash
-LG_BUDDY_RELEASE_VERSION=1.2.0 LG_BUDDY_BUILD_COMMIT="$(git rev-parse HEAD)" cargo build --release -p lg-buddy
+LG_BUDDY_RELEASE_VERSION=1.2.1 LG_BUDDY_BUILD_COMMIT="$(git rev-parse HEAD)" cargo build --release -p lg-buddy
 ```
 
 Without those environment variables, `lg-buddy --version` reports the Cargo
