@@ -33,15 +33,15 @@ those two checks.
 ## Creating a release
 
 1. Make sure the branch you want to release has passed CI.
-2. Create a tag such as `v1.2.1`.
+2. Create a tag such as `v1.2.2`.
 3. Push the tag.
 4. After the workflow publishes the release, verify the archive against
    `sha256sums.txt` and replace the generated generic description with concise
    release-specific notes.
 
 ```bash
-git tag v1.2.1
-git push origin v1.2.1
+git tag v1.2.2
+git push origin v1.2.2
 ```
 
 ## Installing from a release bundle
