@@ -36,6 +36,11 @@ const GET_FOREGROUND_APP_URI: &str = "ssap://com.webos.applicationManager/getFor
 const GET_POWER_STATE_URI: &str = "ssap://com.webos.service.tvpower/power/getPowerState";
 const GET_SYSTEM_SETTINGS_URI: &str = "ssap://settings/getSystemSettings";
 const SET_SYSTEM_SETTINGS_URI: &str = "ssap://settings/setSystemSettings";
+const CREATE_ALERT_URI: &str = "ssap://system.notifications/createAlert";
+const CLOSE_ALERT_URI: &str = "ssap://system.notifications/closeAlert";
+const SET_SYSTEM_SETTINGS_LUNA_URI: &str = "luna://com.webos.settingsservice/setSystemSettings";
+const TEST_ALERT_ID_RESPONSE: &str = "com.webos.service.apiadapter.pub-1786895965205";
+const TEST_ALERT_ID_CLOSE: &str = "com.webos.service.apiadapter-1786895965205";
 const SET_INPUT_URI: &str = "ssap://tv/switchInput";
 const TURN_OFF_SCREEN_URI: &str = "ssap://com.webos.service.tvpower/power/turnOffScreen";
 const TURN_ON_SCREEN_URI: &str = "ssap://com.webos.service.tvpower/power/turnOnScreen";
@@ -66,6 +71,14 @@ pub(in crate::web_os) enum WebOsTestScenario {
     StallFirstRequest,
     SameInputWriteAcknowledgedWhileScreenOff,
     RestoreSessionInterruptedAndInputAckLeavesScreenOff,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::web_os) enum WebOsTestVersion {
+    // Local hardware baseline: webOS24 / 9.2.2-61.
+    WebOs24Version92261,
+    // External hardware observation: webOS26 firmware 43.21.60.
+    WebOs26Firmware432160,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,9 +128,11 @@ pub(in crate::web_os) struct WebOsTestTvSnapshot {
 }
 
 struct WebOsTestTv {
+    version: WebOsTestVersion,
     power_state: WebOsPowerState,
     input: WebOsTestInput,
     backlight: Value,
+    pending_luna_backlight: Option<(u64, bool)>,
 }
 
 #[derive(Default)]
@@ -127,11 +142,13 @@ struct WebOsTestPermissions {
 }
 
 impl WebOsTestTv {
-    fn new(power_state: WebOsPowerState, input: WebOsTestInput) -> Self {
+    fn new(version: WebOsTestVersion, power_state: WebOsPowerState, input: WebOsTestInput) -> Self {
         Self {
+            version,
             power_state,
             input,
             backlight: input.backlight(),
+            pending_luna_backlight: None,
         }
     }
 
@@ -201,6 +218,9 @@ impl WebOsTestTv {
                 )
             }
             SET_SYSTEM_SETTINGS_URI => {
+                if self.version == WebOsTestVersion::WebOs26Firmware432160 {
+                    return webos_error(request_id, "401 insufficient permissions", json!({}));
+                }
                 if !permissions.write_settings_authorized {
                     return webos_error(request_id, "401 insufficient permissions", json!({}));
                 }
@@ -223,6 +243,68 @@ impl WebOsTestTv {
                     request_id,
                     json!({"method": "setSystemSettings", "returnValue": true}),
                 )
+            }
+            CREATE_ALERT_URI => {
+                require_top_level_permission(permissions, "WRITE_NOTIFICATION_ALERT", uri);
+                require_top_level_permission(permissions, "WRITE_SETTINGS", uri);
+                if self.version == WebOsTestVersion::WebOs24Version92261
+                    && !permissions.top_level.contains("WRITE_NOTIFICATION_TOAST")
+                {
+                    return webos_error(request_id, "401 insufficient permissions", json!({}));
+                }
+                assert_eq!(self.power_state, WebOsPowerState::Active);
+                let backlight_value = payload["onclose"]["params"]["settings"]["backlight"]
+                    .as_str()
+                    .expect("Luna bridge backlight string");
+                let backlight = backlight_value
+                    .parse::<u64>()
+                    .expect("Luna bridge numeric backlight string");
+                assert!(backlight <= 100, "backlight must be between 0 and 100");
+                let params = json!({
+                    "category": "picture",
+                    "settings": {"backlight": backlight_value},
+                });
+                let callback = json!({
+                    "params": params.clone(),
+                    "uri": SET_SYSTEM_SETTINGS_LUNA_URI,
+                });
+                assert_eq!(
+                    payload,
+                    &json!({
+                        "buttons": [{
+                            "label": "",
+                            "onClick": SET_SYSTEM_SETTINGS_LUNA_URI,
+                            "params": params,
+                        }],
+                        "message": " ",
+                        "onclose": callback.clone(),
+                        "onfail": callback,
+                    })
+                );
+                assert!(
+                    self.pending_luna_backlight.is_none(),
+                    "only one Luna bridge alert may be pending"
+                );
+                self.pending_luna_backlight = Some((backlight, apply_backlight_write));
+                response(
+                    request_id,
+                    json!({
+                        "returnValue": true,
+                        "alertId": TEST_ALERT_ID_RESPONSE,
+                    }),
+                )
+            }
+            CLOSE_ALERT_URI => {
+                require_top_level_permission(permissions, "WRITE_NOTIFICATION_ALERT", uri);
+                assert_eq!(payload, &json!({"alertId": TEST_ALERT_ID_CLOSE}));
+                let (backlight, apply_backlight_write) = self
+                    .pending_luna_backlight
+                    .take()
+                    .expect("Luna bridge alert must be created before it is closed");
+                if apply_backlight_write {
+                    self.backlight = json!(backlight);
+                }
+                response(request_id, json!({"returnValue": true}))
             }
             SET_INPUT_URI => {
                 if !permissions.top_level.contains("LAUNCH") {
@@ -323,8 +405,9 @@ pub(in crate::web_os) struct WebOsTestServer {
 }
 
 impl WebOsTestServer {
-    pub(in crate::web_os) fn active(input: WebOsTestInput) -> Self {
+    pub(in crate::web_os) fn active(version: WebOsTestVersion, input: WebOsTestInput) -> Self {
         Self::spawn(
+            version,
             WebOsPowerState::Active,
             input,
             WebOsTestScenario::StatefulTv,
@@ -332,8 +415,9 @@ impl WebOsTestServer {
         )
     }
 
-    pub(in crate::web_os) fn screen_off(input: WebOsTestInput) -> Self {
+    pub(in crate::web_os) fn screen_off(version: WebOsTestVersion, input: WebOsTestInput) -> Self {
         Self::spawn(
+            version,
             WebOsPowerState::ScreenOff,
             input,
             WebOsTestScenario::StatefulTv,
@@ -341,8 +425,12 @@ impl WebOsTestServer {
         )
     }
 
-    pub(in crate::web_os) fn for_scenario(scenario: WebOsTestScenario) -> Self {
+    pub(in crate::web_os) fn for_scenario(
+        version: WebOsTestVersion,
+        scenario: WebOsTestScenario,
+    ) -> Self {
         Self::spawn(
+            version,
             WebOsPowerState::Active,
             WebOsTestInput::Hdmi3,
             scenario,
@@ -350,8 +438,12 @@ impl WebOsTestServer {
         )
     }
 
-    pub(in crate::web_os) fn for_tls_scenario(scenario: WebOsTestScenario) -> Self {
+    pub(in crate::web_os) fn for_tls_scenario(
+        version: WebOsTestVersion,
+        scenario: WebOsTestScenario,
+    ) -> Self {
         Self::spawn(
+            version,
             WebOsPowerState::Active,
             WebOsTestInput::Hdmi3,
             scenario,
@@ -361,10 +453,12 @@ impl WebOsTestServer {
 
     #[allow(dead_code)]
     pub(in crate::web_os) fn active_tls_at(
+        version: WebOsTestVersion,
         input: WebOsTestInput,
         address: std::net::SocketAddr,
     ) -> Self {
         Self::spawn_at(
+            version,
             WebOsPowerState::Active,
             input,
             WebOsTestScenario::StatefulTv,
@@ -374,12 +468,14 @@ impl WebOsTestServer {
     }
 
     fn spawn(
+        version: WebOsTestVersion,
         power_state: WebOsPowerState,
         input: WebOsTestInput,
         scenario: WebOsTestScenario,
         transport: WebOsTestTransport,
     ) -> Self {
         Self::spawn_at(
+            version,
             power_state,
             input,
             scenario,
@@ -389,6 +485,7 @@ impl WebOsTestServer {
     }
 
     fn spawn_at(
+        version: WebOsTestVersion,
         power_state: WebOsPowerState,
         input: WebOsTestInput,
         scenario: WebOsTestScenario,
@@ -406,7 +503,7 @@ impl WebOsTestServer {
             WebOsTestTransport::Tls => WebOsEndpoint::wss_at(address),
         };
         let runtime = Arc::new(Mutex::new(WebOsTestRuntime {
-            tv: WebOsTestTv::new(power_state, input),
+            tv: WebOsTestTv::new(version, power_state, input),
             scenario,
             connection_count: 0,
             pairing_prompt_count: 0,
@@ -688,9 +785,13 @@ fn handle_registration<S>(
 where
     S: Read + Write,
 {
-    let (scenario, power_state) = {
+    let (scenario, power_state, version) = {
         let runtime = runtime.lock().expect("webOS test server state");
-        (runtime.scenario, runtime.tv.power_state.clone())
+        (
+            runtime.scenario,
+            runtime.tv.power_state.clone(),
+            runtime.tv.version,
+        )
     };
     if power_state == WebOsPowerState::PowerOff {
         socket
@@ -716,10 +817,6 @@ where
         "registration permission",
     );
     let write_settings_authorized = has_observed_write_settings_envelope(manifest);
-    *permissions = Some(WebOsTestPermissions {
-        top_level,
-        write_settings_authorized,
-    });
     let presented_token = match payload.get("client-key") {
         Some(Value::String(token)) => Some(token.clone()),
         Some(Value::Null) => None,
@@ -730,6 +827,23 @@ where
         .expect("webOS test server state")
         .registration_tokens
         .push(presented_token);
+
+    if version == WebOsTestVersion::WebOs26Firmware432160 && write_settings_authorized {
+        send_json(
+            socket,
+            webos_error(
+                request_id,
+                "403 Pairing rejected: blacklisted certificate detected",
+                json!({}),
+            ),
+        );
+        return true;
+    }
+
+    *permissions = Some(WebOsTestPermissions {
+        top_level,
+        write_settings_authorized,
+    });
 
     match scenario {
         WebOsTestScenario::StatefulTv
@@ -1081,7 +1195,9 @@ impl Drop for TestAccessTokenStore {
 mod tests {
     use super::{
         write_settings_signed_envelope, WebOsTestInput, WebOsTestScenario, WebOsTestServer,
-        GET_SYSTEM_SETTINGS_URI, SET_SYSTEM_SETTINGS_URI,
+        WebOsTestVersion, CLOSE_ALERT_URI, CREATE_ALERT_URI, GET_SYSTEM_SETTINGS_URI,
+        SET_SYSTEM_SETTINGS_LUNA_URI, SET_SYSTEM_SETTINGS_URI, TEST_ALERT_ID_CLOSE,
+        TEST_ALERT_ID_RESPONSE,
     };
     use serde_json::{json, Value};
     use std::net::TcpStream;
@@ -1095,6 +1211,24 @@ mod tests {
         top_level_permissions: &[&str],
         signed_envelope: Option<Value>,
     ) -> TestClient {
+        let (socket, registration) =
+            connect_and_register(server, top_level_permissions, signed_envelope);
+        assert_eq!(
+            registration,
+            json!({
+                "id": "register_0",
+                "type": "registered",
+                "payload": {"client-key": "test-client-key"},
+            })
+        );
+        socket
+    }
+
+    fn connect_and_register(
+        server: &WebOsTestServer,
+        top_level_permissions: &[&str],
+        signed_envelope: Option<Value>,
+    ) -> (TestClient, Value) {
         let (mut socket, _) = connect(server.endpoint().to_string()).expect("connect test client");
         let mut manifest = json!({
             "manifestVersion": 1,
@@ -1121,15 +1255,8 @@ mod tests {
                 .to_string(),
             ))
             .expect("send test registration");
-        assert_eq!(
-            read_json(&mut socket),
-            json!({
-                "id": "register_0",
-                "type": "registered",
-                "payload": {"client-key": "test-client-key"},
-            })
-        );
-        socket
+        let registration = read_json(&mut socket);
+        (socket, registration)
     }
 
     fn exchange(socket: &mut TestClient, request_id: &str, uri: &str, payload: Value) -> Value {
@@ -1164,11 +1291,188 @@ mod tests {
             .clone()
     }
 
+    fn luna_bridge_payload(backlight: u8) -> Value {
+        let backlight = backlight.to_string();
+        let params = json!({
+            "category": "picture",
+            "settings": {"backlight": backlight},
+        });
+        let callback = json!({
+            "params": params.clone(),
+            "uri": SET_SYSTEM_SETTINGS_LUNA_URI,
+        });
+        json!({
+            "buttons": [{
+                "label": "",
+                "onClick": SET_SYSTEM_SETTINGS_LUNA_URI,
+                "params": params,
+            }],
+            "message": " ",
+            "onclose": callback.clone(),
+            "onfail": callback,
+        })
+    }
+
+    // External real-TV observation:
+    // https://github.com/Staphylococcus/LG_Buddy/issues/76
+    // https://github.com/JPersson77/LGTVCompanion/issues/351
+    #[test]
+    fn affected_firmware_rejects_the_legacy_blacklisted_certificate() {
+        let server = WebOsTestServer::active(
+            WebOsTestVersion::WebOs26Firmware432160,
+            WebOsTestInput::Hdmi2,
+        );
+        let (socket, registration) = connect_and_register(
+            &server,
+            &["READ_SETTINGS"],
+            Some(write_settings_signed_envelope().clone()),
+        );
+
+        assert_eq!(
+            registration,
+            json!({
+                "id": "register_0",
+                "type": "error",
+                "error": "403 Pairing rejected: blacklisted certificate detected",
+                "payload": {},
+            })
+        );
+
+        drop(socket);
+        server.finish();
+    }
+
+    // External real-TV observation:
+    // https://github.com/Staphylococcus/LG_Buddy/issues/76
+    // https://github.com/JPersson77/LGTVCompanion/issues/351
+    #[test]
+    fn affected_firmware_rejects_direct_ssap_brightness_writes() {
+        let server = WebOsTestServer::active(
+            WebOsTestVersion::WebOs26Firmware432160,
+            WebOsTestInput::Hdmi2,
+        );
+        let mut socket = connect_registered(&server, &["READ_SETTINGS", "WRITE_SETTINGS"], None);
+
+        assert_eq!(
+            exchange(
+                &mut socket,
+                "request_0",
+                SET_SYSTEM_SETTINGS_URI,
+                json!({"category": "picture", "settings": {"backlight": 75}}),
+            ),
+            json!({
+                "id": "request_0",
+                "type": "error",
+                "error": "401 insufficient permissions",
+                "payload": {},
+            })
+        );
+        assert_eq!(read_backlight(&mut socket, "request_1"), json!("90"));
+
+        drop(socket);
+        server.finish();
+    }
+
+    // Available-TV observation on webOS24 / 9.2.2-61: createAlert returned 401
+    // until WRITE_NOTIFICATION_TOAST was added to this otherwise identical manifest.
+    // https://github.com/Staphylococcus/LG_Buddy/issues/76#issuecomment-5420796570
+    #[test]
+    fn webos24_luna_bridge_requires_write_notification_toast() {
+        let server =
+            WebOsTestServer::active(WebOsTestVersion::WebOs24Version92261, WebOsTestInput::Hdmi2);
+        let mut socket = connect_registered(
+            &server,
+            &[
+                "READ_SETTINGS",
+                "WRITE_SETTINGS",
+                "WRITE_NOTIFICATION_ALERT",
+            ],
+            None,
+        );
+
+        assert_eq!(
+            exchange(
+                &mut socket,
+                "request_0",
+                CREATE_ALERT_URI,
+                luna_bridge_payload(75),
+            ),
+            json!({
+                "id": "request_0",
+                "type": "error",
+                "error": "401 insufficient permissions",
+                "payload": {},
+            })
+        );
+        assert_eq!(read_backlight(&mut socket, "request_1"), json!("90"));
+
+        drop(socket);
+        server.finish();
+    }
+
+    // External real-TV observation:
+    // https://github.com/Staphylococcus/LG_Buddy/issues/76
+    // https://github.com/JPersson77/LGTVCompanion/issues/351
+    #[test]
+    fn affected_firmware_applies_the_luna_callback_when_the_alert_closes() {
+        let server = WebOsTestServer::active(
+            WebOsTestVersion::WebOs26Firmware432160,
+            WebOsTestInput::Hdmi2,
+        );
+        let mut socket = connect_registered(
+            &server,
+            &[
+                "READ_SETTINGS",
+                "WRITE_SETTINGS",
+                "WRITE_NOTIFICATION_ALERT",
+                "WRITE_NOTIFICATION_TOAST",
+            ],
+            None,
+        );
+
+        assert_eq!(read_backlight(&mut socket, "request_0"), json!("90"));
+        assert_eq!(
+            exchange(
+                &mut socket,
+                "request_1",
+                CREATE_ALERT_URI,
+                luna_bridge_payload(75),
+            ),
+            json!({
+                "id": "request_1",
+                "type": "response",
+                "payload": {
+                    "returnValue": true,
+                    "alertId": TEST_ALERT_ID_RESPONSE,
+                },
+            })
+        );
+        assert_eq!(read_backlight(&mut socket, "request_2"), json!("90"));
+        assert_eq!(
+            exchange(
+                &mut socket,
+                "request_3",
+                CLOSE_ALERT_URI,
+                json!({"alertId": TEST_ALERT_ID_CLOSE}),
+            ),
+            json!({
+                "id": "request_3",
+                "type": "response",
+                "payload": {"returnValue": true},
+            })
+        );
+        assert_eq!(read_backlight(&mut socket, "request_4"), json!(75));
+
+        drop(socket);
+        server.finish();
+    }
+
     // Real-TV wire observation:
     // https://github.com/Staphylococcus/LG_Buddy/issues/52#issuecomment-5183221492
     #[test]
     fn observed_write_settings_envelope_changes_backlight_to_numeric_state() {
-        let server = WebOsTestServer::active(WebOsTestInput::Hdmi2);
+        let server =
+            WebOsTestServer::active(WebOsTestVersion::WebOs24Version92261, WebOsTestInput::Hdmi2);
         let mut socket = connect_registered(
             &server,
             &["READ_SETTINGS"],
@@ -1199,7 +1503,8 @@ mod tests {
     // https://github.com/Staphylococcus/LG_Buddy/issues/52#issuecomment-5183221492
     #[test]
     fn tampered_observed_signature_does_not_authorize_backlight_write() {
-        let server = WebOsTestServer::active(WebOsTestInput::Hdmi2);
+        let server =
+            WebOsTestServer::active(WebOsTestVersion::WebOs24Version92261, WebOsTestInput::Hdmi2);
         let mut envelope = write_settings_signed_envelope().clone();
         let signature = envelope["signatures"][0]["signature"]
             .as_str()
@@ -1242,7 +1547,8 @@ mod tests {
     // https://github.com/Staphylococcus/LG_Buddy/issues/52#issuecomment-5183221492
     #[test]
     fn reduced_observed_signed_permissions_do_not_authorize_backlight_write() {
-        let server = WebOsTestServer::active(WebOsTestInput::Hdmi2);
+        let server =
+            WebOsTestServer::active(WebOsTestVersion::WebOs24Version92261, WebOsTestInput::Hdmi2);
         let mut envelope = write_settings_signed_envelope().clone();
         envelope["signed"]["permissions"] = json!(["WRITE_SETTINGS"]);
         let mut socket = connect_registered(&server, &["READ_SETTINGS"], Some(envelope));
@@ -1271,7 +1577,8 @@ mod tests {
     // https://github.com/Staphylococcus/LG_Buddy/issues/52#issuecomment-5181831148
     #[test]
     fn top_level_write_settings_permission_does_not_authorize_backlight_write() {
-        let server = WebOsTestServer::active(WebOsTestInput::Hdmi2);
+        let server =
+            WebOsTestServer::active(WebOsTestVersion::WebOs24Version92261, WebOsTestInput::Hdmi2);
         let mut socket = connect_registered(&server, &["READ_SETTINGS", "WRITE_SETTINGS"], None);
 
         assert_eq!(
@@ -1298,7 +1605,8 @@ mod tests {
     // https://github.com/Staphylococcus/LG_Buddy/issues/52#issuecomment-5181933079
     #[test]
     fn minimal_signed_write_settings_permission_does_not_authorize_backlight_write() {
-        let server = WebOsTestServer::active(WebOsTestInput::Hdmi2);
+        let server =
+            WebOsTestServer::active(WebOsTestVersion::WebOs24Version92261, WebOsTestInput::Hdmi2);
         let mut socket = connect_registered(
             &server,
             &["READ_SETTINGS"],
@@ -1329,6 +1637,7 @@ mod tests {
     #[test]
     fn acknowledged_backlight_write_can_leave_state_unchanged() {
         let server = WebOsTestServer::for_scenario(
+            WebOsTestVersion::WebOs24Version92261,
             WebOsTestScenario::BacklightWriteAcknowledgedWithoutChange,
         );
         let mut socket = connect_registered(

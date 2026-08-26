@@ -635,7 +635,9 @@ mod tests {
         PlatformAccessToken, PlatformAccessTokenAcquisitionError, PlatformAccessTokenStore,
         PlatformAccessTokenStoreError, PlatformAccessTokenStoreOperation,
     };
-    use crate::web_os::test_support::{WebOsTestInput, WebOsTestScenario, WebOsTestServer};
+    use crate::web_os::test_support::{
+        WebOsTestInput, WebOsTestScenario, WebOsTestServer, WebOsTestVersion,
+    };
     use crate::web_os::{WebOsPowerStateError, WebOsRegistrationError};
     use serde_json::json;
     use std::fs;
@@ -693,7 +695,10 @@ mod tests {
 
     #[test]
     fn requests_use_stable_ids_and_return_the_matching_response() {
-        let server = WebOsTestServer::for_scenario(WebOsTestScenario::ProtocolEcho);
+        let server = WebOsTestServer::for_scenario(
+            WebOsTestVersion::WebOs24Version92261,
+            WebOsTestScenario::ProtocolEcho,
+        );
         let mut client = WebOsClient::connect(server.endpoint(), CONNECT_TIMEOUT, RESPONSE_TIMEOUT)
             .expect("connect client");
 
@@ -708,7 +713,10 @@ mod tests {
 
     #[test]
     fn unrelated_frame_is_ignored_before_matching_response() {
-        let server = WebOsTestServer::for_scenario(WebOsTestScenario::UnrelatedFrameBeforeResponse);
+        let server = WebOsTestServer::for_scenario(
+            WebOsTestVersion::WebOs24Version92261,
+            WebOsTestScenario::UnrelatedFrameBeforeResponse,
+        );
         let mut client = WebOsClient::connect(server.endpoint(), CONNECT_TIMEOUT, RESPONSE_TIMEOUT)
             .expect("connect client");
 
@@ -721,7 +729,10 @@ mod tests {
 
     #[test]
     fn wrong_response_id_is_not_accepted_and_deadline_is_absolute() {
-        let server = WebOsTestServer::for_scenario(WebOsTestScenario::WrongResponseId);
+        let server = WebOsTestServer::for_scenario(
+            WebOsTestVersion::WebOs24Version92261,
+            WebOsTestScenario::WrongResponseId,
+        );
         let mut client = WebOsClient::connect(
             server.endpoint(),
             CONNECT_TIMEOUT,
@@ -738,7 +749,10 @@ mod tests {
 
     #[test]
     fn close_before_matching_response_is_typed() {
-        let server = WebOsTestServer::for_scenario(WebOsTestScenario::CloseBeforeResponse);
+        let server = WebOsTestServer::for_scenario(
+            WebOsTestVersion::WebOs24Version92261,
+            WebOsTestScenario::CloseBeforeResponse,
+        );
         let mut client = WebOsClient::connect(server.endpoint(), CONNECT_TIMEOUT, RESPONSE_TIMEOUT)
             .expect("connect client");
 
@@ -752,7 +766,10 @@ mod tests {
 
     #[test]
     fn malformed_text_frame_is_typed() {
-        let server = WebOsTestServer::for_scenario(WebOsTestScenario::MalformedTextFrame);
+        let server = WebOsTestServer::for_scenario(
+            WebOsTestVersion::WebOs24Version92261,
+            WebOsTestScenario::MalformedTextFrame,
+        );
         let mut client = WebOsClient::connect(server.endpoint(), CONNECT_TIMEOUT, RESPONSE_TIMEOUT)
             .expect("connect client");
 
@@ -765,7 +782,10 @@ mod tests {
 
     #[test]
     fn webos_error_preserves_code_and_message() {
-        let server = WebOsTestServer::for_scenario(WebOsTestScenario::WebOsError);
+        let server = WebOsTestServer::for_scenario(
+            WebOsTestVersion::WebOs24Version92261,
+            WebOsTestScenario::WebOsError,
+        );
         let mut client = WebOsClient::connect(server.endpoint(), CONNECT_TIMEOUT, RESPONSE_TIMEOUT)
             .expect("connect client");
 
@@ -797,7 +817,10 @@ mod tests {
 
     #[test]
     fn wss_accepts_self_signed_tv_certificate() {
-        let server = WebOsTestServer::for_tls_scenario(WebOsTestScenario::ProtocolEcho);
+        let server = WebOsTestServer::for_tls_scenario(
+            WebOsTestVersion::WebOs24Version92261,
+            WebOsTestScenario::ProtocolEcho,
+        );
         let mut client = WebOsClient::connect(server.endpoint(), CONNECT_TIMEOUT, RESPONSE_TIMEOUT)
             .expect("connect secure client");
 
@@ -815,7 +838,10 @@ mod tests {
         let store = token_store(&dir);
         let original = token("stored-client-key");
         store.persist(&original).expect("persist stored token");
-        let server = WebOsTestServer::for_scenario(WebOsTestScenario::StoredTokenReplacement);
+        let server = WebOsTestServer::for_scenario(
+            WebOsTestVersion::WebOs24Version92261,
+            WebOsTestScenario::StoredTokenReplacement,
+        );
         let mut events = Vec::new();
 
         let _client = WebOsClient::connect_authenticated(
@@ -839,7 +865,8 @@ mod tests {
     fn stored_token_authentication_requires_a_credential_without_pairing() {
         let dir = TestDir::new("missing-runtime-token");
         let store = token_store(&dir);
-        let server = WebOsTestServer::active(WebOsTestInput::Hdmi3);
+        let server =
+            WebOsTestServer::active(WebOsTestVersion::WebOs24Version92261, WebOsTestInput::Hdmi3);
 
         let result = WebOsClient::connect_authenticated_with_stored_token(
             server.endpoint(),
@@ -864,7 +891,8 @@ mod tests {
     fn authenticated_client_pairs_and_persists_new_token() {
         let dir = TestDir::new("new-token");
         let store = token_store(&dir);
-        let server = WebOsTestServer::active(WebOsTestInput::Hdmi3);
+        let server =
+            WebOsTestServer::active(WebOsTestVersion::WebOs24Version92261, WebOsTestInput::Hdmi3);
         let mut events = Vec::new();
 
         let client = WebOsClient::connect_authenticated(
@@ -897,7 +925,10 @@ mod tests {
         let store = token_store(&dir);
         let original = token("rejected-client-key");
         store.persist(&original).expect("persist stored token");
-        let server = WebOsTestServer::for_scenario(WebOsTestScenario::StoredTokenPairingPrompt);
+        let server = WebOsTestServer::for_scenario(
+            WebOsTestVersion::WebOs24Version92261,
+            WebOsTestScenario::StoredTokenPairingPrompt,
+        );
         let mut events = Vec::new();
 
         let _client = WebOsClient::connect_authenticated(
@@ -932,7 +963,10 @@ mod tests {
         let store = token_store(&dir);
         let original = token("rejected-runtime-client-key");
         store.persist(&original).expect("persist stored token");
-        let server = WebOsTestServer::for_scenario(WebOsTestScenario::StoredTokenPairingPrompt);
+        let server = WebOsTestServer::for_scenario(
+            WebOsTestVersion::WebOs24Version92261,
+            WebOsTestScenario::StoredTokenPairingPrompt,
+        );
 
         let result = WebOsClient::connect_authenticated_with_stored_token(
             server.endpoint(),
@@ -957,7 +991,10 @@ mod tests {
     fn pairing_rejection_does_not_create_token() {
         let dir = TestDir::new("pairing-rejected");
         let store = token_store(&dir);
-        let server = WebOsTestServer::for_scenario(WebOsTestScenario::PairingRejected);
+        let server = WebOsTestServer::for_scenario(
+            WebOsTestVersion::WebOs24Version92261,
+            WebOsTestScenario::PairingRejected,
+        );
 
         let result = WebOsClient::connect_authenticated(
             server.endpoint(),
@@ -987,7 +1024,10 @@ mod tests {
     fn registration_timeout_does_not_create_token() {
         let dir = TestDir::new("registration-timeout");
         let store = token_store(&dir);
-        let server = WebOsTestServer::for_scenario(WebOsTestScenario::RegistrationTimeout);
+        let server = WebOsTestServer::for_scenario(
+            WebOsTestVersion::WebOs24Version92261,
+            WebOsTestScenario::RegistrationTimeout,
+        );
 
         let result = WebOsClient::connect_authenticated(
             server.endpoint(),
@@ -1015,7 +1055,10 @@ mod tests {
     fn malformed_registration_does_not_create_token() {
         let dir = TestDir::new("malformed-registration");
         let store = token_store(&dir);
-        let server = WebOsTestServer::for_scenario(WebOsTestScenario::RegistrationMissingClientKey);
+        let server = WebOsTestServer::for_scenario(
+            WebOsTestVersion::WebOs24Version92261,
+            WebOsTestScenario::RegistrationMissingClientKey,
+        );
 
         let result = WebOsClient::connect_authenticated(
             server.endpoint(),
@@ -1044,7 +1087,8 @@ mod tests {
         let dir = TestDir::new("persistence-failure");
         let store = token_store(&dir);
         let token_path = store.token_path().to_path_buf();
-        let server = WebOsTestServer::active(WebOsTestInput::Hdmi3);
+        let server =
+            WebOsTestServer::active(WebOsTestVersion::WebOs24Version92261, WebOsTestInput::Hdmi3);
 
         let result = WebOsClient::connect_authenticated(
             server.endpoint(),
@@ -1080,7 +1124,10 @@ mod tests {
         store
             .persist(&token("power-state-error-key"))
             .expect("persist stored token");
-        let server = WebOsTestServer::for_scenario(WebOsTestScenario::PowerStatePermissionDenied);
+        let server = WebOsTestServer::for_scenario(
+            WebOsTestVersion::WebOs24Version92261,
+            WebOsTestScenario::PowerStatePermissionDenied,
+        );
         let mut client = WebOsClient::connect_authenticated(
             server.endpoint(),
             CONNECT_TIMEOUT,

@@ -195,11 +195,16 @@ behavior aligned with observed hardware evidence.
 
 Cucumber adds the process-level product boundary. It runs the real `lg-buddy`
 binary against the same stateful server over TLS on the standard webOS port.
-The server enforces the observed registration permissions, signed brightness
-write envelope, request payloads, and device state transitions while recording
-authentication history and pairing prompts. The scenarios cover opt-in and
-credential outcomes plus representative brightness, screen, input, and power
-operations; detailed transport faults remain in the native client tests.
+The scenarios exercise the production unsigned registration manifest and
+alert-backed Luna brightness payload while the server enforces exact
+firmware-profile behavior and device state transitions. The server also retains
+the legacy direct SSAP brightness path as an observed webOS24 behavior; its
+webOS26 profile rejects the blacklisted legacy certificate and direct SSAP
+write. These are two service-invocation paths over one websocket transport, not
+two production routes. Authentication history and pairing prompts are recorded
+for assertions. The scenarios cover opt-in and credential outcomes plus
+representative brightness, screen, input, and power operations; detailed
+transport faults remain in the native client tests.
 The process-level fixture binds `127.0.0.1:3001`, matching the production TV
 endpoint, so that port must be free while the serial Cucumber suite runs.
 

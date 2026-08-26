@@ -7,8 +7,11 @@ use std::thread;
 use std::time::Duration;
 
 const GET_SYSTEM_SETTINGS_URI: &str = "ssap://settings/getSystemSettings";
-const SET_SYSTEM_SETTINGS_URI: &str = "ssap://settings/setSystemSettings";
-const SET_SYSTEM_SETTINGS_METHOD: &str = "setSystemSettings";
+const CREATE_ALERT_URI: &str = "ssap://system.notifications/createAlert";
+const CLOSE_ALERT_URI: &str = "ssap://system.notifications/closeAlert";
+const SET_SYSTEM_SETTINGS_LUNA_URI: &str = "luna://com.webos.settingsservice/setSystemSettings";
+const ALERT_ID_RESPONSE_PREFIX: &str = "com.webos.service.apiadapter.pub-";
+const ALERT_ID_CLOSE_PREFIX: &str = "com.webos.service.apiadapter-";
 const MAX_BACKLIGHT_BRIGHTNESS: u8 = 100;
 const BACKLIGHT_WRITE_READBACK_DELAY: Duration = Duration::from_secs(1);
 
@@ -149,13 +152,18 @@ impl Error for WebOsBacklightBrightnessError {
 
 #[derive(Debug)]
 pub enum WebOsSetBacklightBrightnessError {
-    Control {
+    CreateLunaBridge {
         source: WebOsControlError,
     },
-    MissingMethod,
-    InvalidMethod,
-    UnexpectedMethod {
-        method: String,
+    MissingAlertId,
+    InvalidAlertId {
+        value: Value,
+    },
+    UnexpectedAlertId {
+        alert_id: String,
+    },
+    CloseLunaBridge {
+        source: WebOsControlError,
     },
     Readback {
         expected: WebOsBacklightBrightness,
@@ -170,19 +178,22 @@ pub enum WebOsSetBacklightBrightnessError {
 impl fmt::Display for WebOsSetBacklightBrightnessError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Control { source } => {
-                write!(f, "could not set webOS backlight brightness: {source}")
+            Self::CreateLunaBridge { source } => {
+                write!(f, "could not create webOS Luna bridge alert: {source}")
             }
-            Self::MissingMethod => {
-                write!(f, "webOS backlight-write response has no method")
+            Self::MissingAlertId => {
+                write!(f, "webOS Luna bridge response has no alert ID")
             }
-            Self::InvalidMethod => {
-                write!(f, "webOS backlight-write response method is not a string")
+            Self::InvalidAlertId { value } => {
+                write!(f, "webOS Luna bridge response alert ID `{value}` is not a string")
             }
-            Self::UnexpectedMethod { method } => write!(
+            Self::UnexpectedAlertId { alert_id } => write!(
                 f,
-                "webOS backlight-write response method `{method}` is not `{SET_SYSTEM_SETTINGS_METHOD}`"
+                "webOS Luna bridge returned unexpected alert ID `{alert_id}`"
             ),
+            Self::CloseLunaBridge { source } => {
+                write!(f, "could not close webOS Luna bridge alert: {source}")
+            }
             Self::Readback { expected, source } => write!(
                 f,
                 "webOS acknowledged backlight brightness {expected}, but verification failed: {source}"
@@ -198,11 +209,11 @@ impl fmt::Display for WebOsSetBacklightBrightnessError {
 impl Error for WebOsSetBacklightBrightnessError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Control { source } => Some(source),
+            Self::CreateLunaBridge { source } | Self::CloseLunaBridge { source } => Some(source),
             Self::Readback { source, .. } => Some(source),
-            Self::MissingMethod
-            | Self::InvalidMethod
-            | Self::UnexpectedMethod { .. }
+            Self::MissingAlertId
+            | Self::InvalidAlertId { .. }
+            | Self::UnexpectedAlertId { .. }
             | Self::NotApplied { .. } => None,
         }
     }
@@ -228,16 +239,13 @@ impl WebOsClient {
         &mut self,
         brightness: WebOsBacklightBrightness,
     ) -> Result<(), WebOsSetBacklightBrightnessError> {
-        let payload = send_control_request(
+        set_system_settings_via_luna_bridge(
             self,
-            SET_SYSTEM_SETTINGS_URI,
             json!({
                 "category": "picture",
-                "settings": {"backlight": brightness.as_percent()},
+                "settings": {"backlight": brightness.as_percent().to_string()},
             }),
-        )
-        .map_err(|source| WebOsSetBacklightBrightnessError::Control { source })?;
-        validate_backlight_write_acknowledgement(&payload)?;
+        )?;
 
         thread::sleep(BACKLIGHT_WRITE_READBACK_DELAY);
         let actual = self.backlight_brightness().map_err(|source| {
@@ -257,17 +265,55 @@ impl WebOsClient {
     }
 }
 
-fn validate_backlight_write_acknowledgement(
-    payload: &Map<String, Value>,
+fn set_system_settings_via_luna_bridge(
+    client: &mut WebOsClient,
+    params: Value,
 ) -> Result<(), WebOsSetBacklightBrightnessError> {
-    match payload.get("method") {
-        Some(Value::String(method)) if method == SET_SYSTEM_SETTINGS_METHOD => Ok(()),
-        Some(Value::String(method)) => Err(WebOsSetBacklightBrightnessError::UnexpectedMethod {
-            method: method.clone(),
+    let callback = json!({
+        "params": params.clone(),
+        "uri": SET_SYSTEM_SETTINGS_LUNA_URI,
+    });
+    let payload = send_control_request(
+        client,
+        CREATE_ALERT_URI,
+        json!({
+            "buttons": [{
+                "label": "",
+                "onClick": SET_SYSTEM_SETTINGS_LUNA_URI,
+                "params": params,
+            }],
+            "message": " ",
+            "onclose": callback.clone(),
+            "onfail": callback,
         }),
-        Some(_) => Err(WebOsSetBacklightBrightnessError::InvalidMethod),
-        None => Err(WebOsSetBacklightBrightnessError::MissingMethod),
-    }
+    )
+    .map_err(|source| WebOsSetBacklightBrightnessError::CreateLunaBridge { source })?;
+    let close_alert_id = close_alert_id(&payload)?;
+
+    send_control_request(client, CLOSE_ALERT_URI, json!({"alertId": close_alert_id}))
+        .map_err(|source| WebOsSetBacklightBrightnessError::CloseLunaBridge { source })?;
+    Ok(())
+}
+
+fn close_alert_id(
+    payload: &Map<String, Value>,
+) -> Result<String, WebOsSetBacklightBrightnessError> {
+    let alert_id = match payload.get("alertId") {
+        Some(Value::String(alert_id)) => alert_id,
+        Some(value) => {
+            return Err(WebOsSetBacklightBrightnessError::InvalidAlertId {
+                value: value.clone(),
+            })
+        }
+        None => return Err(WebOsSetBacklightBrightnessError::MissingAlertId),
+    };
+    let sequence = alert_id
+        .strip_prefix(ALERT_ID_RESPONSE_PREFIX)
+        .filter(|sequence| !sequence.is_empty())
+        .ok_or_else(|| WebOsSetBacklightBrightnessError::UnexpectedAlertId {
+            alert_id: alert_id.clone(),
+        })?;
+    Ok(format!("{ALERT_ID_CLOSE_PREFIX}{sequence}"))
 }
 
 fn parse_backlight_brightness_response(
@@ -347,9 +393,8 @@ fn normalize_backlight_brightness(value: &Value) -> Result<u8, WebOsBacklightBri
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_backlight_brightness, parse_backlight_brightness_response,
-        validate_backlight_write_acknowledgement, WebOsBacklightBrightness,
-        WebOsBacklightBrightnessError, WebOsSetBacklightBrightnessError,
+        close_alert_id, normalize_backlight_brightness, parse_backlight_brightness_response,
+        WebOsBacklightBrightness, WebOsBacklightBrightnessError, WebOsSetBacklightBrightnessError,
     };
     use serde_json::{json, Value};
 
@@ -371,31 +416,41 @@ mod tests {
     }
 
     #[test]
-    fn observed_backlight_write_acknowledgement_is_accepted() {
-        let payload = json!({"method": "setSystemSettings", "returnValue": true});
-        validate_backlight_write_acknowledgement(payload.as_object().expect("object payload"))
-            .expect("observed acknowledgement");
+    fn observed_luna_bridge_alert_id_maps_to_close_request_id() {
+        let payload = json!({
+            "returnValue": true,
+            "alertId": "com.webos.service.apiadapter.pub-1786895965205",
+        });
+        assert_eq!(
+            close_alert_id(payload.as_object().expect("object payload"))
+                .expect("observed alert ID"),
+            "com.webos.service.apiadapter-1786895965205"
+        );
     }
 
     #[test]
-    fn malformed_backlight_write_acknowledgements_are_typed_errors() {
+    fn malformed_luna_bridge_alert_ids_are_typed_errors() {
         for (payload, expected) in [
-            (json!({}), WebOsSetBacklightBrightnessError::MissingMethod),
+            (json!({}), WebOsSetBacklightBrightnessError::MissingAlertId),
             (
-                json!({"method": 7}),
-                WebOsSetBacklightBrightnessError::InvalidMethod,
+                json!({"alertId": 7}),
+                WebOsSetBacklightBrightnessError::InvalidAlertId { value: json!(7) },
             ),
             (
-                json!({"method": "other"}),
-                WebOsSetBacklightBrightnessError::UnexpectedMethod {
-                    method: "other".to_string(),
+                json!({"alertId": "other"}),
+                WebOsSetBacklightBrightnessError::UnexpectedAlertId {
+                    alert_id: "other".to_string(),
+                },
+            ),
+            (
+                json!({"alertId": "com.webos.service.apiadapter.pub-"}),
+                WebOsSetBacklightBrightnessError::UnexpectedAlertId {
+                    alert_id: "com.webos.service.apiadapter.pub-".to_string(),
                 },
             ),
         ] {
-            let actual = validate_backlight_write_acknowledgement(
-                payload.as_object().expect("object payload"),
-            )
-            .expect_err("acknowledgement should be rejected");
+            let actual = close_alert_id(payload.as_object().expect("object payload"))
+                .expect_err("alert ID should be rejected");
             assert_eq!(
                 std::mem::discriminant(&actual),
                 std::mem::discriminant(&expected)

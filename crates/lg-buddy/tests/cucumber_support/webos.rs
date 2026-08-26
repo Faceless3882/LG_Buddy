@@ -8,11 +8,26 @@ use std::net::{Ipv4Addr, SocketAddr};
 mod test_support;
 
 use test_support::test_server::{
-    WebOsTestInput, WebOsTestScenario, WebOsTestServer, WebOsTestTvSnapshot,
+    WebOsTestInput, WebOsTestScenario, WebOsTestServer, WebOsTestTvSnapshot, WebOsTestVersion,
 };
 
 pub const VALID_WEBOS_ACCESS_TOKEN: &str = "webos-test-access-token";
 const WEBOS_WSS_PORT: u16 = 3001;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MockWebOsVersion {
+    WebOs24Version92261,
+    WebOs26Firmware432160,
+}
+
+impl MockWebOsVersion {
+    fn test_version(self) -> WebOsTestVersion {
+        match self {
+            Self::WebOs24Version92261 => WebOsTestVersion::WebOs24Version92261,
+            Self::WebOs26Firmware432160 => WebOsTestVersion::WebOs26Firmware432160,
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MockWebOsTvSnapshot {
@@ -30,7 +45,7 @@ pub struct MockWebOsTv {
 }
 
 impl MockWebOsTv {
-    pub fn new(input: &str) -> Self {
+    pub fn with_version(version: MockWebOsVersion, input: &str) -> Self {
         let input = match input {
             "HDMI_2" => WebOsTestInput::Hdmi2,
             "HDMI_3" => WebOsTestInput::Hdmi3,
@@ -38,7 +53,7 @@ impl MockWebOsTv {
         };
         let address = SocketAddr::from((Ipv4Addr::LOCALHOST, WEBOS_WSS_PORT));
         Self {
-            server: WebOsTestServer::active_tls_at(input, address),
+            server: WebOsTestServer::active_tls_at(version.test_version(), input, address),
         }
     }
 
