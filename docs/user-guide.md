@@ -12,8 +12,8 @@ lg-buddy <command>
 
 Available commands:
 
-- `startup [auto|boot|wake]`
-- `shutdown`
+- `power on`
+- `power off`
 - `sleep-pre`
 - `sleep`
 - `nm-pre-down`
@@ -34,6 +34,8 @@ Examples:
 lg-buddy detect-backend
 lg-buddy settings list
 lg-buddy monitor
+lg-buddy power on
+lg-buddy power off
 lg-buddy brightness
 lg-buddy brightness get
 lg-buddy brightness set 65
@@ -44,7 +46,13 @@ lg-buddy updates background-check
 ```
 
 In normal use, systemd starts the relevant commands automatically. Most users
-only need `brightness`, `settings`, or `configure.sh`.
+only need `power`, `brightness`, `settings`, or `configure.sh`.
+
+`power on` sends Wake-on-LAN and restores the configured input using cold-boot
+behavior. `power off` powers off the TV when it is on the configured input and
+no reboot is pending. The service-owned `startup` and `shutdown` spellings are
+retained as compatibility entrypoints but are not part of the public command
+surface.
 
 `brightness` opens the desktop brightness dialog. `brightness get` prints the
 current TV OLED brightness, and `brightness set <0-100>` updates it directly.

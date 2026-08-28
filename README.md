@@ -108,6 +108,8 @@ With the default `bscpylgtv` platform, you may instead see the pairing prompt on
 
 LG Buddy is mostly automatic after installation.
 
+- To turn on the TV and restore the configured input, run `lg-buddy power on`
+- To turn off the TV when it is on the configured input, run `lg-buddy power off`
 - To inspect settings, run `lg-buddy settings list`
 - To change supported settings, use `lg-buddy settings set <key> <value>`
 - To inspect the active TV platform, run `lg-buddy settings get tv.platform`

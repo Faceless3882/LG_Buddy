@@ -50,6 +50,7 @@ use std::io::{self, Write};
 pub enum Command {
     Startup(StartupMode),
     Shutdown,
+    Power(PowerCommand),
     SleepPre,
     Sleep,
     NetworkManagerPreDown,
@@ -69,6 +70,18 @@ pub enum BrightnessCommand {
     Prompt,
     Get,
     Set(OledBrightness),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PowerCommand {
+    On,
+    Off,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HelpTopic {
+    Global,
+    Power,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,7 +112,7 @@ impl StartupMode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseOutcome {
-    Help,
+    Help(HelpTopic),
     Version,
     Command(Command),
 }
@@ -107,6 +120,8 @@ pub enum ParseOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseError {
     UnknownCommand(String),
+    MissingPowerCommand,
+    UnknownPowerCommand(String),
     UnknownStartupMode(String),
     UnknownBrightnessCommand(String),
     MissingBrightnessValue,
@@ -125,6 +140,15 @@ impl fmt::Display for ParseError {
         match self {
             Self::UnknownCommand(command) => {
                 write!(f, "unknown command `{command}`")
+            }
+            Self::MissingPowerCommand => {
+                write!(
+                    f,
+                    "missing power command; expected `power on` or `power off`"
+                )
+            }
+            Self::UnknownPowerCommand(command) => {
+                write!(f, "unknown power command `{command}`")
             }
             Self::UnknownStartupMode(mode) => {
                 write!(f, "unknown startup mode `{mode}`")
@@ -214,6 +238,19 @@ impl std::error::Error for RunError {
     }
 }
 
+impl ParseError {
+    pub fn help_topic(&self) -> HelpTopic {
+        match self {
+            Self::MissingPowerCommand | Self::UnknownPowerCommand(_) => HelpTopic::Power,
+            Self::UnexpectedArguments {
+                command: Command::Power(_),
+                ..
+            } => HelpTopic::Power,
+            _ => HelpTopic::Global,
+        }
+    }
+}
+
 impl From<io::Error> for RunError {
     fn from(value: io::Error) -> Self {
         Self::Io(value)
@@ -231,6 +268,7 @@ impl Command {
         match self {
             Self::Startup(_) => "startup",
             Self::Shutdown => "shutdown",
+            Self::Power(_) => "power",
             Self::SleepPre => "sleep-pre",
             Self::Sleep => "sleep",
             Self::NetworkManagerPreDown => "nm-pre-down",
@@ -250,6 +288,7 @@ impl Command {
         match self {
             Self::Startup(_) => "TODO: implemented via command handler",
             Self::Shutdown => "TODO: implemented via command handler",
+            Self::Power(_) => "TODO: implemented via command handler",
             Self::SleepPre => "TODO: implemented via command handler",
             Self::Sleep => "TODO: implemented via command handler",
             Self::NetworkManagerPreDown => "TODO: implemented via command handler",
@@ -277,8 +316,8 @@ Usage:
   {program} --version, -V
 
 Commands:
-  startup [mode]  Start or restore the TV output
-  shutdown        Power off the TV when LG Buddy owns the active input
+  power on        Start or restore the TV output
+  power off       Power off the TV when LG Buddy owns the active input
   sleep-pre       Handle the pre-sleep TV power-off hook
   sleep           Handle the NetworkManager pre-down sleep hook
   nm-pre-down     Handle NetworkManager pre-down system sleep gate
@@ -294,11 +333,6 @@ Commands:
   settings        Inspect and edit structured LG Buddy settings
   updates         Check GitHub releases on demand or from the user timer
 
-Startup modes:
-  auto            Restore on wake when LG Buddy owns the system marker, otherwise boot
-  boot            Always treat startup as a cold boot
-  wake            Only restore when LG Buddy owns the system marker
-
 Settings:
   settings list
   settings describe [key]
@@ -313,6 +347,30 @@ Updates:
     )
 }
 
+pub fn power_usage(program: &str) -> String {
+    format!(
+        "\
+LG Buddy TV power control
+
+Usage:
+  {program} power on
+  {program} power off
+  {program} power --help
+
+Commands:
+  on              Start or restore the TV output
+  off             Power off the TV when LG Buddy owns the active input
+"
+    )
+}
+
+pub fn help(program: &str, topic: HelpTopic) -> String {
+    match topic {
+        HelpTopic::Global => usage(program),
+        HelpTopic::Power => power_usage(program),
+    }
+}
+
 pub fn parse_args<I, S>(args: I) -> Result<ParseOutcome, ParseError>
 where
     I: IntoIterator<Item = S>,
@@ -320,12 +378,15 @@ where
 {
     let mut args = args.into_iter();
     let Some(first) = args.next() else {
-        return Ok(ParseOutcome::Help);
+        return Ok(ParseOutcome::Help(HelpTopic::Global));
     };
 
     let first = first.as_ref();
-    if matches!(first, "-h" | "--help" | "help") {
-        return Ok(ParseOutcome::Help);
+    if matches!(first, "-h" | "--help") {
+        return Ok(ParseOutcome::Help(HelpTopic::Global));
+    }
+    if first == "help" {
+        return parse_help_command(args);
     }
     if matches!(first, "-V" | "--version") {
         return Ok(ParseOutcome::Version);
@@ -368,6 +429,7 @@ where
                 .map_err(ParseError::Dev);
         }
         "brightness" => return parse_brightness_command(args),
+        "power" => return parse_power_command(args),
         "shutdown" => Command::Shutdown,
         "sleep-pre" => Command::SleepPre,
         "sleep" => Command::Sleep,
@@ -395,6 +457,8 @@ pub fn run_command<W: Write>(command: Command, writer: &mut W) -> Result<(), Run
     match command {
         Command::Startup(mode) => crate::commands::run_startup(writer, mode),
         Command::Shutdown => run_shutdown(writer),
+        Command::Power(PowerCommand::On) => crate::commands::run_startup(writer, StartupMode::Boot),
+        Command::Power(PowerCommand::Off) => run_shutdown(writer),
         Command::SleepPre => run_sleep_pre(writer),
         Command::Sleep => run_sleep(writer),
         Command::NetworkManagerPreDown => run_nm_pre_down(writer),
@@ -411,6 +475,67 @@ pub fn run_command<W: Write>(command: Command, writer: &mut W) -> Result<(), Run
         Command::Updates(command) => {
             run_updates_command(command, writer).map_err(RunError::Updates)
         }
+    }
+}
+
+fn parse_help_command<I, S>(args: I) -> Result<ParseOutcome, ParseError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut args = args.into_iter();
+    let Some(topic) = args.next() else {
+        return Ok(ParseOutcome::Help(HelpTopic::Global));
+    };
+
+    if topic.as_ref() != "power" {
+        return Err(ParseError::UnknownCommand(topic.as_ref().to_string()));
+    }
+
+    let remaining = args
+        .map(|argument| argument.as_ref().to_string())
+        .collect::<Vec<_>>();
+    if remaining.is_empty()
+        || (remaining.len() == 1 && matches!(remaining[0].as_str(), "on" | "off"))
+    {
+        Ok(ParseOutcome::Help(HelpTopic::Power))
+    } else {
+        Err(ParseError::UnknownPowerCommand(remaining.join(" ")))
+    }
+}
+
+fn parse_power_command<I, S>(args: I) -> Result<ParseOutcome, ParseError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut args = args.into_iter();
+    let Some(subcommand) = args.next() else {
+        return Err(ParseError::MissingPowerCommand);
+    };
+
+    if matches!(subcommand.as_ref(), "-h" | "--help") {
+        return Ok(ParseOutcome::Help(HelpTopic::Power));
+    }
+
+    let command = match subcommand.as_ref() {
+        "on" => PowerCommand::On,
+        "off" => PowerCommand::Off,
+        other => return Err(ParseError::UnknownPowerCommand(other.to_string())),
+    };
+    let arguments = args
+        .map(|argument| argument.as_ref().to_string())
+        .collect::<Vec<_>>();
+
+    if arguments.is_empty() {
+        Ok(ParseOutcome::Command(Command::Power(command)))
+    } else if arguments.len() == 1 && matches!(arguments[0].as_str(), "-h" | "--help") {
+        Ok(ParseOutcome::Help(HelpTopic::Power))
+    } else {
+        Err(ParseError::UnexpectedArguments {
+            command: Command::Power(command),
+            arguments,
+        })
     }
 }
 
@@ -470,8 +595,8 @@ fn run_detect_backend<W: Write>(writer: &mut W) -> Result<(), RunError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_args, usage, BrightnessCommand, Command, DevCommand, DevParseError, ParseError,
-        ParseOutcome, StartupMode, WebOsControlProbeCommand,
+        parse_args, power_usage, usage, BrightnessCommand, Command, DevCommand, DevParseError,
+        HelpTopic, ParseError, ParseOutcome, PowerCommand, StartupMode, WebOsControlProbeCommand,
     };
     use crate::settings::{SettingsCommand, SettingsParseError};
     use crate::tv::OledBrightness;
@@ -482,14 +607,38 @@ mod tests {
 
     #[test]
     fn no_args_prints_help() {
-        assert_eq!(parse_args(Vec::<String>::new()), Ok(ParseOutcome::Help));
+        assert_eq!(
+            parse_args(Vec::<String>::new()),
+            Ok(ParseOutcome::Help(HelpTopic::Global))
+        );
     }
 
     #[test]
     fn explicit_help_prints_help() {
-        assert_eq!(parse_args(["--help"]), Ok(ParseOutcome::Help));
-        assert_eq!(parse_args(["-h"]), Ok(ParseOutcome::Help));
-        assert_eq!(parse_args(["help"]), Ok(ParseOutcome::Help));
+        assert_eq!(
+            parse_args(["--help"]),
+            Ok(ParseOutcome::Help(HelpTopic::Global))
+        );
+        assert_eq!(
+            parse_args(["-h"]),
+            Ok(ParseOutcome::Help(HelpTopic::Global))
+        );
+        assert_eq!(
+            parse_args(["help"]),
+            Ok(ParseOutcome::Help(HelpTopic::Global))
+        );
+        assert_eq!(
+            parse_args(["help", "power"]),
+            Ok(ParseOutcome::Help(HelpTopic::Power))
+        );
+        assert_eq!(
+            parse_args(["power", "--help"]),
+            Ok(ParseOutcome::Help(HelpTopic::Power))
+        );
+        assert_eq!(
+            parse_args(["power", "on", "--help"]),
+            Ok(ParseOutcome::Help(HelpTopic::Power))
+        );
     }
 
     #[test]
@@ -515,6 +664,14 @@ mod tests {
         assert_eq!(
             parse_args(["shutdown"]),
             Ok(ParseOutcome::Command(Command::Shutdown))
+        );
+        assert_eq!(
+            parse_args(["power", "on"]),
+            Ok(ParseOutcome::Command(Command::Power(PowerCommand::On)))
+        );
+        assert_eq!(
+            parse_args(["power", "off"]),
+            Ok(ParseOutcome::Command(Command::Power(PowerCommand::Off)))
         );
         assert_eq!(
             parse_args(["sleep-pre"]),
@@ -731,6 +888,24 @@ mod tests {
     }
 
     #[test]
+    fn invalid_power_command_is_rejected_with_power_help() {
+        assert_eq!(parse_args(["power"]), Err(ParseError::MissingPowerCommand));
+        assert_eq!(
+            parse_args(["power", "standby"]),
+            Err(ParseError::UnknownPowerCommand("standby".to_string()))
+        );
+        let error = parse_args(["power", "on", "extra"]).unwrap_err();
+        assert_eq!(
+            error,
+            ParseError::UnexpectedArguments {
+                command: Command::Power(PowerCommand::On),
+                arguments: vec!["extra".to_string()],
+            }
+        );
+        assert_eq!(error.help_topic(), HelpTopic::Power);
+    }
+
+    #[test]
     fn invalid_brightness_command_is_rejected() {
         assert_eq!(
             parse_args(["brightness", "show"]),
@@ -876,8 +1051,8 @@ mod tests {
         let help = usage("lg-buddy");
 
         for command in [
-            "startup",
-            "shutdown",
+            "power on",
+            "power off",
             "sleep-pre",
             "sleep",
             "nm-pre-down",
@@ -897,15 +1072,18 @@ mod tests {
         }
         assert!(!help.contains("webos-auth-probe"));
         assert!(!help.contains("webos-read-probe"));
+        assert!(!help.contains("startup [mode]"));
+        assert!(!help.contains("shutdown        "));
     }
 
     #[test]
-    fn usage_mentions_startup_modes() {
-        let help = usage("lg-buddy");
+    fn power_usage_mentions_public_commands() {
+        let help = power_usage("lg-buddy");
 
-        for mode in ["auto", "boot", "wake"] {
-            assert!(help.contains(mode), "missing startup mode `{mode}`");
-        }
+        assert!(help.contains("lg-buddy power on"));
+        assert!(help.contains("lg-buddy power off"));
+        assert!(!help.contains("startup"));
+        assert!(!help.contains("shutdown"));
     }
 
     #[test]
