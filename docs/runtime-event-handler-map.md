@@ -44,6 +44,7 @@ same normalized inactivity observations.
 | user graphical session start | `lg-buddy monitor` | `session::runner::run_monitor` | Detect the session backend and run the selected monitor path. |
 | manual screen blank | `lg-buddy screen off` | `commands` -> `screen` | Blank or power off the TV if LG Buddy owns the configured input. |
 | manual screen restore | `lg-buddy screen on` | `commands` -> `screen` | Restore the screen when marker and restore-policy rules allow it. |
+| manual update check | `lg-buddy updates check` | `updates` -> GitHub releases API | Check for an available release independently of the automatic update-check setting. |
 | user update-check timer | `lg-buddy updates background-check` | `updates` -> GitHub releases API -> session notification handoff | Check for updates when automatic checks are enabled and notify once per release. |
 
 Compatibility command surfaces still exist for direct/manual invocation:
@@ -55,7 +56,6 @@ Compatibility command surfaces still exist for direct/manual invocation:
 | `lg-buddy sleep-pre` | Direct pre-sleep policy command retained for manual/debug invocation. |
 | `lg-buddy startup wake` | Direct wake restore policy command retained for manual/debug invocation. |
 | `lg-buddy sleep` | Legacy NetworkManager pre-down behavior. It is not installed as a default event handler. |
-| `lg-buddy updates check` | Manual update diagnostic command retained independently of automatic update-check settings. |
 
 These handlers are intentionally conservative around ownership:
 
