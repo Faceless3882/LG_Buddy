@@ -128,6 +128,11 @@ LG Buddy is mostly automatic after installation.
 - To check the user-session service, run `systemctl --user status LG_Buddy_screen.service`
 - To remove LG Buddy, run `./uninstall.sh`
 
+For scoped syntax, run `lg-buddy <command> --help` or
+`lg-buddy help <command>`. Package-owned service, hook, timer, and compatibility
+entrypoints are not intended for ordinary TV control; they are identified in
+the [user guide](docs/user-guide.md#package-owned-runtime-entrypoints).
+
 The settings CLI is a structured layer over `config.env`. These examples write
 the same file that manual editing and `configure.sh` use:
 

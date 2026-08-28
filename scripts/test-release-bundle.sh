@@ -157,7 +157,7 @@ assert_file "$BUNDLE_DIR/systemd/LG_Buddy_update_check.timer"
 HELP_OUTPUT="$("$BUNDLE_DIR/lg-buddy" 2>&1 || true)"
 printf '%s\n' "$HELP_OUTPUT" | grep -q "lg-buddy"
 printf '%s\n' "$HELP_OUTPUT" | grep -q "settings list"
-printf '%s\n' "$HELP_OUTPUT" | grep -q "settings set <key> <value>"
+printf '%s\n' "$HELP_OUTPUT" | grep -q "settings set <KEY> <VALUE>"
 printf '%s\n' "$HELP_OUTPUT" | grep -F -q "updates check [--channel stable|prerelease] [--notify]"
 if printf '%s\n' "$HELP_OUTPUT" | grep -F -q "updates background-check"; then
     echo "Background update entrypoint appeared in public bundle help."
@@ -246,7 +246,7 @@ fi
 INSTALLED_HELP_OUTPUT="$("$INSTALLED_BINARY" 2>&1 || true)"
 printf '%s\n' "$INSTALLED_HELP_OUTPUT" | grep -q "lg-buddy"
 printf '%s\n' "$INSTALLED_HELP_OUTPUT" | grep -q "settings list"
-printf '%s\n' "$INSTALLED_HELP_OUTPUT" | grep -q "settings set <key> <value>"
+printf '%s\n' "$INSTALLED_HELP_OUTPUT" | grep -q "settings set <KEY> <VALUE>"
 printf '%s\n' "$INSTALLED_HELP_OUTPUT" | grep -F -q "updates check [--channel stable|prerelease] [--notify]"
 if printf '%s\n' "$INSTALLED_HELP_OUTPUT" | grep -F -q "updates background-check"; then
     echo "Background update entrypoint appeared in public installed help."

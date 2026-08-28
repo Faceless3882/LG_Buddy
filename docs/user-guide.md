@@ -2,7 +2,7 @@
 
 This guide covers the parts of LG Buddy that users may want after installation: commands, configuration, and desktop-idle behavior.
 
-## Runtime Commands
+## Commands
 
 The installed runtime command is:
 
@@ -10,29 +10,31 @@ The installed runtime command is:
 lg-buddy <command>
 ```
 
-Available commands:
+### Public commands
 
-- `power on`
-- `power off`
-- `sleep-pre`
-- `sleep`
-- `nm-pre-down`
+The supported user-facing commands are:
+
 - `brightness`
 - `brightness get`
 - `brightness set <0-100>`
+- `power on`
+- `power off`
 - `screen off`
 - `screen on`
-- `monitor`
-- `lifecycle`
-- `settings`
+- `settings list`
+- `settings describe [KEY]`
+- `settings get <KEY>`
+- `settings set <KEY> <VALUE>`
+- `settings unset <KEY>`
 - `updates check [--channel stable|prerelease] [--notify]`
+- `help [COMMAND...]`, `--help`, and `-h`
+- `--version` and `-V`
 
 Examples:
 
 ```bash
 lg-buddy settings list
 lg-buddy settings describe screen.backend
-lg-buddy monitor
 lg-buddy power on
 lg-buddy power off
 lg-buddy screen off
@@ -45,22 +47,24 @@ lg-buddy updates check
 lg-buddy updates check --notify
 ```
 
-In normal use, systemd starts the relevant commands automatically. Most users
-only need `power`, `brightness`, `settings`, or `configure.sh`.
+Use `lg-buddy <command> --help` or `lg-buddy help <command>` for scoped syntax.
+In normal use, LG Buddy's services run automatically; most users only need the
+commands above or `configure.sh`.
 
 `power on` sends Wake-on-LAN and restores the configured input using cold-boot
 behavior. `power off` powers off the TV when it is on the configured input and
-no reboot is pending. The service-owned `startup` and `shutdown` spellings are
-retained as compatibility entrypoints but are not part of the public command
-surface.
+no reboot is pending.
 
 `screen off` blanks the configured TV output and records that LG Buddy owns the
 blanked state. `screen on` restores the output according to the configured
-restore policy. The flat `screen-off` and `screen-on` spellings remain hidden
-compatibility entrypoints.
+restore policy.
 
 `brightness` opens the desktop brightness dialog. `brightness get` prints the
 current TV OLED brightness, and `brightness set <0-100>` updates it directly.
+The `settings` commands inspect and edit the same structured configuration used
+by the installer, configurator, and runtime; the complete registry is described
+in [Configuration](#configuration).
+
 `--version` prints the installed runtime version, release channel, and commit
 metadata when the binary was built as an official release artifact.
 `updates check` queries GitHub releases on demand and reports whether a newer
@@ -79,16 +83,31 @@ opens the GitHub release page through the system opener.
 After a notification is delivered for a release, repeated `--notify`
 checks for the same release skip the notification and print the notification
 policy decision; a newer release can notify again.
-`updates background-check` is the service-owned path used by the installed user
-timer. It reads update settings, skips all update work when automatic checks are
-disabled, and otherwise uses the same release API, cache, notification handoff,
-and repeat-notification policy as `updates check --notify`. The notification
-handoff expects the installed user-session service,
-`LG_Buddy_screen.service`, to be running.
+Automatic checks use the same release API, cache, notification handoff, and
+repeat-notification policy. The notification handoff expects the installed
+user-session service, `LG_Buddy_screen.service`, to be running.
 
-`lifecycle`, `nm-pre-down`, `sleep-pre`, and `startup wake` are normally
-service-owned system lifecycle commands. They are documented for
-troubleshooting, not day-to-day manual use.
+### Package-owned runtime entrypoints
+
+Installed services, hooks, timers, and compatibility callers still invoke the
+entrypoints below. They remain callable for package integration and migration,
+but they are not the stable interface for ordinary TV control.
+
+| Entrypoint | Owner and role |
+| --- | --- |
+| `startup boot`, `shutdown` | System service start/stop entrypoints; use `power on/off` manually. |
+| `startup auto`, `startup wake` | Compatibility and troubleshooting modes for boot/wake policy. |
+| `lifecycle` | System lifecycle service handling logind sleep and resume events. |
+| `nm-pre-down` | NetworkManager dispatcher gate before sleep-related network teardown. |
+| `monitor` | User-session service for idle monitoring and notification handoff. |
+| `updates background-check` | Installed user timer entrypoint; respects update settings. |
+| `detect-backend` | Installer compatibility entrypoint; use `settings describe screen.backend` manually. |
+| `sleep-pre`, `sleep` | Direct or legacy pre-sleep compatibility paths. |
+| `screen-off`, `screen-on` | Hidden compatibility aliases for `screen off/on`. |
+
+The `dev webos-*` commands are unstable development diagnostics and are not
+user commands. For service troubleshooting, inspect the corresponding systemd
+unit instead of manually invoking its runtime entrypoint.
 
 ## Desktop Idle Monitoring
 

@@ -404,36 +404,34 @@ impl Command {
 pub fn usage(program: &str) -> String {
     format!(
         "\
-LG Buddy Rust runtime
+LG Buddy TV control
 
 Usage:
   {program} <command>
-  {program} --help
+  {program} help [COMMAND...]
+  {program} --help, -h
   {program} --version, -V
 
 Commands:
-  power on        Start or restore the TV output
-  power off       Power off the TV when LG Buddy owns the active input
-  sleep-pre       Handle the pre-sleep TV power-off hook
-  sleep           Handle the NetworkManager pre-down sleep hook
-  nm-pre-down     Handle NetworkManager pre-down system sleep gate
   brightness      Open the TV brightness control dialog
   brightness get  Print the current TV OLED brightness
   brightness set <0-100>
                   Set the TV OLED brightness
+  power on        Start or restore the TV output
+  power off       Power off the TV when LG Buddy owns the active input
   screen off      Blank the configured TV output if active
   screen on       Restore the TV output after an LG Buddy screen blank
-  monitor         Run the user-session monitor loop
-  lifecycle       Run the system lifecycle monitor loop
   settings        Inspect and edit structured LG Buddy settings
-  updates         Check GitHub releases on demand or from the user timer
+  updates         Check for LG Buddy releases
+  help [COMMAND...]
+                  Show global or scoped command help
 
 Settings:
   settings list
-  settings describe [key]
-  settings get <key>
-  settings set <key> <value>
-  settings unset <key>
+  settings describe [KEY]
+  settings get <KEY>
+  settings set <KEY> <VALUE>
+  settings unset <KEY>
 
 Updates:
   updates check [--channel stable|prerelease] [--notify]
@@ -1585,36 +1583,47 @@ mod tests {
     }
 
     #[test]
-    fn usage_mentions_all_commands() {
+    fn global_usage_only_mentions_public_commands() {
         let help = usage("lg-buddy");
 
         for command in [
+            "brightness",
+            "brightness get",
+            "brightness set <0-100>",
             "power on",
             "power off",
-            "sleep-pre",
-            "sleep",
-            "nm-pre-down",
-            "brightness",
             "screen off",
             "screen on",
-            "monitor",
-            "lifecycle",
             "settings",
             "updates",
+            "help [COMMAND...]",
         ] {
             assert!(
                 help.contains(command),
                 "missing `{command}` from help output"
             );
         }
-        assert!(!help.contains("webos-auth-probe"));
-        assert!(!help.contains("webos-read-probe"));
-        assert!(!help.contains("startup [mode]"));
-        assert!(!help.contains("shutdown        "));
-        assert!(!help.contains("screen-off"));
-        assert!(!help.contains("screen-on"));
-        assert!(!help.contains("detect-backend"));
-        assert!(!help.contains("updates background-check"));
+        for command in [
+            "startup",
+            "shutdown",
+            "sleep-pre",
+            "\n  sleep ",
+            "nm-pre-down",
+            "monitor",
+            "lifecycle",
+            "\n  dev ",
+            "screen-off",
+            "screen-on",
+            "detect-backend",
+            "updates background-check",
+            "webos-auth-probe",
+            "webos-read-probe",
+        ] {
+            assert!(
+                !help.contains(command),
+                "package-owned entrypoint `{command}` leaked into global help"
+            );
+        }
     }
 
     #[test]
@@ -1681,10 +1690,10 @@ mod tests {
         for command in [
             "--version, -V",
             "settings list",
-            "settings describe [key]",
-            "settings get <key>",
-            "settings set <key> <value>",
-            "settings unset <key>",
+            "settings describe [KEY]",
+            "settings get <KEY>",
+            "settings set <KEY> <VALUE>",
+            "settings unset <KEY>",
             "updates check [--channel stable|prerelease] [--notify]",
         ] {
             assert!(help.contains(command), "missing `{command}` from help");
