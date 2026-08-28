@@ -52,6 +52,7 @@ Feature: Brightness
     And the TV backlight is 44
     When I run the command "brightness set 101"
     Then the command fails
+    And the command exits with status 2
     And stderr contains "invalid OLED brightness"
     And the TV client did not receive "get_picture_settings"
     And the TV client did not receive "set_settings"

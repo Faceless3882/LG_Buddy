@@ -30,6 +30,7 @@ pub struct LgBuddyWorld {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandExecution {
     pub success: bool,
+    pub exit_code: Option<i32>,
     pub stdout: String,
     pub stderr: String,
     pub duration: std::time::Duration,
@@ -592,6 +593,7 @@ exit 1\n",
 
         self.command_result = Some(CommandExecution {
             success: output.status.success(),
+            exit_code: output.status.code(),
             stdout: String::from_utf8(output.stdout).expect("utf8 command output"),
             stderr: String::from_utf8(output.stderr).expect("utf8 command stderr"),
             duration,
@@ -620,6 +622,7 @@ exit 1\n",
 
         self.command_result = Some(CommandExecution {
             success: output.status.success(),
+            exit_code: output.status.code(),
             stdout: String::from_utf8(output.stdout).expect("utf8 configure output"),
             stderr: String::from_utf8(output.stderr).expect("utf8 configure stderr"),
             duration,

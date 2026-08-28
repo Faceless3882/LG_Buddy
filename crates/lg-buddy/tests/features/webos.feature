@@ -144,13 +144,13 @@ Feature: Native webOS TV platform
     And LG Buddy session runtime is isolated
     And a native webOS TV on input HDMI_2 with brightness 90
     And a valid native TV access token is stored
-    When I run the command "screen-off"
+    When I run the command "screen off"
     Then the command succeeds
     And the session marker exists
     And the TV screen is blanked
     And the native TV registration tokens are "webos-test-access-token"
     And the native TV pairing prompt count is 0
-    When I run the command "screen-on"
+    When I run the command "screen on"
     Then the command succeeds
     And the session marker is absent
     And the TV screen is visible
@@ -163,13 +163,13 @@ Feature: Native webOS TV platform
     And LG Buddy session runtime is isolated
     And a native webOS TV on input HDMI_2 with brightness 90
     And a valid native TV access token is stored
-    When I run the command "screen-off"
+    When I run the command "screen off"
     Then the command succeeds
     And the session marker exists
     And the TV screen is blanked
     Given the native webOS TV interrupts the first restore session and acknowledges input without unblanking
     And screen wake delays are disabled
-    When I run the command "screen-on"
+    When I run the command "screen on"
     Then the command succeeds
     And stdout contains "Screen visibility could not be verified. Falling back to full wake."
     And stdout does not contain "Screen unblank failed."
@@ -191,7 +191,7 @@ Feature: Native webOS TV platform
     And a native webOS TV on input HDMI_2 with brightness 90
     And a valid native TV access token is stored
     And the session marker exists
-    When I run the command "screen-on"
+    When I run the command "screen on"
     Then the command succeeds
     And stdout contains "Screen unblank succeeded. Clearing wake state."
     And stdout does not contain "Sending initial Wake-on-LAN packet"

@@ -20,8 +20,8 @@ Available commands:
 - `brightness`
 - `brightness get`
 - `brightness set <0-100>`
-- `screen-off`
-- `screen-on`
+- `screen off`
+- `screen on`
 - `monitor`
 - `lifecycle`
 - `detect-backend`
@@ -36,6 +36,8 @@ lg-buddy settings list
 lg-buddy monitor
 lg-buddy power on
 lg-buddy power off
+lg-buddy screen off
+lg-buddy screen on
 lg-buddy brightness
 lg-buddy brightness get
 lg-buddy brightness set 65
@@ -53,6 +55,11 @@ behavior. `power off` powers off the TV when it is on the configured input and
 no reboot is pending. The service-owned `startup` and `shutdown` spellings are
 retained as compatibility entrypoints but are not part of the public command
 surface.
+
+`screen off` blanks the configured TV output and records that LG Buddy owns the
+blanked state. `screen on` restores the output according to the configured
+restore policy. The flat `screen-off` and `screen-on` spellings remain hidden
+compatibility entrypoints.
 
 `brightness` opens the desktop brightness dialog. `brightness get` prints the
 current TV OLED brightness, and `brightness set <0-100>` updates it directly.

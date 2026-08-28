@@ -43,6 +43,7 @@ Feature: Power
   Scenario: Invalid power commands show scoped usage
     When I run the command "power standby"
     Then the command fails
+    And the command exits with status 2
     And stderr contains "unknown power command `standby`"
     And stderr contains "power on"
     And stderr contains "power off"

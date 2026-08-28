@@ -88,7 +88,7 @@ Feature: Settings CLI
     And stdout contains "apply: no runtime apply action required"
     And config.env contains "tvs_primary_input=HDMI_3"
     And config.env does not contain "input=HDMI_2"
-    When I run the command "screen-off"
+    When I run the command "screen off"
     Then the command succeeds
     And the TV client received "turn_screen_off"
 
@@ -102,7 +102,7 @@ Feature: Settings CLI
     When I run the command "settings set screen.restore_policy aggressive"
     Then the command succeeds
     And config.env contains "screen_restore_policy=aggressive"
-    When I run the command "screen-on"
+    When I run the command "screen on"
     Then the command succeeds
     And stdout contains "Aggressive restore policy is enabled"
     And the TV client received "turn_screen_on"

@@ -55,6 +55,7 @@ pub enum Command {
     Sleep,
     NetworkManagerPreDown,
     Brightness(BrightnessCommand),
+    Screen(ScreenCommand),
     ScreenOff,
     ScreenOn,
     Monitor,
@@ -79,9 +80,16 @@ pub enum PowerCommand {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScreenCommand {
+    Off,
+    On,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HelpTopic {
     Global,
     Power,
+    Screen,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,6 +130,8 @@ pub enum ParseError {
     UnknownCommand(String),
     MissingPowerCommand,
     UnknownPowerCommand(String),
+    MissingScreenCommand,
+    UnknownScreenCommand(String),
     UnknownStartupMode(String),
     UnknownBrightnessCommand(String),
     MissingBrightnessValue,
@@ -149,6 +159,15 @@ impl fmt::Display for ParseError {
             }
             Self::UnknownPowerCommand(command) => {
                 write!(f, "unknown power command `{command}`")
+            }
+            Self::MissingScreenCommand => {
+                write!(
+                    f,
+                    "missing screen command; expected `screen off` or `screen on`"
+                )
+            }
+            Self::UnknownScreenCommand(command) => {
+                write!(f, "unknown screen command `{command}`")
             }
             Self::UnknownStartupMode(mode) => {
                 write!(f, "unknown startup mode `{mode}`")
@@ -246,6 +265,11 @@ impl ParseError {
                 command: Command::Power(_),
                 ..
             } => HelpTopic::Power,
+            Self::MissingScreenCommand | Self::UnknownScreenCommand(_) => HelpTopic::Screen,
+            Self::UnexpectedArguments {
+                command: Command::Screen(_),
+                ..
+            } => HelpTopic::Screen,
             _ => HelpTopic::Global,
         }
     }
@@ -273,6 +297,7 @@ impl Command {
             Self::Sleep => "sleep",
             Self::NetworkManagerPreDown => "nm-pre-down",
             Self::Brightness(_) => "brightness",
+            Self::Screen(_) => "screen",
             Self::ScreenOff => "screen-off",
             Self::ScreenOn => "screen-on",
             Self::Monitor => "monitor",
@@ -293,6 +318,7 @@ impl Command {
             Self::Sleep => "TODO: implemented via command handler",
             Self::NetworkManagerPreDown => "TODO: implemented via command handler",
             Self::Brightness(_) => "TODO: implemented via command handler",
+            Self::Screen(_) => "TODO: implemented via command handler",
             Self::ScreenOff => "TODO: implemented via command handler",
             Self::ScreenOn => "TODO: implemented via command handler",
             Self::Monitor => "TODO: implemented via command handler",
@@ -325,8 +351,8 @@ Commands:
   brightness get  Print the current TV OLED brightness
   brightness set <0-100>
                   Set the TV OLED brightness
-  screen-off      Blank the configured TV output if active
-  screen-on       Restore the TV output after an LG Buddy screen-off
+  screen off      Blank the configured TV output if active
+  screen on       Restore the TV output after an LG Buddy screen blank
   monitor         Run the user-session monitor loop
   lifecycle       Run the system lifecycle monitor loop
   detect-backend  Detect the active screen backend
@@ -364,10 +390,28 @@ Commands:
     )
 }
 
+pub fn screen_usage(program: &str) -> String {
+    format!(
+        "\
+LG Buddy TV screen control
+
+Usage:
+  {program} screen off
+  {program} screen on
+  {program} screen --help
+
+Commands:
+  off             Blank the configured TV output if active
+  on              Restore the TV output after an LG Buddy screen blank
+"
+    )
+}
+
 pub fn help(program: &str, topic: HelpTopic) -> String {
     match topic {
         HelpTopic::Global => usage(program),
         HelpTopic::Power => power_usage(program),
+        HelpTopic::Screen => screen_usage(program),
     }
 }
 
@@ -430,6 +474,7 @@ where
         }
         "brightness" => return parse_brightness_command(args),
         "power" => return parse_power_command(args),
+        "screen" => return parse_screen_command(args),
         "shutdown" => Command::Shutdown,
         "sleep-pre" => Command::SleepPre,
         "sleep" => Command::Sleep,
@@ -464,6 +509,8 @@ pub fn run_command<W: Write>(command: Command, writer: &mut W) -> Result<(), Run
         Command::NetworkManagerPreDown => run_nm_pre_down(writer),
         Command::Brightness(command) => run_brightness(writer, command),
         Command::DetectBackend => run_detect_backend(writer),
+        Command::Screen(ScreenCommand::Off) => run_screen_off(writer),
+        Command::Screen(ScreenCommand::On) => run_screen_on(writer),
         Command::ScreenOff => run_screen_off(writer),
         Command::ScreenOn => run_screen_on(writer),
         Command::Monitor => run_monitor(writer),
@@ -488,19 +535,29 @@ where
         return Ok(ParseOutcome::Help(HelpTopic::Global));
     };
 
-    if topic.as_ref() != "power" {
-        return Err(ParseError::UnknownCommand(topic.as_ref().to_string()));
-    }
-
     let remaining = args
         .map(|argument| argument.as_ref().to_string())
         .collect::<Vec<_>>();
-    if remaining.is_empty()
-        || (remaining.len() == 1 && matches!(remaining[0].as_str(), "on" | "off"))
-    {
-        Ok(ParseOutcome::Help(HelpTopic::Power))
-    } else {
-        Err(ParseError::UnknownPowerCommand(remaining.join(" ")))
+    match topic.as_ref() {
+        "power" => {
+            if remaining.is_empty()
+                || (remaining.len() == 1 && matches!(remaining[0].as_str(), "on" | "off"))
+            {
+                Ok(ParseOutcome::Help(HelpTopic::Power))
+            } else {
+                Err(ParseError::UnknownPowerCommand(remaining.join(" ")))
+            }
+        }
+        "screen" => {
+            if remaining.is_empty()
+                || (remaining.len() == 1 && matches!(remaining[0].as_str(), "off" | "on"))
+            {
+                Ok(ParseOutcome::Help(HelpTopic::Screen))
+            } else {
+                Err(ParseError::UnknownScreenCommand(remaining.join(" ")))
+            }
+        }
+        other => Err(ParseError::UnknownCommand(other.to_string())),
     }
 }
 
@@ -534,6 +591,41 @@ where
     } else {
         Err(ParseError::UnexpectedArguments {
             command: Command::Power(command),
+            arguments,
+        })
+    }
+}
+
+fn parse_screen_command<I, S>(args: I) -> Result<ParseOutcome, ParseError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut args = args.into_iter();
+    let Some(subcommand) = args.next() else {
+        return Err(ParseError::MissingScreenCommand);
+    };
+
+    if matches!(subcommand.as_ref(), "-h" | "--help") {
+        return Ok(ParseOutcome::Help(HelpTopic::Screen));
+    }
+
+    let command = match subcommand.as_ref() {
+        "off" => ScreenCommand::Off,
+        "on" => ScreenCommand::On,
+        other => return Err(ParseError::UnknownScreenCommand(other.to_string())),
+    };
+    let arguments = args
+        .map(|argument| argument.as_ref().to_string())
+        .collect::<Vec<_>>();
+
+    if arguments.is_empty() {
+        Ok(ParseOutcome::Command(Command::Screen(command)))
+    } else if arguments.len() == 1 && matches!(arguments[0].as_str(), "-h" | "--help") {
+        Ok(ParseOutcome::Help(HelpTopic::Screen))
+    } else {
+        Err(ParseError::UnexpectedArguments {
+            command: Command::Screen(command),
             arguments,
         })
     }
@@ -595,8 +687,9 @@ fn run_detect_backend<W: Write>(writer: &mut W) -> Result<(), RunError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_args, power_usage, usage, BrightnessCommand, Command, DevCommand, DevParseError,
-        HelpTopic, ParseError, ParseOutcome, PowerCommand, StartupMode, WebOsControlProbeCommand,
+        parse_args, power_usage, screen_usage, usage, BrightnessCommand, Command, DevCommand,
+        DevParseError, HelpTopic, ParseError, ParseOutcome, PowerCommand, ScreenCommand,
+        StartupMode, WebOsControlProbeCommand,
     };
     use crate::settings::{SettingsCommand, SettingsParseError};
     use crate::tv::OledBrightness;
@@ -638,6 +731,18 @@ mod tests {
         assert_eq!(
             parse_args(["power", "on", "--help"]),
             Ok(ParseOutcome::Help(HelpTopic::Power))
+        );
+        assert_eq!(
+            parse_args(["help", "screen"]),
+            Ok(ParseOutcome::Help(HelpTopic::Screen))
+        );
+        assert_eq!(
+            parse_args(["screen", "--help"]),
+            Ok(ParseOutcome::Help(HelpTopic::Screen))
+        );
+        assert_eq!(
+            parse_args(["screen", "off", "--help"]),
+            Ok(ParseOutcome::Help(HelpTopic::Screen))
         );
     }
 
@@ -710,6 +815,14 @@ mod tests {
         assert_eq!(
             parse_args(["screen-on"]),
             Ok(ParseOutcome::Command(Command::ScreenOn))
+        );
+        assert_eq!(
+            parse_args(["screen", "off"]),
+            Ok(ParseOutcome::Command(Command::Screen(ScreenCommand::Off)))
+        );
+        assert_eq!(
+            parse_args(["screen", "on"]),
+            Ok(ParseOutcome::Command(Command::Screen(ScreenCommand::On)))
         );
         assert_eq!(
             parse_args(["monitor"]),
@@ -906,6 +1019,27 @@ mod tests {
     }
 
     #[test]
+    fn invalid_screen_command_is_rejected_with_screen_help() {
+        assert_eq!(
+            parse_args(["screen"]),
+            Err(ParseError::MissingScreenCommand)
+        );
+        assert_eq!(
+            parse_args(["screen", "toggle"]),
+            Err(ParseError::UnknownScreenCommand("toggle".to_string()))
+        );
+        let error = parse_args(["screen", "off", "extra"]).unwrap_err();
+        assert_eq!(
+            error,
+            ParseError::UnexpectedArguments {
+                command: Command::Screen(ScreenCommand::Off),
+                arguments: vec!["extra".to_string()],
+            }
+        );
+        assert_eq!(error.help_topic(), HelpTopic::Screen);
+    }
+
+    #[test]
     fn invalid_brightness_command_is_rejected() {
         assert_eq!(
             parse_args(["brightness", "show"]),
@@ -1057,8 +1191,8 @@ mod tests {
             "sleep",
             "nm-pre-down",
             "brightness",
-            "screen-off",
-            "screen-on",
+            "screen off",
+            "screen on",
             "monitor",
             "lifecycle",
             "detect-backend",
@@ -1074,6 +1208,8 @@ mod tests {
         assert!(!help.contains("webos-read-probe"));
         assert!(!help.contains("startup [mode]"));
         assert!(!help.contains("shutdown        "));
+        assert!(!help.contains("screen-off"));
+        assert!(!help.contains("screen-on"));
     }
 
     #[test]
@@ -1084,6 +1220,16 @@ mod tests {
         assert!(help.contains("lg-buddy power off"));
         assert!(!help.contains("startup"));
         assert!(!help.contains("shutdown"));
+    }
+
+    #[test]
+    fn screen_usage_mentions_public_commands() {
+        let help = screen_usage("lg-buddy");
+
+        assert!(help.contains("lg-buddy screen off"));
+        assert!(help.contains("lg-buddy screen on"));
+        assert!(!help.contains("screen-off"));
+        assert!(!help.contains("screen-on"));
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use crate::session::SessionEvent;
-use crate::{Command, PowerCommand, StartupMode};
+use crate::{Command, PowerCommand, ScreenCommand, StartupMode};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuntimeEvent {
@@ -98,6 +98,8 @@ impl RuntimeEventKind {
                 })
             }
             Command::Brightness(_) => Some(Self::BrightnessRequested),
+            Command::Screen(ScreenCommand::Off) => Some(Self::ScreenBlankRequested),
+            Command::Screen(ScreenCommand::On) => Some(Self::ScreenRestoreRequested),
             Command::ScreenOff => Some(Self::ScreenBlankRequested),
             Command::ScreenOn => Some(Self::ScreenRestoreRequested),
             Command::Monitor
@@ -114,7 +116,7 @@ impl RuntimeEventKind {
 mod tests {
     use super::{EventSource, RuntimeEvent, RuntimeEventKind};
     use crate::session::SessionEvent;
-    use crate::{Command, PowerCommand, StartupMode};
+    use crate::{Command, PowerCommand, ScreenCommand, StartupMode};
 
     #[test]
     fn cli_commands_map_to_canonical_runtime_events() {
@@ -127,6 +129,20 @@ mod tests {
         );
         assert_eq!(
             RuntimeEvent::from_command(Command::ScreenOn),
+            Some(RuntimeEvent::new(
+                EventSource::CliApi,
+                RuntimeEventKind::ScreenRestoreRequested
+            ))
+        );
+        assert_eq!(
+            RuntimeEvent::from_command(Command::Screen(ScreenCommand::Off)),
+            Some(RuntimeEvent::new(
+                EventSource::CliApi,
+                RuntimeEventKind::ScreenBlankRequested
+            ))
+        );
+        assert_eq!(
+            RuntimeEvent::from_command(Command::Screen(ScreenCommand::On)),
             Some(RuntimeEvent::new(
                 EventSource::CliApi,
                 RuntimeEventKind::ScreenRestoreRequested

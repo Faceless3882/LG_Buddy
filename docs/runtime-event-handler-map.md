@@ -42,14 +42,16 @@ same normalized inactivity observations.
 | logind `PrepareForSleep(true)` | `lg-buddy lifecycle` | `sources::linux::logind` -> `session::runner` -> `lifecycle` | Enter the central suspend rail under the logind delay inhibitor so systems without a NetworkManager `pre-down` hook still get bounded pre-sleep TV handling. |
 | logind `PrepareForSleep(false)` | `lg-buddy lifecycle` | `sources::linux::logind` -> `session::runner` -> `lifecycle` | Run wake restore policy and clear sleep-cycle coordination state. |
 | user graphical session start | `lg-buddy monitor` | `session::runner::run_monitor` | Detect the session backend and run the selected monitor path. |
-| manual screen blank | `lg-buddy screen-off` | `commands` -> `screen` | Blank or power off the TV if LG Buddy owns the configured input. |
-| manual screen restore | `lg-buddy screen-on` | `commands` -> `screen` | Restore the screen when marker and restore-policy rules allow it. |
+| manual screen blank | `lg-buddy screen off` | `commands` -> `screen` | Blank or power off the TV if LG Buddy owns the configured input. |
+| manual screen restore | `lg-buddy screen on` | `commands` -> `screen` | Restore the screen when marker and restore-policy rules allow it. |
 | user update-check timer | `lg-buddy updates background-check` | `updates` -> GitHub releases API -> session notification handoff | Check for updates when automatic checks are enabled and notify once per release. |
 
 Compatibility command surfaces still exist for direct/manual invocation:
 
 | Command | Current role |
 | --- | --- |
+| `lg-buddy screen-off` | Hidden compatibility alias for `lg-buddy screen off`. |
+| `lg-buddy screen-on` | Hidden compatibility alias for `lg-buddy screen on`. |
 | `lg-buddy sleep-pre` | Direct pre-sleep policy command retained for manual/debug invocation. |
 | `lg-buddy startup wake` | Direct wake restore policy command retained for manual/debug invocation. |
 | `lg-buddy sleep` | Legacy NetworkManager pre-down behavior. It is not installed as a default event handler. |
@@ -140,19 +142,19 @@ The `swayidle` monitor is a delegated CLI/API client path.
 ```text
 swayidle timeout/resume
   -> external command string
-  -> lg-buddy screen-off / lg-buddy screen-on
+  -> lg-buddy screen off / lg-buddy screen on
   -> canonical CLI/API RuntimeEvent
   -> screen policy
 ```
 
 `sources/desktop/swayidle.rs` models hook-to-`SessionEvent` mapping, including
 `BeforeSleep`, `AfterResume`, `Lock`, and `Unlock`, but the production monitor
-currently starts `swayidle` with direct `screen-off` and `screen-on` commands.
+currently starts `swayidle` with direct `screen off` and `screen on` commands.
 Those richer hook events are not consumed by the monitor runner.
 
 This path exists for current non-GNOME Wayland support. It is delegated, but it
 is not a separate screen-policy quirks mode: `swayidle` re-enters LG Buddy
-through the same CLI/API command surface as manual `screen-off` and `screen-on`.
+through the same CLI/API command surface as manual `screen off` and `screen on`.
 Retiring it means replacing delegated timeout/resume execution with native
 idle/activity facts that feed the same inactivity engine used by the current
 native path.
@@ -213,15 +215,15 @@ Current lifecycle signal mapping:
 
 The current `SessionEventDispatcher` handles these session events when a
 backend path dispatches them. The production `swayidle` path delegates timeout
-and resume to direct `screen-off` / `screen-on` CLI/API commands; richer
+and resume to direct `screen off` / `screen on` CLI/API commands; richer
 `swayidle` hook events are modeled but not consumed by default.
 
 | Session event | Current action |
 | --- | --- |
-| `Idle` | Run `screen-off`. |
-| `Active` | Run `screen-on`. |
-| `WakeRequested` | Run `screen-on`. |
-| `UserActivity` | Run `screen-on`. |
+| `Idle` | Run `screen off`. |
+| `Active` | Run `screen on`. |
+| `WakeRequested` | Run `screen on`. |
+| `UserActivity` | Run `screen on`. |
 | `BeforeSleep` | Run pre-sleep TV power-off policy. |
 | `AfterResume` | Run wake restore policy. |
 | `Lock` | Log as unhandled. |

@@ -182,7 +182,7 @@ flowchart LR
     SCREEN --> PHASE
     NMGATE --> LIFECYCLE
 
-    SWAY -->|"delegated timeout / resume<br/>screen-off / screen-on CLI"| MAIN
+    SWAY -->|"delegated timeout / resume<br/>screen off / screen on CLI"| MAIN
     SADAPTER -.->|"modeled SessionEvent hooks"| SESSIONMODEL
     INPUT --> GAMEPAD
     GAMEPAD -->|"UserActivity"| RUNNER
@@ -305,7 +305,7 @@ The intended split is:
   - combines backend observations with the inactivity engine
   - dispatches semantic session events into screen and lifecycle policy
   - runs delegated `swayidle` by invoking the current executable's
-    `screen-off` and `screen-on` CLI commands
+    `screen off` and `screen on` CLI commands
 - `sources/linux/logind.rs`
   - Linux system lifecycle adapter
   - maps `org.freedesktop.login1` resume signals into canonical lifecycle
@@ -361,8 +361,8 @@ The binary currently supports these commands:
 - `brightness`
 - `brightness get`
 - `brightness set <0-100>`
-- `screen-off`
-- `screen-on`
+- `screen off`
+- `screen on`
 - `monitor`
 - `lifecycle`
 - `detect-backend`
@@ -398,9 +398,9 @@ This keeps CLI parsing separate from operational behavior.
 
 ## Core Control Flows
 
-### `screen-off`
+### `screen off`
 
-`screen-off` is an idle policy action.
+`screen off` is an idle policy action.
 
 Flow:
 
@@ -419,9 +419,9 @@ Flow:
    - clear the marker
    - do nothing to the TV
 
-### `screen-on`
+### `screen on`
 
-`screen-on` is a resume policy action.
+`screen on` is a resume policy action.
 
 Flow:
 
@@ -686,8 +686,8 @@ Production `swayidle` monitor execution does not dispatch those modeled events
 directly for timeout/resume. It starts `swayidle` with command strings pointing
 back to the current LG Buddy executable:
 
-- `screen-off` for timeout
-- `screen-on` for resume
+- `screen off` for timeout
+- `screen on` for resume
 
 That means `swayidle` acts as a CLI/API client of LG Buddy. It is delegated, but
 not a separate quirks path for screen policy: the invoked commands load config
@@ -777,8 +777,8 @@ The Rust runtime currently owns:
 - shutdown
 - system lifecycle handling through the cooperative logind/NetworkManager
   suspend rail plus logind resume monitor
-- screen-off
-- screen-on
+- screen off
+- screen on
 - brightness control
 - `monitor` command with GNOME and `swayidle` parity paths
 

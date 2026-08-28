@@ -359,6 +359,17 @@ fn command_fails(world: &mut LgBuddyWorld) {
     );
 }
 
+#[then(regex = r#"^the command exits with status (\d+)$"#)]
+fn command_exits_with_status(world: &mut LgBuddyWorld, expected: i32) {
+    assert_eq!(
+        world.command_result().exit_code,
+        Some(expected),
+        "unexpected command exit status\nstdout:\n{}\nstderr:\n{}",
+        world.command_result().stdout,
+        world.command_result().stderr
+    );
+}
+
 #[then(regex = r#"the command completes within (\d+) seconds"#)]
 fn command_completes_within_seconds(world: &mut LgBuddyWorld, seconds: u64) {
     assert!(
