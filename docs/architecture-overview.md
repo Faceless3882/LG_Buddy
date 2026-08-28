@@ -351,22 +351,35 @@ The session-facing pieces should be read as one subsystem:
 
 ## Command Model
 
-Public help currently lists these commands:
+The intended public user-action surface is:
+
+- `power on`
+- `power off`
+- `brightness`
+- `brightness get`
+- `brightness set <0-100>`
+- `screen off`
+- `screen on`
+- `settings list`
+- `settings describe [KEY]`
+- `settings get <KEY>`
+- `settings set <KEY> <VALUE>`
+- `settings unset <KEY>`
+- `updates check [--channel stable|prerelease] [--notify]`
+
+The binary also retains package-owned and compatibility entrypoints during the
+public-surface migration:
 
 - `startup [auto|boot|wake]`
 - `shutdown`
 - `sleep-pre`
 - `sleep`
 - `nm-pre-down`
-- `brightness`
-- `brightness get`
-- `brightness set <0-100>`
-- `screen off`
-- `screen on`
+- `screen-off`
+- `screen-on`
 - `monitor`
 - `lifecycle`
-- `settings`
-- `updates check [--channel stable|prerelease] [--notify]`
+- `detect-backend`
 - `updates background-check`
 
 `lib.rs` parses the command line into a typed command enum and dispatches into

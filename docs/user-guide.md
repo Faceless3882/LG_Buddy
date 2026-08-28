@@ -25,7 +25,7 @@ Available commands:
 - `monitor`
 - `lifecycle`
 - `settings`
-- `updates`
+- `updates check [--channel stable|prerelease] [--notify]`
 
 Examples:
 
@@ -43,7 +43,6 @@ lg-buddy brightness set 65
 lg-buddy --version
 lg-buddy updates check
 lg-buddy updates check --notify
-lg-buddy updates background-check
 ```
 
 In normal use, systemd starts the relevant commands automatically. Most users

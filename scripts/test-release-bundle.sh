@@ -33,6 +33,7 @@ assert_lifecycle_topology_installed() {
     assert_file "$USER_UPDATE_CHECK_SERVICE"
     assert_file "$USER_UPDATE_CHECK_TIMER"
     assert_file "$USER_UPDATE_CHECK_OVERRIDE"
+    grep -q '^ExecStart=/usr/bin/lg-buddy updates background-check$' "$USER_UPDATE_CHECK_SERVICE"
     grep -q '^OnCalendar=weekly$' "$USER_UPDATE_CHECK_TIMER"
     grep -q '^WantedBy=graphical-session.target$' "$USER_UPDATE_CHECK_TIMER"
     [ ! -e "$LEGACY_SLEEP_SERVICE" ] || {
@@ -158,7 +159,10 @@ printf '%s\n' "$HELP_OUTPUT" | grep -q "lg-buddy"
 printf '%s\n' "$HELP_OUTPUT" | grep -q "settings list"
 printf '%s\n' "$HELP_OUTPUT" | grep -q "settings set <key> <value>"
 printf '%s\n' "$HELP_OUTPUT" | grep -F -q "updates check [--channel stable|prerelease] [--notify]"
-printf '%s\n' "$HELP_OUTPUT" | grep -F -q "updates background-check"
+if printf '%s\n' "$HELP_OUTPUT" | grep -F -q "updates background-check"; then
+    echo "Background update entrypoint appeared in public bundle help."
+    exit 1
+fi
 
 VERSION_OUTPUT="$("$BUNDLE_DIR/lg-buddy" --version)"
 printf '%s\n' "$VERSION_OUTPUT" | grep -q "^lg-buddy "
@@ -244,7 +248,10 @@ printf '%s\n' "$INSTALLED_HELP_OUTPUT" | grep -q "lg-buddy"
 printf '%s\n' "$INSTALLED_HELP_OUTPUT" | grep -q "settings list"
 printf '%s\n' "$INSTALLED_HELP_OUTPUT" | grep -q "settings set <key> <value>"
 printf '%s\n' "$INSTALLED_HELP_OUTPUT" | grep -F -q "updates check [--channel stable|prerelease] [--notify]"
-printf '%s\n' "$INSTALLED_HELP_OUTPUT" | grep -F -q "updates background-check"
+if printf '%s\n' "$INSTALLED_HELP_OUTPUT" | grep -F -q "updates background-check"; then
+    echo "Background update entrypoint appeared in public installed help."
+    exit 1
+fi
 
 INSTALLED_VERSION_OUTPUT="$("$INSTALLED_BINARY" --version)"
 printf '%s\n' "$INSTALLED_VERSION_OUTPUT" | grep -q "^lg-buddy "
@@ -281,6 +288,8 @@ grep -q '^screen_idle_timeout=86400$' "$CONFIG_FILE"
 "$INSTALLED_BINARY" settings get updates.auto_check | grep -q '^enabled$'
 "$INSTALLED_BINARY" settings set updates.auto_check disabled
 "$INSTALLED_BINARY" settings set updates.channel prerelease
+BACKGROUND_UPDATE_OUTPUT="$("$INSTALLED_BINARY" updates background-check)"
+printf '%s\n' "$BACKGROUND_UPDATE_OUTPUT" | grep -F -q 'background: skipped (automatic update checks disabled)'
 grep -q '^screen_backend=gnome$' "$CONFIG_FILE"
 grep -q '^screen_idle_blank=disabled$' "$CONFIG_FILE"
 grep -q '^screen_idle_timeout=900$' "$CONFIG_FILE"

@@ -109,12 +109,28 @@ impl SettingsHelpTopic {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdatesHelpTopic {
+    Root,
+    Check,
+}
+
+impl UpdatesHelpTopic {
+    fn from_subcommand(subcommand: &str) -> Option<Self> {
+        match subcommand {
+            "check" => Some(Self::Check),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HelpTopic {
     Global,
     Brightness,
     Power,
     Screen,
     Settings(SettingsHelpTopic),
+    Updates(UpdatesHelpTopic),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -312,6 +328,18 @@ impl ParseError {
                 SettingsParseError::MissingSubcommand
                 | SettingsParseError::UnknownSubcommand(_) => SettingsHelpTopic::Root,
             }),
+            Self::Updates(error) => HelpTopic::Updates(match error {
+                UpdatesParseError::MissingChannelValue
+                | UpdatesParseError::DuplicateChannel
+                | UpdatesParseError::DuplicateNotify
+                | UpdatesParseError::UnknownChannel(_) => UpdatesHelpTopic::Check,
+                UpdatesParseError::UnexpectedArguments { subcommand, .. } => {
+                    UpdatesHelpTopic::from_subcommand(subcommand).unwrap_or(UpdatesHelpTopic::Root)
+                }
+                UpdatesParseError::MissingSubcommand | UpdatesParseError::UnknownSubcommand(_) => {
+                    UpdatesHelpTopic::Root
+                }
+            }),
             _ => HelpTopic::Global,
         }
     }
@@ -409,7 +437,6 @@ Settings:
 
 Updates:
   updates check [--channel stable|prerelease] [--notify]
-  updates background-check
 "
     )
 }
@@ -521,6 +548,36 @@ Usage:
     }
 }
 
+pub fn updates_usage(program: &str, topic: UpdatesHelpTopic) -> String {
+    match topic {
+        UpdatesHelpTopic::Root => format!(
+            "\
+LG Buddy update checks
+
+Usage:
+  {program} updates check [--channel stable|prerelease] [--notify]
+  {program} updates --help
+
+Commands:
+  check           Check GitHub releases for an available update
+"
+        ),
+        UpdatesHelpTopic::Check => format!(
+            "\
+LG Buddy update check
+
+Usage:
+  {program} updates check [--channel stable|prerelease] [--notify]
+
+Options:
+  --channel stable|prerelease
+                  Override the release channel for this check
+  --notify        Request a desktop notification when an update is available
+"
+        ),
+    }
+}
+
 pub fn help(program: &str, topic: HelpTopic) -> String {
     match topic {
         HelpTopic::Global => usage(program),
@@ -528,6 +585,7 @@ pub fn help(program: &str, topic: HelpTopic) -> String {
         HelpTopic::Power => power_usage(program),
         HelpTopic::Screen => screen_usage(program),
         HelpTopic::Settings(topic) => settings_usage(program, topic),
+        HelpTopic::Updates(topic) => updates_usage(program, topic),
     }
 }
 
@@ -574,11 +632,7 @@ where
             return Ok(ParseOutcome::Command(Command::Startup(startup_mode)));
         }
         "settings" => return parse_settings_command(args),
-        "updates" => {
-            return UpdatesCommand::parse(args)
-                .map(|command| ParseOutcome::Command(Command::Updates(command)))
-                .map_err(ParseError::Updates);
-        }
+        "updates" => return parse_updates_command(args),
         "dev" => {
             return DevCommand::parse(args)
                 .map(|command| ParseOutcome::Command(Command::Dev(command)))
@@ -704,6 +758,32 @@ where
                 }
             }
         },
+        "updates" => match remaining.as_slice() {
+            [] => Ok(ParseOutcome::Help(HelpTopic::Updates(
+                UpdatesHelpTopic::Root,
+            ))),
+            [subcommand] => UpdatesHelpTopic::from_subcommand(subcommand)
+                .map(|topic| ParseOutcome::Help(HelpTopic::Updates(topic)))
+                .ok_or_else(|| {
+                    ParseError::Updates(UpdatesParseError::UnknownSubcommand(
+                        subcommand.to_string(),
+                    ))
+                }),
+            [subcommand, arguments @ ..] => {
+                if UpdatesHelpTopic::from_subcommand(subcommand).is_some() {
+                    Err(ParseError::Updates(
+                        UpdatesParseError::UnexpectedArguments {
+                            subcommand: "check",
+                            arguments: arguments.to_vec(),
+                        },
+                    ))
+                } else {
+                    Err(ParseError::Updates(UpdatesParseError::UnknownSubcommand(
+                        subcommand.to_string(),
+                    )))
+                }
+            }
+        },
         other => Err(ParseError::UnknownCommand(other.to_string())),
     }
 }
@@ -751,6 +831,41 @@ where
     SettingsCommand::parse(arguments)
         .map(|command| ParseOutcome::Command(Command::Settings(command)))
         .map_err(ParseError::Settings)
+}
+
+fn parse_updates_command<I, S>(args: I) -> Result<ParseOutcome, ParseError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let arguments = args
+        .into_iter()
+        .map(|argument| argument.as_ref().to_string())
+        .collect::<Vec<_>>();
+
+    let Some(subcommand) = arguments.first() else {
+        return Err(ParseError::Updates(UpdatesParseError::MissingSubcommand));
+    };
+
+    if matches!(subcommand.as_str(), "-h" | "--help") {
+        return Ok(ParseOutcome::Help(HelpTopic::Updates(
+            UpdatesHelpTopic::Root,
+        )));
+    }
+
+    if UpdatesHelpTopic::from_subcommand(subcommand).is_some()
+        && arguments[1..]
+            .iter()
+            .any(|argument| matches!(argument.as_str(), "-h" | "--help"))
+    {
+        return Ok(ParseOutcome::Help(HelpTopic::Updates(
+            UpdatesHelpTopic::Check,
+        )));
+    }
+
+    UpdatesCommand::parse(arguments)
+        .map(|command| ParseOutcome::Command(Command::Updates(command)))
+        .map_err(ParseError::Updates)
 }
 
 fn parse_power_command<I, S>(args: I) -> Result<ParseOutcome, ParseError>
@@ -890,9 +1005,10 @@ fn run_detect_backend<W: Write>(writer: &mut W) -> Result<(), RunError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        brightness_usage, parse_args, power_usage, screen_usage, settings_usage, usage,
-        BrightnessCommand, Command, DevCommand, DevParseError, HelpTopic, ParseError, ParseOutcome,
-        PowerCommand, ScreenCommand, SettingsHelpTopic, StartupMode, WebOsControlProbeCommand,
+        brightness_usage, parse_args, power_usage, screen_usage, settings_usage, updates_usage,
+        usage, BrightnessCommand, Command, DevCommand, DevParseError, HelpTopic, ParseError,
+        ParseOutcome, PowerCommand, ScreenCommand, SettingsHelpTopic, StartupMode,
+        UpdatesHelpTopic, WebOsControlProbeCommand,
     };
     use crate::settings::{SettingsCommand, SettingsParseError};
     use crate::tv::OledBrightness;
@@ -989,6 +1105,30 @@ mod tests {
             parse_args(["settings", "set", "--help"]),
             Ok(ParseOutcome::Help(HelpTopic::Settings(
                 SettingsHelpTopic::Set
+            )))
+        );
+        assert_eq!(
+            parse_args(["help", "updates"]),
+            Ok(ParseOutcome::Help(HelpTopic::Updates(
+                UpdatesHelpTopic::Root
+            )))
+        );
+        assert_eq!(
+            parse_args(["help", "updates", "check"]),
+            Ok(ParseOutcome::Help(HelpTopic::Updates(
+                UpdatesHelpTopic::Check
+            )))
+        );
+        assert_eq!(
+            parse_args(["updates", "--help"]),
+            Ok(ParseOutcome::Help(HelpTopic::Updates(
+                UpdatesHelpTopic::Root
+            )))
+        );
+        assert_eq!(
+            parse_args(["updates", "check", "--help"]),
+            Ok(ParseOutcome::Help(HelpTopic::Updates(
+                UpdatesHelpTopic::Check
             )))
         );
     }
@@ -1405,9 +1545,14 @@ mod tests {
                 "latest".to_string()
             )))
         );
+        let error = parse_args(["updates", "check", "--channel"]).unwrap_err();
         assert_eq!(
-            parse_args(["updates", "check", "--channel"]),
-            Err(ParseError::Updates(UpdatesParseError::MissingChannelValue))
+            error,
+            ParseError::Updates(UpdatesParseError::MissingChannelValue)
+        );
+        assert_eq!(
+            error.help_topic(),
+            HelpTopic::Updates(UpdatesHelpTopic::Check)
         );
         assert_eq!(
             parse_args(["updates", "check", "--channel", "nightly"]),
@@ -1469,6 +1614,7 @@ mod tests {
         assert!(!help.contains("screen-off"));
         assert!(!help.contains("screen-on"));
         assert!(!help.contains("detect-backend"));
+        assert!(!help.contains("updates background-check"));
     }
 
     #[test]
@@ -1513,6 +1659,18 @@ mod tests {
     }
 
     #[test]
+    fn updates_usage_is_scoped_and_hides_the_timer_entrypoint() {
+        let root = updates_usage("lg-buddy", UpdatesHelpTopic::Root);
+        assert!(root.contains("lg-buddy updates check [--channel stable|prerelease] [--notify]"));
+        assert!(!root.contains("background-check"));
+
+        let check = updates_usage("lg-buddy", UpdatesHelpTopic::Check);
+        assert!(check.contains("--channel stable|prerelease"));
+        assert!(check.contains("--notify"));
+        assert!(!check.contains("background-check"));
+    }
+
+    #[test]
     fn usage_mentions_settings_commands_without_reserved_notice() {
         let help = usage("lg-buddy");
 
@@ -1528,7 +1686,6 @@ mod tests {
             "settings set <key> <value>",
             "settings unset <key>",
             "updates check [--channel stable|prerelease] [--notify]",
-            "updates background-check",
         ] {
             assert!(help.contains(command), "missing `{command}` from help");
         }
