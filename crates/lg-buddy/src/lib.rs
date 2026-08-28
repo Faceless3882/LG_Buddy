@@ -88,6 +88,7 @@ pub enum ScreenCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HelpTopic {
     Global,
+    Brightness,
     Power,
     Screen,
 }
@@ -260,6 +261,13 @@ impl std::error::Error for RunError {
 impl ParseError {
     pub fn help_topic(&self) -> HelpTopic {
         match self {
+            Self::UnknownBrightnessCommand(_)
+            | Self::MissingBrightnessValue
+            | Self::InvalidBrightnessValue(_) => HelpTopic::Brightness,
+            Self::UnexpectedArguments {
+                command: Command::Brightness(_),
+                ..
+            } => HelpTopic::Brightness,
             Self::MissingPowerCommand | Self::UnknownPowerCommand(_) => HelpTopic::Power,
             Self::UnexpectedArguments {
                 command: Command::Power(_),
@@ -390,6 +398,24 @@ Commands:
     )
 }
 
+pub fn brightness_usage(program: &str) -> String {
+    format!(
+        "\
+LG Buddy TV brightness control
+
+Usage:
+  {program} brightness
+  {program} brightness get
+  {program} brightness set <0-100>
+  {program} brightness --help
+
+Commands:
+  get             Print the current TV OLED brightness
+  set <0-100>     Set the TV OLED brightness
+"
+    )
+}
+
 pub fn screen_usage(program: &str) -> String {
     format!(
         "\
@@ -410,6 +436,7 @@ Commands:
 pub fn help(program: &str, topic: HelpTopic) -> String {
     match topic {
         HelpTopic::Global => usage(program),
+        HelpTopic::Brightness => brightness_usage(program),
         HelpTopic::Power => power_usage(program),
         HelpTopic::Screen => screen_usage(program),
     }
@@ -539,6 +566,15 @@ where
         .map(|argument| argument.as_ref().to_string())
         .collect::<Vec<_>>();
     match topic.as_ref() {
+        "brightness" => {
+            if remaining.is_empty()
+                || (remaining.len() == 1 && matches!(remaining[0].as_str(), "get" | "set"))
+            {
+                Ok(ParseOutcome::Help(HelpTopic::Brightness))
+            } else {
+                Err(ParseError::UnknownBrightnessCommand(remaining.join(" ")))
+            }
+        }
         "power" => {
             if remaining.is_empty()
                 || (remaining.len() == 1 && matches!(remaining[0].as_str(), "on" | "off"))
@@ -643,6 +679,10 @@ where
         )));
     };
 
+    if matches!(subcommand.as_ref(), "-h" | "--help") {
+        return Ok(ParseOutcome::Help(HelpTopic::Brightness));
+    }
+
     match subcommand.as_ref() {
         "get" => {
             let extra_args: Vec<String> = args.map(|arg| arg.as_ref().to_string()).collect();
@@ -650,6 +690,8 @@ where
                 Ok(ParseOutcome::Command(Command::Brightness(
                     BrightnessCommand::Get,
                 )))
+            } else if extra_args.len() == 1 && matches!(extra_args[0].as_str(), "-h" | "--help") {
+                Ok(ParseOutcome::Help(HelpTopic::Brightness))
             } else {
                 Err(ParseError::UnexpectedArguments {
                     command: Command::Brightness(BrightnessCommand::Get),
@@ -659,12 +701,17 @@ where
         }
         "set" => {
             let value = args.next().ok_or(ParseError::MissingBrightnessValue)?;
+            if matches!(value.as_ref(), "-h" | "--help") {
+                return Ok(ParseOutcome::Help(HelpTopic::Brightness));
+            }
             let brightness = OledBrightness::parse(value.as_ref())
                 .map_err(ParseError::InvalidBrightnessValue)?;
             let extra_args: Vec<String> = args.map(|arg| arg.as_ref().to_string()).collect();
             let command = BrightnessCommand::Set(brightness);
             if extra_args.is_empty() {
                 Ok(ParseOutcome::Command(Command::Brightness(command)))
+            } else if extra_args.len() == 1 && matches!(extra_args[0].as_str(), "-h" | "--help") {
+                Ok(ParseOutcome::Help(HelpTopic::Brightness))
             } else {
                 Err(ParseError::UnexpectedArguments {
                     command: Command::Brightness(command),
@@ -687,9 +734,9 @@ fn run_detect_backend<W: Write>(writer: &mut W) -> Result<(), RunError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_args, power_usage, screen_usage, usage, BrightnessCommand, Command, DevCommand,
-        DevParseError, HelpTopic, ParseError, ParseOutcome, PowerCommand, ScreenCommand,
-        StartupMode, WebOsControlProbeCommand,
+        brightness_usage, parse_args, power_usage, screen_usage, usage, BrightnessCommand, Command,
+        DevCommand, DevParseError, HelpTopic, ParseError, ParseOutcome, PowerCommand,
+        ScreenCommand, StartupMode, WebOsControlProbeCommand,
     };
     use crate::settings::{SettingsCommand, SettingsParseError};
     use crate::tv::OledBrightness;
@@ -719,6 +766,26 @@ mod tests {
         assert_eq!(
             parse_args(["help"]),
             Ok(ParseOutcome::Help(HelpTopic::Global))
+        );
+        assert_eq!(
+            parse_args(["help", "brightness"]),
+            Ok(ParseOutcome::Help(HelpTopic::Brightness))
+        );
+        assert_eq!(
+            parse_args(["help", "brightness", "set"]),
+            Ok(ParseOutcome::Help(HelpTopic::Brightness))
+        );
+        assert_eq!(
+            parse_args(["brightness", "--help"]),
+            Ok(ParseOutcome::Help(HelpTopic::Brightness))
+        );
+        assert_eq!(
+            parse_args(["brightness", "get", "--help"]),
+            Ok(ParseOutcome::Help(HelpTopic::Brightness))
+        );
+        assert_eq!(
+            parse_args(["brightness", "set", "--help"]),
+            Ok(ParseOutcome::Help(HelpTopic::Brightness))
         );
         assert_eq!(
             parse_args(["help", "power"]),
@@ -1049,10 +1116,9 @@ mod tests {
             parse_args(["brightness", "set"]),
             Err(ParseError::MissingBrightnessValue)
         );
-        assert!(matches!(
-            parse_args(["brightness", "set", "101"]),
-            Err(ParseError::InvalidBrightnessValue(_))
-        ));
+        let error = parse_args(["brightness", "set", "101"]).unwrap_err();
+        assert!(matches!(&error, ParseError::InvalidBrightnessValue(_)));
+        assert_eq!(error.help_topic(), HelpTopic::Brightness);
         assert!(matches!(
             parse_args(["brightness", "set", "abc"]),
             Err(ParseError::InvalidBrightnessValue(_))
@@ -1063,6 +1129,10 @@ mod tests {
                 command: Command::Brightness(BrightnessCommand::Get),
                 arguments: vec!["extra".to_string()],
             })
+        );
+        assert_eq!(
+            ParseError::MissingBrightnessValue.help_topic(),
+            HelpTopic::Brightness
         );
     }
 
@@ -1220,6 +1290,15 @@ mod tests {
         assert!(help.contains("lg-buddy power off"));
         assert!(!help.contains("startup"));
         assert!(!help.contains("shutdown"));
+    }
+
+    #[test]
+    fn brightness_usage_mentions_public_commands() {
+        let help = brightness_usage("lg-buddy");
+
+        assert!(help.contains("lg-buddy brightness\n"));
+        assert!(help.contains("lg-buddy brightness get"));
+        assert!(help.contains("lg-buddy brightness set <0-100>"));
     }
 
     #[test]
