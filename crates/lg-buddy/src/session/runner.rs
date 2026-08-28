@@ -2611,7 +2611,6 @@ system_sleep_wake_policy={policy}
                 thread::spawn(move || {
                     let result = activity_receiver
                         .recv_timeout(Duration::from_secs(1))
-                        .map(|()| ())
                         .map_err(|err| super::SessionRunnerError::Failed {
                             backend: ScreenBackend::Auto,
                             message: format!(
