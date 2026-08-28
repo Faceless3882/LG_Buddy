@@ -406,6 +406,15 @@ fn stderr_contains(world: &mut LgBuddyWorld, expected: String) {
     );
 }
 
+#[then(regex = r#"stderr does not contain "([^"]+)""#)]
+fn stderr_does_not_contain(world: &mut LgBuddyWorld, unexpected: String) {
+    assert!(
+        !world.command_result().stderr.contains(&unexpected),
+        "stderr was: {}",
+        world.command_result().stderr
+    );
+}
+
 #[then(regex = r#"config\.env contains "([^"]+)""#)]
 fn config_env_contains(world: &mut LgBuddyWorld, expected: String) {
     world.assert_config_contains(&expected);

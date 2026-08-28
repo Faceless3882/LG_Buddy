@@ -16,6 +16,64 @@ Feature: Settings CLI
     And stdout contains "updates.auto_check=enabled (default, read-write, ops: get,describe,set,unset)"
     And stdout contains "updates.channel=stable (default, read-write, ops: get,describe,set,unset)"
 
+  Scenario: settings help describes the public commands
+    When I run the command "settings --help"
+    Then the command succeeds
+    And stdout contains "settings list"
+    And stdout contains "settings describe [KEY]"
+    And stdout contains "settings get <KEY>"
+    And stdout contains "settings set <KEY> <VALUE>"
+    And stdout contains "settings unset <KEY>"
+
+  Scenario: settings set help is scoped to the subcommand
+    When I run the command "settings set --help"
+    Then the command succeeds
+    And stdout contains "settings set <KEY> <VALUE>"
+    And stdout does not contain "settings list"
+
+  Scenario: Invalid settings syntax shows scoped usage
+    When I run the command "settings set screen.backend"
+    Then the command fails
+    And the command exits with status 2
+    And stderr contains "missing setting value for `settings set`"
+    And stderr contains "settings set <KEY> <VALUE>"
+    And stderr does not contain "settings list"
+
+  Scenario: Global help exposes settings without the backend diagnostic alias
+    When I run the command "--help"
+    Then the command succeeds
+    And stdout contains "settings"
+    And stdout does not contain "detect-backend"
+
+  Scenario: settings describe annotates auto with the resolved GNOME backend
+    Given a temporary LG Buddy config using input HDMI_2
+    And GNOME Shell is available
+    And the executable PATH is isolated
+    When I run the command "settings describe screen.backend"
+    Then the command succeeds
+    And stdout contains "current: auto (gnome)"
+    And stdout contains "allowed values: auto (gnome), gnome, swayidle"
+    When I run the command "settings get screen.backend"
+    Then the command succeeds
+    And stdout is "auto"
+
+  Scenario: settings describe annotates auto with the swayidle fallback
+    Given a temporary LG Buddy config using input HDMI_2
+    And the executable PATH is isolated
+    And swayidle is installed
+    When I run the command "settings describe screen.backend"
+    Then the command succeeds
+    And stdout contains "current: auto (swayidle)"
+    And stdout contains "allowed values: auto (swayidle), gnome, swayidle"
+
+  Scenario: settings describe remains available without a detected backend
+    Given a temporary LG Buddy config using input HDMI_2
+    And the executable PATH is isolated
+    When I run the command "settings describe screen.backend"
+    Then the command succeeds
+    And stdout contains "current: auto (no backend currently available)"
+    And stdout contains "allowed values: auto (no backend currently available), gnome, swayidle"
+
   Scenario: settings describe shows required TV operations
     Given a temporary LG Buddy config using input HDMI_2
     When I run the command "settings describe tv.input"

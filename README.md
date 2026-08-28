@@ -114,7 +114,8 @@ LG Buddy is mostly automatic after installation.
 - To inspect settings, run `lg-buddy settings list`
 - To change supported settings, use `lg-buddy settings set <key> <value>`
 - To inspect the active TV platform, run `lg-buddy settings get tv.platform`
-- To see the active desktop idle backend, run `lg-buddy detect-backend`
+- To inspect the configured and currently resolved desktop idle backend, run
+  `lg-buddy settings describe screen.backend`
 - To inspect TV brightness, run `lg-buddy brightness get`
 - To set TV brightness directly, run `lg-buddy brightness set <0-100>`
 - To inspect the installed runtime version, run `lg-buddy --version`

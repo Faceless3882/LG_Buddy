@@ -24,15 +24,14 @@ Available commands:
 - `screen on`
 - `monitor`
 - `lifecycle`
-- `detect-backend`
 - `settings`
 - `updates`
 
 Examples:
 
 ```bash
-lg-buddy detect-backend
 lg-buddy settings list
+lg-buddy settings describe screen.backend
 lg-buddy monitor
 lg-buddy power on
 lg-buddy power off
@@ -263,6 +262,13 @@ Current structured settings:
 | `system.sleep_wake_policy` | `system_sleep_wake_policy` | `get`, `describe`, `set`, `unset` |
 | `updates.auto_check` | `updates_auto_check` | `get`, `describe`, `set`, `unset` |
 | `updates.channel` | `updates_channel` | `get`, `describe`, `set`, `unset` |
+
+`settings describe screen.backend` annotates the `auto` choice with the backend
+currently resolved from the desktop session, such as `auto (gnome)` or
+`auto (swayidle)`. If neither backend is currently available, it reports
+`auto (no backend currently available)`. Detection is best-effort and does not
+make settings inspection fail. `settings get screen.backend` remains raw and
+prints values such as `auto` for scripts.
 
 The `tv.*` settings expose the single supported TV in the public API. Their
 storage keys are profile-shaped only to leave room for future storage growth;

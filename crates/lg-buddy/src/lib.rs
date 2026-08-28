@@ -86,11 +86,35 @@ pub enum ScreenCommand {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsHelpTopic {
+    Root,
+    List,
+    Describe,
+    Get,
+    Set,
+    Unset,
+}
+
+impl SettingsHelpTopic {
+    fn from_subcommand(subcommand: &str) -> Option<Self> {
+        match subcommand {
+            "list" => Some(Self::List),
+            "describe" => Some(Self::Describe),
+            "get" => Some(Self::Get),
+            "set" => Some(Self::Set),
+            "unset" => Some(Self::Unset),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HelpTopic {
     Global,
     Brightness,
     Power,
     Screen,
+    Settings(SettingsHelpTopic),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -278,6 +302,16 @@ impl ParseError {
                 command: Command::Screen(_),
                 ..
             } => HelpTopic::Screen,
+            Self::Settings(error) => HelpTopic::Settings(match error {
+                SettingsParseError::MissingKey { subcommand }
+                | SettingsParseError::MissingValue { subcommand }
+                | SettingsParseError::UnexpectedArguments { subcommand, .. } => {
+                    SettingsHelpTopic::from_subcommand(subcommand)
+                        .unwrap_or(SettingsHelpTopic::Root)
+                }
+                SettingsParseError::MissingSubcommand
+                | SettingsParseError::UnknownSubcommand(_) => SettingsHelpTopic::Root,
+            }),
             _ => HelpTopic::Global,
         }
     }
@@ -363,7 +397,6 @@ Commands:
   screen on       Restore the TV output after an LG Buddy screen blank
   monitor         Run the user-session monitor loop
   lifecycle       Run the system lifecycle monitor loop
-  detect-backend  Detect the active screen backend
   settings        Inspect and edit structured LG Buddy settings
   updates         Check GitHub releases on demand or from the user timer
 
@@ -433,12 +466,68 @@ Commands:
     )
 }
 
+pub fn settings_usage(program: &str, topic: SettingsHelpTopic) -> String {
+    match topic {
+        SettingsHelpTopic::Root => format!(
+            "\
+LG Buddy settings
+
+Usage:
+  {program} settings list
+  {program} settings describe [KEY]
+  {program} settings get <KEY>
+  {program} settings set <KEY> <VALUE>
+  {program} settings unset <KEY>
+  {program} settings --help
+
+Commands:
+  list                    List settings and their effective values
+  describe [KEY]          Describe one setting or the complete registry
+  get <KEY>               Print one raw effective value
+  set <KEY> <VALUE>       Save a setting value
+  unset <KEY>             Remove a saved override
+"
+        ),
+        SettingsHelpTopic::List => format!(
+            "\
+Usage:
+  {program} settings list
+"
+        ),
+        SettingsHelpTopic::Describe => format!(
+            "\
+Usage:
+  {program} settings describe [KEY]
+"
+        ),
+        SettingsHelpTopic::Get => format!(
+            "\
+Usage:
+  {program} settings get <KEY>
+"
+        ),
+        SettingsHelpTopic::Set => format!(
+            "\
+Usage:
+  {program} settings set <KEY> <VALUE>
+"
+        ),
+        SettingsHelpTopic::Unset => format!(
+            "\
+Usage:
+  {program} settings unset <KEY>
+"
+        ),
+    }
+}
+
 pub fn help(program: &str, topic: HelpTopic) -> String {
     match topic {
         HelpTopic::Global => usage(program),
         HelpTopic::Brightness => brightness_usage(program),
         HelpTopic::Power => power_usage(program),
         HelpTopic::Screen => screen_usage(program),
+        HelpTopic::Settings(topic) => settings_usage(program, topic),
     }
 }
 
@@ -484,11 +573,7 @@ where
 
             return Ok(ParseOutcome::Command(Command::Startup(startup_mode)));
         }
-        "settings" => {
-            return SettingsCommand::parse(args)
-                .map(|command| ParseOutcome::Command(Command::Settings(command)))
-                .map_err(ParseError::Settings);
-        }
+        "settings" => return parse_settings_command(args),
         "updates" => {
             return UpdatesCommand::parse(args)
                 .map(|command| ParseOutcome::Command(Command::Updates(command)))
@@ -593,8 +678,79 @@ where
                 Err(ParseError::UnknownScreenCommand(remaining.join(" ")))
             }
         }
+        "settings" => match remaining.as_slice() {
+            [] => Ok(ParseOutcome::Help(HelpTopic::Settings(
+                SettingsHelpTopic::Root,
+            ))),
+            [subcommand] => SettingsHelpTopic::from_subcommand(subcommand)
+                .map(|topic| ParseOutcome::Help(HelpTopic::Settings(topic)))
+                .ok_or_else(|| {
+                    ParseError::Settings(SettingsParseError::UnknownSubcommand(
+                        subcommand.to_string(),
+                    ))
+                }),
+            [subcommand, arguments @ ..] => {
+                if let Some(topic) = SettingsHelpTopic::from_subcommand(subcommand) {
+                    Err(ParseError::Settings(
+                        SettingsParseError::UnexpectedArguments {
+                            subcommand: settings_help_subcommand(topic),
+                            arguments: arguments.to_vec(),
+                        },
+                    ))
+                } else {
+                    Err(ParseError::Settings(SettingsParseError::UnknownSubcommand(
+                        subcommand.to_string(),
+                    )))
+                }
+            }
+        },
         other => Err(ParseError::UnknownCommand(other.to_string())),
     }
+}
+
+fn settings_help_subcommand(topic: SettingsHelpTopic) -> &'static str {
+    match topic {
+        SettingsHelpTopic::Root => "settings",
+        SettingsHelpTopic::List => "list",
+        SettingsHelpTopic::Describe => "describe",
+        SettingsHelpTopic::Get => "get",
+        SettingsHelpTopic::Set => "set",
+        SettingsHelpTopic::Unset => "unset",
+    }
+}
+
+fn parse_settings_command<I, S>(args: I) -> Result<ParseOutcome, ParseError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let arguments = args
+        .into_iter()
+        .map(|argument| argument.as_ref().to_string())
+        .collect::<Vec<_>>();
+
+    let Some(subcommand) = arguments.first() else {
+        return Err(ParseError::Settings(SettingsParseError::MissingSubcommand));
+    };
+
+    if matches!(subcommand.as_str(), "-h" | "--help") {
+        return Ok(ParseOutcome::Help(HelpTopic::Settings(
+            SettingsHelpTopic::Root,
+        )));
+    }
+
+    if let Some(topic) = SettingsHelpTopic::from_subcommand(subcommand) {
+        if arguments[1..]
+            .iter()
+            .any(|argument| matches!(argument.as_str(), "-h" | "--help"))
+        {
+            return Ok(ParseOutcome::Help(HelpTopic::Settings(topic)));
+        }
+    }
+
+    SettingsCommand::parse(arguments)
+        .map(|command| ParseOutcome::Command(Command::Settings(command)))
+        .map_err(ParseError::Settings)
 }
 
 fn parse_power_command<I, S>(args: I) -> Result<ParseOutcome, ParseError>
@@ -734,9 +890,9 @@ fn run_detect_backend<W: Write>(writer: &mut W) -> Result<(), RunError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        brightness_usage, parse_args, power_usage, screen_usage, usage, BrightnessCommand, Command,
-        DevCommand, DevParseError, HelpTopic, ParseError, ParseOutcome, PowerCommand,
-        ScreenCommand, StartupMode, WebOsControlProbeCommand,
+        brightness_usage, parse_args, power_usage, screen_usage, settings_usage, usage,
+        BrightnessCommand, Command, DevCommand, DevParseError, HelpTopic, ParseError, ParseOutcome,
+        PowerCommand, ScreenCommand, SettingsHelpTopic, StartupMode, WebOsControlProbeCommand,
     };
     use crate::settings::{SettingsCommand, SettingsParseError};
     use crate::tv::OledBrightness;
@@ -810,6 +966,30 @@ mod tests {
         assert_eq!(
             parse_args(["screen", "off", "--help"]),
             Ok(ParseOutcome::Help(HelpTopic::Screen))
+        );
+        assert_eq!(
+            parse_args(["help", "settings"]),
+            Ok(ParseOutcome::Help(HelpTopic::Settings(
+                SettingsHelpTopic::Root
+            )))
+        );
+        assert_eq!(
+            parse_args(["help", "settings", "set"]),
+            Ok(ParseOutcome::Help(HelpTopic::Settings(
+                SettingsHelpTopic::Set
+            )))
+        );
+        assert_eq!(
+            parse_args(["settings", "--help"]),
+            Ok(ParseOutcome::Help(HelpTopic::Settings(
+                SettingsHelpTopic::Root
+            )))
+        );
+        assert_eq!(
+            parse_args(["settings", "set", "--help"]),
+            Ok(ParseOutcome::Help(HelpTopic::Settings(
+                SettingsHelpTopic::Set
+            )))
         );
     }
 
@@ -1202,6 +1382,15 @@ mod tests {
                 }
             ))
         );
+        let error = parse_args(["settings", "set", "screen.backend"]).unwrap_err();
+        assert_eq!(
+            error,
+            ParseError::Settings(SettingsParseError::MissingValue { subcommand: "set" })
+        );
+        assert_eq!(
+            error.help_topic(),
+            HelpTopic::Settings(SettingsHelpTopic::Set)
+        );
     }
 
     #[test]
@@ -1265,7 +1454,6 @@ mod tests {
             "screen on",
             "monitor",
             "lifecycle",
-            "detect-backend",
             "settings",
             "updates",
         ] {
@@ -1280,6 +1468,7 @@ mod tests {
         assert!(!help.contains("shutdown        "));
         assert!(!help.contains("screen-off"));
         assert!(!help.contains("screen-on"));
+        assert!(!help.contains("detect-backend"));
     }
 
     #[test]
@@ -1309,6 +1498,18 @@ mod tests {
         assert!(help.contains("lg-buddy screen on"));
         assert!(!help.contains("screen-off"));
         assert!(!help.contains("screen-on"));
+    }
+
+    #[test]
+    fn settings_usage_is_scoped_to_the_requested_level() {
+        let root = settings_usage("lg-buddy", SettingsHelpTopic::Root);
+        assert!(root.contains("lg-buddy settings list"));
+        assert!(root.contains("lg-buddy settings describe [KEY]"));
+        assert!(root.contains("set <KEY> <VALUE>"));
+
+        let set = settings_usage("lg-buddy", SettingsHelpTopic::Set);
+        assert!(set.contains("lg-buddy settings set <KEY> <VALUE>"));
+        assert!(!set.contains("settings list"));
     }
 
     #[test]

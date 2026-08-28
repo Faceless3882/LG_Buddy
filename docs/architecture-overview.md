@@ -351,7 +351,7 @@ The session-facing pieces should be read as one subsystem:
 
 ## Command Model
 
-The binary currently supports these commands:
+Public help currently lists these commands:
 
 - `startup [auto|boot|wake]`
 - `shutdown`
@@ -365,7 +365,6 @@ The binary currently supports these commands:
 - `screen on`
 - `monitor`
 - `lifecycle`
-- `detect-backend`
 - `settings`
 - `updates check [--channel stable|prerelease] [--notify]`
 - `updates background-check`
@@ -499,9 +498,11 @@ idempotent pre-sleep rail before NetworkManager tears down the interface. If
 logind already owns the cycle, NetworkManager waits for a terminal rail outcome
 or bounded timeout before releasing teardown.
 
-### `detect-backend`
+### Hidden `detect-backend` compatibility entrypoint
 
-`detect-backend` resolves the desktop backend to use.
+`detect-backend` resolves the desktop backend to use for existing package
+callers. It is hidden from public help while those callers migrate to the
+shared settings/backend presentation.
 
 Selection order:
 
