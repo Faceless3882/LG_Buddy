@@ -26,6 +26,8 @@ contract.
 3. Missing backend capabilities stay missing.
 4. LG Buddy does not invent synthetic provider behavior just to fill gaps in the
    interface.
+5. Auxiliary input sources belong to the session runtime, not desktop backend
+   modules.
 
 That means a backend can say "I do not emit `WakeRequested`" or "idle timeout is
 desktop-managed" without being treated as incomplete.
@@ -54,7 +56,7 @@ These are the semantic events the runtime should reason about.
   - It exists for native desktop adapters that can expose fresh activity before
     the desktop emits its normal active/wake signal. GNOME + Mutter is the
     current production example.
-  - It can also come from backend-adjacent activity sources owned by the session
+  - It can also come from auxiliary activity sources owned by the session
     runtime, such as gamepad input that the desktop does not classify as
     activity.
 - `WakeRequested` is optional.
@@ -133,28 +135,35 @@ Current mapping:
 | `org.gnome.ScreenSaver.ActiveChanged (false,)` | `Active` | Implemented |
 | `org.gnome.ScreenSaver.WakeUpScreen` | `WakeRequested` | Implemented |
 | Recent activity from `org.gnome.Mutter.IdleMonitor.GetIdletime` | `UserActivity` | Implemented |
-| Linux gamepad input devices | `UserActivity` | Implemented in the GNOME monitor runtime |
 
 Notes:
 
 - GNOME requires GNOME Shell, `org.gnome.ScreenSaver`, and `org.gnome.Mutter.IdleMonitor`.
 - LG Buddy owns the configured timeout value for this backend.
-- LG Buddy owns one inactivity deadline. Desktop, gamepad, active, and wake
+- LG Buddy owns one inactivity deadline. Desktop, auxiliary, active, and wake
   activity reports reset it; expiry after `screen_idle_timeout` triggers blanking.
 - Mutter idletime is used only to detect recent desktop activity. Its absolute
   value does not trigger blanking.
 - ScreenSaver idle cannot trigger blanking by itself. ScreenSaver active and
   wake signals reset the same LG Buddy deadline and remain restore observations
   evaluated by screen policy.
-- Gamepad activity is not a separate desktop backend. It is an auxiliary
-  activity source attached to the current native monitor path because some
-  desktop idle APIs may not count controller input as activity.
-- The gamepad source owns its device set internally. It performs an initial
-  scan, refreshes on Linux input-device add, remove, and change events, and
-  periodically reconciles in case an event is missed.
-- Standard controller input is read from evdev. Logitech G923 wheel and pedal
-  activity has a narrow raw HID fallback for hosts where those reports do not
-  appear on the evdev node.
+
+### Auxiliary Activity Sources
+
+Linux gamepad input is a desktop-independent auxiliary activity source. The
+shared native-session runtime owns its lifecycle and feeds
+`UserActivityObserved` into the same inactivity engine as the selected desktop
+provider. Resulting runtime events retain the `AuxiliaryInput` source.
+
+The gamepad source owns its device set internally. It performs an initial scan,
+refreshes on Linux input-device add, remove, and change events, and periodically
+reconciles in case an event is missed. Standard controller input is read from
+evdev. Logitech G923 wheel and pedal activity has a narrow raw HID fallback for
+hosts where those reports do not appear on the evdev node.
+
+GNOME is currently the only production desktop provider using the shared
+native-session runtime. A future native Wayland provider should plug into that
+runtime without acquiring any gamepad responsibility.
 
 ### `swayidle`
 
@@ -183,6 +192,10 @@ The code split is:
   - canonical events
   - capability model
   - backend-neutral traits and errors
+- `crates/lg-buddy/src/session/runner.rs`
+  - shared native-session orchestration and inactivity policy dispatch
+- `crates/lg-buddy/src/session/gamepad/`
+  - desktop-independent auxiliary input discovery and activity observations
 - `crates/lg-buddy/src/sources/desktop/gnome.rs`
   - GNOME-specific probing and event mapping
 - `crates/lg-buddy/src/sources/desktop/swayidle.rs`

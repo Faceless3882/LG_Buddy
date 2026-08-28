@@ -112,7 +112,7 @@ auxiliary activity facts
   -> screen policy
 ```
 
-Current pilot inputs:
+Current native-runtime inputs:
 
 | Provider surface | Runtime representation | Consumed by |
 | --- | --- | --- |
@@ -120,11 +120,12 @@ Current pilot inputs:
 | `org.gnome.ScreenSaver.ActiveChanged(false)` | `ProviderActive` | `InactivityEngine` |
 | `org.gnome.ScreenSaver.WakeUpScreen` | `WakeRequested` | `InactivityEngine` |
 | Recent activity reported by `org.gnome.Mutter.IdleMonitor.GetIdletime` | `DesktopActivityObserved` | `InactivityEngine` |
-| Linux gamepad activity | `UserActivityObserved` | `InactivityEngine` |
+| Linux gamepad activity | `UserActivityObserved` from `AuxiliaryInput` | Shared native-session runtime -> `InactivityEngine` |
 
-These are GNOME-specific source surfaces, but the runtime representations are
-backend-neutral. The key architectural point is that blank/restore decisions are
-made after normalization, not inside the GNOME adapter.
+The desktop rows are GNOME-specific source surfaces. Gamepad activity is an
+independent auxiliary source owned by the shared native-session runtime. The
+key architectural point is that blank/restore decisions are made after
+normalization, not inside a desktop adapter.
 
 The resulting decisions are dispatched as:
 
@@ -133,7 +134,8 @@ The resulting decisions are dispatched as:
 | `BlankNow` | `SessionEvent::Idle` -> `RuntimeEvent` from `DesktopSession` | `screen::run_screen_off_from_env_for_event` |
 | `RestoreNow` from provider active | `SessionEvent::Active` -> `RuntimeEvent` from `DesktopSession` | `screen::run_screen_on_from_env_for_event` |
 | `RestoreNow` from wake request | `SessionEvent::WakeRequested` -> `RuntimeEvent` from `DesktopSession` | `screen::run_screen_on_from_env_for_event` |
-| `RestoreNow` from desktop or auxiliary activity | `SessionEvent::UserActivity` -> `RuntimeEvent` from `DesktopSession` | `screen::run_screen_on_from_env_for_event` |
+| `RestoreNow` from desktop activity | `SessionEvent::UserActivity` -> `RuntimeEvent` from `DesktopSession` | `screen::run_screen_on_from_env_for_event` |
+| `RestoreNow` from auxiliary activity | `SessionEvent::UserActivity` -> `RuntimeEvent` from `AuxiliaryInput` | `screen::run_screen_on_from_env_for_event` |
 
 ### Delegated `swayidle` CLI/API Path
 

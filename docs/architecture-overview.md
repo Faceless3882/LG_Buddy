@@ -336,8 +336,10 @@ The session-facing pieces should be read as one subsystem:
   - owns gamepad device discovery, event-triggered refresh, and reconciliation
   - see [gamepad-subsystem.md](gamepad-subsystem.md) for adapter and lifecycle details
 - `session/runner.rs`
-  - converts provider input into activity observations, resets the inactivity
-    deadline, and dispatches runtime policy
+  - owns the shared native-session runtime, including the gamepad source
+    lifecycle independently of the selected desktop provider
+  - converts provider and auxiliary input into activity observations, resets
+    the inactivity deadline, and dispatches source-classified runtime policy
   - treats `screen_idle_blank=disabled` as a passive user-session mode that
     preserves update notification handoff without TV idle blank/restore actions
   - treats delegated `swayidle` as a CLI/API client for timeout/resume actions
@@ -711,12 +713,12 @@ and state normally, construct canonical CLI/API runtime events, and enter
 The session subsystem is intentionally asymmetric where the providers are
 asymmetric:
 
-- the current GNOME pilot treats ScreenSaver active/wake, recent Mutter input,
-  and gamepad input as activity that resets LG Buddy's inactivity deadline;
-  ScreenSaver idle is not a blanking authority
-- the native monitor path also consumes gamepad activity directly from Linux
-  input devices; today that is attached to GNOME because GNOME is the only
-  native production adapter, but the source is not GNOME-specific
+- the current GNOME provider treats ScreenSaver active/wake and recent Mutter
+  input as activity that resets LG Buddy's inactivity deadline; ScreenSaver
+  idle is not a blanking authority
+- the shared native-session runtime consumes gamepad activity directly from
+  Linux input devices as `AuxiliaryInput`, independently of desktop providers;
+  GNOME is currently the only production provider using this runtime
 - the gamepad source refreshes its device set from Linux device add, remove, and
   change events, with periodic reconciliation for missed events
 - delegated `swayidle` monitor execution is implemented as CLI/API delegation

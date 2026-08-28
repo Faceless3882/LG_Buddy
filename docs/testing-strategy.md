@@ -79,7 +79,7 @@ This is the place for integration tests and contract tests.
 - GNOME runner behavior against a private session-bus harness
 - logind lifecycle and NetworkManager gate behavior against a private system-bus
   harness
-- GNOME and auxiliary gamepad activity resetting one LG Buddy-owned deadline
+- desktop and auxiliary gamepad activity resetting one LG Buddy-owned deadline
 
 ### How to test it
 
@@ -243,7 +243,7 @@ Primary concern:
 
 Secondary concern:
 
-- module interoperability in the GNOME runner path
+- module interoperability in the shared native-session runner path
 - runner refresh scheduling when device events arrive or reconciliation is due
 
 Discovery coverage should include event-node filtering, readable-device
