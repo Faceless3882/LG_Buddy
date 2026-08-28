@@ -9,9 +9,11 @@ use std::process::{Command as ProcessCommand, Stdio};
 use std::time::Duration;
 
 use crate::auth::resolve_config_owner;
+use crate::backend::detect_backend_from_system;
 use crate::config::{
     parse_config_entries, resolve_config_path, resolve_config_path_from_env, ConfigPathError,
-    ConfigPathSources, MacAddress, TvPlatform, DEFAULT_IDLE_TIMEOUT, MAX_IDLE_TIMEOUT,
+    ConfigPathSources, MacAddress, ScreenBackend, TvPlatform, DEFAULT_IDLE_TIMEOUT,
+    MAX_IDLE_TIMEOUT,
 };
 use crate::platform_access_token::PlatformAccessTokenStore;
 use crate::web_os::{
@@ -373,6 +375,13 @@ impl std::error::Error for SettingsParseError {}
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SettingsFormatter;
 
+#[derive(Debug, Clone, Copy, Default)]
+enum ScreenBackendPresentation {
+    #[default]
+    Raw,
+    Resolved(Option<ScreenBackend>),
+}
+
 impl SettingsFormatter {
     pub fn write_get<W: io::Write>(
         &self,
@@ -408,12 +417,21 @@ impl SettingsFormatter {
         writer: &mut W,
         settings: &[EffectiveSetting],
     ) -> Result<(), SettingsError> {
+        self.write_describe_with_backend(writer, settings, ScreenBackendPresentation::Raw)
+    }
+
+    fn write_describe_with_backend<W: io::Write>(
+        &self,
+        writer: &mut W,
+        settings: &[EffectiveSetting],
+        screen_backend: ScreenBackendPresentation,
+    ) -> Result<(), SettingsError> {
         for (index, setting) in settings.iter().enumerate() {
             if index > 0 {
                 writeln!(writer).map_err(output_error)?;
             }
 
-            self.write_single_description(writer, setting)?;
+            self.write_single_description(writer, setting, screen_backend)?;
         }
 
         Ok(())
@@ -480,13 +498,19 @@ impl SettingsFormatter {
         &self,
         writer: &mut W,
         setting: &EffectiveSetting,
+        screen_backend: ScreenBackendPresentation,
     ) -> Result<(), SettingsError> {
         let definition = setting.definition();
 
         writeln!(writer, "{}", setting.key_name()).map_err(output_error)?;
         writeln!(writer, "  storage key: {}", setting.storage_key()).map_err(output_error)?;
         writeln!(writer, "  type: {}", definition.value_type().as_str()).map_err(output_error)?;
-        writeln!(writer, "  current: {}", format_effective_value(setting)).map_err(output_error)?;
+        writeln!(
+            writer,
+            "  current: {}",
+            format_described_value(setting, screen_backend)
+        )
+        .map_err(output_error)?;
         writeln!(writer, "  source: {}", setting.source().as_str()).map_err(output_error)?;
         writeln!(writer, "  default: {}", definition.default_value_label())
             .map_err(output_error)?;
@@ -504,7 +528,7 @@ impl SettingsFormatter {
                 writeln!(
                     writer,
                     "  allowed values: {}",
-                    enum_type.values().join(", ")
+                    format_described_enum_values(setting, enum_type.values(), screen_backend)
                 )
                 .map_err(output_error)?;
                 if !enum_type.aliases().is_empty() {
@@ -1114,6 +1138,7 @@ pub struct SettingsCommandRunner<C = SystemdUserServiceController, P = WebOsPlat
     formatter: SettingsFormatter,
     applier: SettingsApplier<C>,
     preflight: P,
+    screen_backend: ScreenBackendPresentation,
 }
 
 impl SettingsCommandRunner<SystemdUserServiceController, WebOsPlatformPreflight> {
@@ -1139,7 +1164,13 @@ impl<C: ServiceController, P: PlatformPreflight> SettingsCommandRunner<C, P> {
             formatter: SettingsFormatter,
             applier,
             preflight,
+            screen_backend: ScreenBackendPresentation::Raw,
         }
+    }
+
+    fn with_screen_backend_resolution(mut self, resolution: Option<ScreenBackend>) -> Self {
+        self.screen_backend = ScreenBackendPresentation::Resolved(resolution);
+        self
     }
 
     pub fn run<W: io::Write>(
@@ -1155,11 +1186,19 @@ impl<C: ServiceController, P: PlatformPreflight> SettingsCommandRunner<C, P> {
             SettingsCommand::Describe(key) => match key {
                 Some(key) => {
                     let setting = self.store.effective_by_name(&key)?;
-                    self.formatter.write_describe(writer, &[setting])
+                    self.formatter.write_describe_with_backend(
+                        writer,
+                        &[setting],
+                        self.screen_backend,
+                    )
                 }
                 None => {
                     let settings = self.store.all_effective();
-                    self.formatter.write_describe(writer, &settings)
+                    self.formatter.write_describe_with_backend(
+                        writer,
+                        &settings,
+                        self.screen_backend,
+                    )
                 }
             },
             SettingsCommand::Get(key) => {
@@ -1230,7 +1269,18 @@ pub fn run_settings_command<W: io::Write>(
     writer: &mut W,
 ) -> Result<(), SettingsError> {
     let store = SettingsStore::load_from_env()?;
-    SettingsCommandRunner::new(store).run(command, writer)
+    let runner = SettingsCommandRunner::new(store);
+    let describes_screen_backend = match &command {
+        SettingsCommand::Describe(None) => true,
+        SettingsCommand::Describe(Some(key)) => key == "screen.backend",
+        _ => false,
+    };
+    let runner = if describes_screen_backend {
+        runner.with_screen_backend_resolution(detect_backend_from_system(ScreenBackend::Auto).ok())
+    } else {
+        runner
+    };
+    runner.run(command, writer)
 }
 
 fn persist_settings_mutation(
@@ -2260,6 +2310,50 @@ fn format_effective_value(setting: &EffectiveSetting) -> String {
         .unwrap_or_else(|| "<missing>".to_string())
 }
 
+fn format_described_value(
+    setting: &EffectiveSetting,
+    screen_backend: ScreenBackendPresentation,
+) -> String {
+    let value = format_effective_value(setting);
+    if setting.key_name() == "screen.backend" {
+        format_screen_backend_choice(&value, screen_backend)
+    } else {
+        value
+    }
+}
+
+fn format_described_enum_values(
+    setting: &EffectiveSetting,
+    values: &[&str],
+    screen_backend: ScreenBackendPresentation,
+) -> String {
+    if setting.key_name() != "screen.backend" {
+        return values.join(", ");
+    }
+
+    values
+        .iter()
+        .map(|value| format_screen_backend_choice(value, screen_backend))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn format_screen_backend_choice(value: &str, presentation: ScreenBackendPresentation) -> String {
+    if value != ScreenBackend::Auto.as_str() {
+        return value.to_string();
+    }
+
+    match presentation {
+        ScreenBackendPresentation::Raw => value.to_string(),
+        ScreenBackendPresentation::Resolved(Some(backend)) => {
+            format!("{value} ({})", backend.as_str())
+        }
+        ScreenBackendPresentation::Resolved(None) => {
+            format!("{value} (no backend currently available)")
+        }
+    }
+}
+
 fn format_aliases(aliases: &[SettingAlias]) -> String {
     aliases
         .iter()
@@ -2398,7 +2492,7 @@ mod tests {
         SettingsCommandRunner, SettingsError, SettingsParseError, SettingsStore, UserServiceState,
         UserUnitEnableOutcome, SETTINGS_REGISTRY,
     };
-    use crate::config::{ConfigPathSources, TvPlatform, MAX_IDLE_TIMEOUT};
+    use crate::config::{ConfigPathSources, ScreenBackend, TvPlatform, MAX_IDLE_TIMEOUT};
     use std::cell::Cell;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -2623,6 +2717,54 @@ updates.channel=stable (default, read-write, ops: get,describe,set,unset)
         assert!(output.contains("  allowed values: conservative, aggressive\n"));
         assert!(output.contains("  aliases: marker_only -> conservative\n"));
         assert!(output.contains("  apply: restart-user-screen-service\n"));
+    }
+
+    #[test]
+    fn settings_runner_describe_annotates_auto_backend_without_changing_get() {
+        let store = ConfigEnvReader::parse("/tmp/config.env", "screen_backend=auto\n").into_store();
+        let runner = SettingsCommandRunner::new(store)
+            .with_screen_backend_resolution(Some(ScreenBackend::Gnome));
+        let mut output = Vec::new();
+
+        runner
+            .run(
+                SettingsCommand::Describe(Some("screen.backend".to_string())),
+                &mut output,
+            )
+            .unwrap();
+
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("  current: auto (gnome)\n"));
+        assert!(output.contains("  allowed values: auto (gnome), gnome, swayidle\n"));
+
+        let mut raw_output = Vec::new();
+        runner
+            .run(
+                SettingsCommand::Get("screen.backend".to_string()),
+                &mut raw_output,
+            )
+            .unwrap();
+        assert_eq!(String::from_utf8(raw_output).unwrap(), "auto\n");
+    }
+
+    #[test]
+    fn settings_runner_describe_reports_when_auto_has_no_available_backend() {
+        let store = ConfigEnvReader::parse("/tmp/config.env", "screen_backend=auto\n").into_store();
+        let runner = SettingsCommandRunner::new(store).with_screen_backend_resolution(None);
+        let mut output = Vec::new();
+
+        runner
+            .run(
+                SettingsCommand::Describe(Some("screen.backend".to_string())),
+                &mut output,
+            )
+            .unwrap();
+
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("  current: auto (no backend currently available)\n"));
+        assert!(output.contains(
+            "  allowed values: auto (no backend currently available), gnome, swayidle\n"
+        ));
     }
 
     #[test]

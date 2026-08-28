@@ -50,10 +50,12 @@ use std::io::{self, Write};
 pub enum Command {
     Startup(StartupMode),
     Shutdown,
+    Power(PowerCommand),
     SleepPre,
     Sleep,
     NetworkManagerPreDown,
     Brightness(BrightnessCommand),
+    Screen(ScreenCommand),
     ScreenOff,
     ScreenOn,
     Monitor,
@@ -69,6 +71,66 @@ pub enum BrightnessCommand {
     Prompt,
     Get,
     Set(OledBrightness),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PowerCommand {
+    On,
+    Off,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScreenCommand {
+    Off,
+    On,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsHelpTopic {
+    Root,
+    List,
+    Describe,
+    Get,
+    Set,
+    Unset,
+}
+
+impl SettingsHelpTopic {
+    fn from_subcommand(subcommand: &str) -> Option<Self> {
+        match subcommand {
+            "list" => Some(Self::List),
+            "describe" => Some(Self::Describe),
+            "get" => Some(Self::Get),
+            "set" => Some(Self::Set),
+            "unset" => Some(Self::Unset),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdatesHelpTopic {
+    Root,
+    Check,
+}
+
+impl UpdatesHelpTopic {
+    fn from_subcommand(subcommand: &str) -> Option<Self> {
+        match subcommand {
+            "check" => Some(Self::Check),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HelpTopic {
+    Global,
+    Brightness,
+    Power,
+    Screen,
+    Settings(SettingsHelpTopic),
+    Updates(UpdatesHelpTopic),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,7 +161,7 @@ impl StartupMode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseOutcome {
-    Help,
+    Help(HelpTopic),
     Version,
     Command(Command),
 }
@@ -107,6 +169,10 @@ pub enum ParseOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseError {
     UnknownCommand(String),
+    MissingPowerCommand,
+    UnknownPowerCommand(String),
+    MissingScreenCommand,
+    UnknownScreenCommand(String),
     UnknownStartupMode(String),
     UnknownBrightnessCommand(String),
     MissingBrightnessValue,
@@ -125,6 +191,24 @@ impl fmt::Display for ParseError {
         match self {
             Self::UnknownCommand(command) => {
                 write!(f, "unknown command `{command}`")
+            }
+            Self::MissingPowerCommand => {
+                write!(
+                    f,
+                    "missing power command; expected `power on` or `power off`"
+                )
+            }
+            Self::UnknownPowerCommand(command) => {
+                write!(f, "unknown power command `{command}`")
+            }
+            Self::MissingScreenCommand => {
+                write!(
+                    f,
+                    "missing screen command; expected `screen off` or `screen on`"
+                )
+            }
+            Self::UnknownScreenCommand(command) => {
+                write!(f, "unknown screen command `{command}`")
             }
             Self::UnknownStartupMode(mode) => {
                 write!(f, "unknown startup mode `{mode}`")
@@ -214,6 +298,53 @@ impl std::error::Error for RunError {
     }
 }
 
+impl ParseError {
+    pub fn help_topic(&self) -> HelpTopic {
+        match self {
+            Self::UnknownBrightnessCommand(_)
+            | Self::MissingBrightnessValue
+            | Self::InvalidBrightnessValue(_) => HelpTopic::Brightness,
+            Self::UnexpectedArguments {
+                command: Command::Brightness(_),
+                ..
+            } => HelpTopic::Brightness,
+            Self::MissingPowerCommand | Self::UnknownPowerCommand(_) => HelpTopic::Power,
+            Self::UnexpectedArguments {
+                command: Command::Power(_),
+                ..
+            } => HelpTopic::Power,
+            Self::MissingScreenCommand | Self::UnknownScreenCommand(_) => HelpTopic::Screen,
+            Self::UnexpectedArguments {
+                command: Command::Screen(_),
+                ..
+            } => HelpTopic::Screen,
+            Self::Settings(error) => HelpTopic::Settings(match error {
+                SettingsParseError::MissingKey { subcommand }
+                | SettingsParseError::MissingValue { subcommand }
+                | SettingsParseError::UnexpectedArguments { subcommand, .. } => {
+                    SettingsHelpTopic::from_subcommand(subcommand)
+                        .unwrap_or(SettingsHelpTopic::Root)
+                }
+                SettingsParseError::MissingSubcommand
+                | SettingsParseError::UnknownSubcommand(_) => SettingsHelpTopic::Root,
+            }),
+            Self::Updates(error) => HelpTopic::Updates(match error {
+                UpdatesParseError::MissingChannelValue
+                | UpdatesParseError::DuplicateChannel
+                | UpdatesParseError::DuplicateNotify
+                | UpdatesParseError::UnknownChannel(_) => UpdatesHelpTopic::Check,
+                UpdatesParseError::UnexpectedArguments { subcommand, .. } => {
+                    UpdatesHelpTopic::from_subcommand(subcommand).unwrap_or(UpdatesHelpTopic::Root)
+                }
+                UpdatesParseError::MissingSubcommand | UpdatesParseError::UnknownSubcommand(_) => {
+                    UpdatesHelpTopic::Root
+                }
+            }),
+            _ => HelpTopic::Global,
+        }
+    }
+}
+
 impl From<io::Error> for RunError {
     fn from(value: io::Error) -> Self {
         Self::Io(value)
@@ -231,10 +362,12 @@ impl Command {
         match self {
             Self::Startup(_) => "startup",
             Self::Shutdown => "shutdown",
+            Self::Power(_) => "power",
             Self::SleepPre => "sleep-pre",
             Self::Sleep => "sleep",
             Self::NetworkManagerPreDown => "nm-pre-down",
             Self::Brightness(_) => "brightness",
+            Self::Screen(_) => "screen",
             Self::ScreenOff => "screen-off",
             Self::ScreenOn => "screen-on",
             Self::Monitor => "monitor",
@@ -250,10 +383,12 @@ impl Command {
         match self {
             Self::Startup(_) => "TODO: implemented via command handler",
             Self::Shutdown => "TODO: implemented via command handler",
+            Self::Power(_) => "TODO: implemented via command handler",
             Self::SleepPre => "TODO: implemented via command handler",
             Self::Sleep => "TODO: implemented via command handler",
             Self::NetworkManagerPreDown => "TODO: implemented via command handler",
             Self::Brightness(_) => "TODO: implemented via command handler",
+            Self::Screen(_) => "TODO: implemented via command handler",
             Self::ScreenOff => "TODO: implemented via command handler",
             Self::ScreenOn => "TODO: implemented via command handler",
             Self::Monitor => "TODO: implemented via command handler",
@@ -269,48 +404,187 @@ impl Command {
 pub fn usage(program: &str) -> String {
     format!(
         "\
-LG Buddy Rust runtime
+LG Buddy TV control
 
 Usage:
   {program} <command>
-  {program} --help
+  {program} help [COMMAND...]
+  {program} --help, -h
   {program} --version, -V
 
 Commands:
-  startup [mode]  Start or restore the TV output
-  shutdown        Power off the TV when LG Buddy owns the active input
-  sleep-pre       Handle the pre-sleep TV power-off hook
-  sleep           Handle the NetworkManager pre-down sleep hook
-  nm-pre-down     Handle NetworkManager pre-down system sleep gate
   brightness      Open the TV brightness control dialog
   brightness get  Print the current TV OLED brightness
   brightness set <0-100>
                   Set the TV OLED brightness
-  screen-off      Blank the configured TV output if active
-  screen-on       Restore the TV output after an LG Buddy screen-off
-  monitor         Run the user-session monitor loop
-  lifecycle       Run the system lifecycle monitor loop
-  detect-backend  Detect the active screen backend
+  power on        Start or restore the TV output
+  power off       Power off the TV when LG Buddy owns the active input
+  screen off      Blank the configured TV output if active
+  screen on       Restore the TV output after an LG Buddy screen blank
   settings        Inspect and edit structured LG Buddy settings
-  updates         Check GitHub releases on demand or from the user timer
-
-Startup modes:
-  auto            Restore on wake when LG Buddy owns the system marker, otherwise boot
-  boot            Always treat startup as a cold boot
-  wake            Only restore when LG Buddy owns the system marker
+  updates         Check for LG Buddy releases
+  help [COMMAND...]
+                  Show global or scoped command help
 
 Settings:
   settings list
-  settings describe [key]
-  settings get <key>
-  settings set <key> <value>
-  settings unset <key>
+  settings describe [KEY]
+  settings get <KEY>
+  settings set <KEY> <VALUE>
+  settings unset <KEY>
 
 Updates:
   updates check [--channel stable|prerelease] [--notify]
-  updates background-check
 "
     )
+}
+
+pub fn power_usage(program: &str) -> String {
+    format!(
+        "\
+LG Buddy TV power control
+
+Usage:
+  {program} power on
+  {program} power off
+  {program} power --help
+
+Commands:
+  on              Start or restore the TV output
+  off             Power off the TV when LG Buddy owns the active input
+"
+    )
+}
+
+pub fn brightness_usage(program: &str) -> String {
+    format!(
+        "\
+LG Buddy TV brightness control
+
+Usage:
+  {program} brightness
+  {program} brightness get
+  {program} brightness set <0-100>
+  {program} brightness --help
+
+Commands:
+  get             Print the current TV OLED brightness
+  set <0-100>     Set the TV OLED brightness
+"
+    )
+}
+
+pub fn screen_usage(program: &str) -> String {
+    format!(
+        "\
+LG Buddy TV screen control
+
+Usage:
+  {program} screen off
+  {program} screen on
+  {program} screen --help
+
+Commands:
+  off             Blank the configured TV output if active
+  on              Restore the TV output after an LG Buddy screen blank
+"
+    )
+}
+
+pub fn settings_usage(program: &str, topic: SettingsHelpTopic) -> String {
+    match topic {
+        SettingsHelpTopic::Root => format!(
+            "\
+LG Buddy settings
+
+Usage:
+  {program} settings list
+  {program} settings describe [KEY]
+  {program} settings get <KEY>
+  {program} settings set <KEY> <VALUE>
+  {program} settings unset <KEY>
+  {program} settings --help
+
+Commands:
+  list                    List settings and their effective values
+  describe [KEY]          Describe one setting or the complete registry
+  get <KEY>               Print one raw effective value
+  set <KEY> <VALUE>       Save a setting value
+  unset <KEY>             Remove a saved override
+"
+        ),
+        SettingsHelpTopic::List => format!(
+            "\
+Usage:
+  {program} settings list
+"
+        ),
+        SettingsHelpTopic::Describe => format!(
+            "\
+Usage:
+  {program} settings describe [KEY]
+"
+        ),
+        SettingsHelpTopic::Get => format!(
+            "\
+Usage:
+  {program} settings get <KEY>
+"
+        ),
+        SettingsHelpTopic::Set => format!(
+            "\
+Usage:
+  {program} settings set <KEY> <VALUE>
+"
+        ),
+        SettingsHelpTopic::Unset => format!(
+            "\
+Usage:
+  {program} settings unset <KEY>
+"
+        ),
+    }
+}
+
+pub fn updates_usage(program: &str, topic: UpdatesHelpTopic) -> String {
+    match topic {
+        UpdatesHelpTopic::Root => format!(
+            "\
+LG Buddy update checks
+
+Usage:
+  {program} updates check [--channel stable|prerelease] [--notify]
+  {program} updates --help
+
+Commands:
+  check           Check GitHub releases for an available update
+"
+        ),
+        UpdatesHelpTopic::Check => format!(
+            "\
+LG Buddy update check
+
+Usage:
+  {program} updates check [--channel stable|prerelease] [--notify]
+
+Options:
+  --channel stable|prerelease
+                  Override the release channel for this check
+  --notify        Request a desktop notification when an update is available
+"
+        ),
+    }
+}
+
+pub fn help(program: &str, topic: HelpTopic) -> String {
+    match topic {
+        HelpTopic::Global => usage(program),
+        HelpTopic::Brightness => brightness_usage(program),
+        HelpTopic::Power => power_usage(program),
+        HelpTopic::Screen => screen_usage(program),
+        HelpTopic::Settings(topic) => settings_usage(program, topic),
+        HelpTopic::Updates(topic) => updates_usage(program, topic),
+    }
 }
 
 pub fn parse_args<I, S>(args: I) -> Result<ParseOutcome, ParseError>
@@ -320,12 +594,15 @@ where
 {
     let mut args = args.into_iter();
     let Some(first) = args.next() else {
-        return Ok(ParseOutcome::Help);
+        return Ok(ParseOutcome::Help(HelpTopic::Global));
     };
 
     let first = first.as_ref();
-    if matches!(first, "-h" | "--help" | "help") {
-        return Ok(ParseOutcome::Help);
+    if matches!(first, "-h" | "--help") {
+        return Ok(ParseOutcome::Help(HelpTopic::Global));
+    }
+    if first == "help" {
+        return parse_help_command(args);
     }
     if matches!(first, "-V" | "--version") {
         return Ok(ParseOutcome::Version);
@@ -352,22 +629,16 @@ where
 
             return Ok(ParseOutcome::Command(Command::Startup(startup_mode)));
         }
-        "settings" => {
-            return SettingsCommand::parse(args)
-                .map(|command| ParseOutcome::Command(Command::Settings(command)))
-                .map_err(ParseError::Settings);
-        }
-        "updates" => {
-            return UpdatesCommand::parse(args)
-                .map(|command| ParseOutcome::Command(Command::Updates(command)))
-                .map_err(ParseError::Updates);
-        }
+        "settings" => return parse_settings_command(args),
+        "updates" => return parse_updates_command(args),
         "dev" => {
             return DevCommand::parse(args)
                 .map(|command| ParseOutcome::Command(Command::Dev(command)))
                 .map_err(ParseError::Dev);
         }
         "brightness" => return parse_brightness_command(args),
+        "power" => return parse_power_command(args),
+        "screen" => return parse_screen_command(args),
         "shutdown" => Command::Shutdown,
         "sleep-pre" => Command::SleepPre,
         "sleep" => Command::Sleep,
@@ -395,11 +666,15 @@ pub fn run_command<W: Write>(command: Command, writer: &mut W) -> Result<(), Run
     match command {
         Command::Startup(mode) => crate::commands::run_startup(writer, mode),
         Command::Shutdown => run_shutdown(writer),
+        Command::Power(PowerCommand::On) => crate::commands::run_startup(writer, StartupMode::Boot),
+        Command::Power(PowerCommand::Off) => run_shutdown(writer),
         Command::SleepPre => run_sleep_pre(writer),
         Command::Sleep => run_sleep(writer),
         Command::NetworkManagerPreDown => run_nm_pre_down(writer),
         Command::Brightness(command) => run_brightness(writer, command),
         Command::DetectBackend => run_detect_backend(writer),
+        Command::Screen(ScreenCommand::Off) => run_screen_off(writer),
+        Command::Screen(ScreenCommand::On) => run_screen_on(writer),
         Command::ScreenOff => run_screen_off(writer),
         Command::ScreenOn => run_screen_on(writer),
         Command::Monitor => run_monitor(writer),
@@ -411,6 +686,253 @@ pub fn run_command<W: Write>(command: Command, writer: &mut W) -> Result<(), Run
         Command::Updates(command) => {
             run_updates_command(command, writer).map_err(RunError::Updates)
         }
+    }
+}
+
+fn parse_help_command<I, S>(args: I) -> Result<ParseOutcome, ParseError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut args = args.into_iter();
+    let Some(topic) = args.next() else {
+        return Ok(ParseOutcome::Help(HelpTopic::Global));
+    };
+
+    let remaining = args
+        .map(|argument| argument.as_ref().to_string())
+        .collect::<Vec<_>>();
+    match topic.as_ref() {
+        "brightness" => {
+            if remaining.is_empty()
+                || (remaining.len() == 1 && matches!(remaining[0].as_str(), "get" | "set"))
+            {
+                Ok(ParseOutcome::Help(HelpTopic::Brightness))
+            } else {
+                Err(ParseError::UnknownBrightnessCommand(remaining.join(" ")))
+            }
+        }
+        "power" => {
+            if remaining.is_empty()
+                || (remaining.len() == 1 && matches!(remaining[0].as_str(), "on" | "off"))
+            {
+                Ok(ParseOutcome::Help(HelpTopic::Power))
+            } else {
+                Err(ParseError::UnknownPowerCommand(remaining.join(" ")))
+            }
+        }
+        "screen" => {
+            if remaining.is_empty()
+                || (remaining.len() == 1 && matches!(remaining[0].as_str(), "off" | "on"))
+            {
+                Ok(ParseOutcome::Help(HelpTopic::Screen))
+            } else {
+                Err(ParseError::UnknownScreenCommand(remaining.join(" ")))
+            }
+        }
+        "settings" => match remaining.as_slice() {
+            [] => Ok(ParseOutcome::Help(HelpTopic::Settings(
+                SettingsHelpTopic::Root,
+            ))),
+            [subcommand] => SettingsHelpTopic::from_subcommand(subcommand)
+                .map(|topic| ParseOutcome::Help(HelpTopic::Settings(topic)))
+                .ok_or_else(|| {
+                    ParseError::Settings(SettingsParseError::UnknownSubcommand(
+                        subcommand.to_string(),
+                    ))
+                }),
+            [subcommand, arguments @ ..] => {
+                if let Some(topic) = SettingsHelpTopic::from_subcommand(subcommand) {
+                    Err(ParseError::Settings(
+                        SettingsParseError::UnexpectedArguments {
+                            subcommand: settings_help_subcommand(topic),
+                            arguments: arguments.to_vec(),
+                        },
+                    ))
+                } else {
+                    Err(ParseError::Settings(SettingsParseError::UnknownSubcommand(
+                        subcommand.to_string(),
+                    )))
+                }
+            }
+        },
+        "updates" => match remaining.as_slice() {
+            [] => Ok(ParseOutcome::Help(HelpTopic::Updates(
+                UpdatesHelpTopic::Root,
+            ))),
+            [subcommand] => UpdatesHelpTopic::from_subcommand(subcommand)
+                .map(|topic| ParseOutcome::Help(HelpTopic::Updates(topic)))
+                .ok_or_else(|| {
+                    ParseError::Updates(UpdatesParseError::UnknownSubcommand(
+                        subcommand.to_string(),
+                    ))
+                }),
+            [subcommand, arguments @ ..] => {
+                if UpdatesHelpTopic::from_subcommand(subcommand).is_some() {
+                    Err(ParseError::Updates(
+                        UpdatesParseError::UnexpectedArguments {
+                            subcommand: "check",
+                            arguments: arguments.to_vec(),
+                        },
+                    ))
+                } else {
+                    Err(ParseError::Updates(UpdatesParseError::UnknownSubcommand(
+                        subcommand.to_string(),
+                    )))
+                }
+            }
+        },
+        other => Err(ParseError::UnknownCommand(other.to_string())),
+    }
+}
+
+fn settings_help_subcommand(topic: SettingsHelpTopic) -> &'static str {
+    match topic {
+        SettingsHelpTopic::Root => "settings",
+        SettingsHelpTopic::List => "list",
+        SettingsHelpTopic::Describe => "describe",
+        SettingsHelpTopic::Get => "get",
+        SettingsHelpTopic::Set => "set",
+        SettingsHelpTopic::Unset => "unset",
+    }
+}
+
+fn parse_settings_command<I, S>(args: I) -> Result<ParseOutcome, ParseError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let arguments = args
+        .into_iter()
+        .map(|argument| argument.as_ref().to_string())
+        .collect::<Vec<_>>();
+
+    let Some(subcommand) = arguments.first() else {
+        return Err(ParseError::Settings(SettingsParseError::MissingSubcommand));
+    };
+
+    if matches!(subcommand.as_str(), "-h" | "--help") {
+        return Ok(ParseOutcome::Help(HelpTopic::Settings(
+            SettingsHelpTopic::Root,
+        )));
+    }
+
+    if let Some(topic) = SettingsHelpTopic::from_subcommand(subcommand) {
+        if arguments[1..]
+            .iter()
+            .any(|argument| matches!(argument.as_str(), "-h" | "--help"))
+        {
+            return Ok(ParseOutcome::Help(HelpTopic::Settings(topic)));
+        }
+    }
+
+    SettingsCommand::parse(arguments)
+        .map(|command| ParseOutcome::Command(Command::Settings(command)))
+        .map_err(ParseError::Settings)
+}
+
+fn parse_updates_command<I, S>(args: I) -> Result<ParseOutcome, ParseError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let arguments = args
+        .into_iter()
+        .map(|argument| argument.as_ref().to_string())
+        .collect::<Vec<_>>();
+
+    let Some(subcommand) = arguments.first() else {
+        return Err(ParseError::Updates(UpdatesParseError::MissingSubcommand));
+    };
+
+    if matches!(subcommand.as_str(), "-h" | "--help") {
+        return Ok(ParseOutcome::Help(HelpTopic::Updates(
+            UpdatesHelpTopic::Root,
+        )));
+    }
+
+    if UpdatesHelpTopic::from_subcommand(subcommand).is_some()
+        && arguments[1..]
+            .iter()
+            .any(|argument| matches!(argument.as_str(), "-h" | "--help"))
+    {
+        return Ok(ParseOutcome::Help(HelpTopic::Updates(
+            UpdatesHelpTopic::Check,
+        )));
+    }
+
+    UpdatesCommand::parse(arguments)
+        .map(|command| ParseOutcome::Command(Command::Updates(command)))
+        .map_err(ParseError::Updates)
+}
+
+fn parse_power_command<I, S>(args: I) -> Result<ParseOutcome, ParseError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut args = args.into_iter();
+    let Some(subcommand) = args.next() else {
+        return Err(ParseError::MissingPowerCommand);
+    };
+
+    if matches!(subcommand.as_ref(), "-h" | "--help") {
+        return Ok(ParseOutcome::Help(HelpTopic::Power));
+    }
+
+    let command = match subcommand.as_ref() {
+        "on" => PowerCommand::On,
+        "off" => PowerCommand::Off,
+        other => return Err(ParseError::UnknownPowerCommand(other.to_string())),
+    };
+    let arguments = args
+        .map(|argument| argument.as_ref().to_string())
+        .collect::<Vec<_>>();
+
+    if arguments.is_empty() {
+        Ok(ParseOutcome::Command(Command::Power(command)))
+    } else if arguments.len() == 1 && matches!(arguments[0].as_str(), "-h" | "--help") {
+        Ok(ParseOutcome::Help(HelpTopic::Power))
+    } else {
+        Err(ParseError::UnexpectedArguments {
+            command: Command::Power(command),
+            arguments,
+        })
+    }
+}
+
+fn parse_screen_command<I, S>(args: I) -> Result<ParseOutcome, ParseError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut args = args.into_iter();
+    let Some(subcommand) = args.next() else {
+        return Err(ParseError::MissingScreenCommand);
+    };
+
+    if matches!(subcommand.as_ref(), "-h" | "--help") {
+        return Ok(ParseOutcome::Help(HelpTopic::Screen));
+    }
+
+    let command = match subcommand.as_ref() {
+        "off" => ScreenCommand::Off,
+        "on" => ScreenCommand::On,
+        other => return Err(ParseError::UnknownScreenCommand(other.to_string())),
+    };
+    let arguments = args
+        .map(|argument| argument.as_ref().to_string())
+        .collect::<Vec<_>>();
+
+    if arguments.is_empty() {
+        Ok(ParseOutcome::Command(Command::Screen(command)))
+    } else if arguments.len() == 1 && matches!(arguments[0].as_str(), "-h" | "--help") {
+        Ok(ParseOutcome::Help(HelpTopic::Screen))
+    } else {
+        Err(ParseError::UnexpectedArguments {
+            command: Command::Screen(command),
+            arguments,
+        })
     }
 }
 
@@ -426,6 +948,10 @@ where
         )));
     };
 
+    if matches!(subcommand.as_ref(), "-h" | "--help") {
+        return Ok(ParseOutcome::Help(HelpTopic::Brightness));
+    }
+
     match subcommand.as_ref() {
         "get" => {
             let extra_args: Vec<String> = args.map(|arg| arg.as_ref().to_string()).collect();
@@ -433,6 +959,8 @@ where
                 Ok(ParseOutcome::Command(Command::Brightness(
                     BrightnessCommand::Get,
                 )))
+            } else if extra_args.len() == 1 && matches!(extra_args[0].as_str(), "-h" | "--help") {
+                Ok(ParseOutcome::Help(HelpTopic::Brightness))
             } else {
                 Err(ParseError::UnexpectedArguments {
                     command: Command::Brightness(BrightnessCommand::Get),
@@ -442,12 +970,17 @@ where
         }
         "set" => {
             let value = args.next().ok_or(ParseError::MissingBrightnessValue)?;
+            if matches!(value.as_ref(), "-h" | "--help") {
+                return Ok(ParseOutcome::Help(HelpTopic::Brightness));
+            }
             let brightness = OledBrightness::parse(value.as_ref())
                 .map_err(ParseError::InvalidBrightnessValue)?;
             let extra_args: Vec<String> = args.map(|arg| arg.as_ref().to_string()).collect();
             let command = BrightnessCommand::Set(brightness);
             if extra_args.is_empty() {
                 Ok(ParseOutcome::Command(Command::Brightness(command)))
+            } else if extra_args.len() == 1 && matches!(extra_args[0].as_str(), "-h" | "--help") {
+                Ok(ParseOutcome::Help(HelpTopic::Brightness))
             } else {
                 Err(ParseError::UnexpectedArguments {
                     command: Command::Brightness(command),
@@ -470,8 +1003,10 @@ fn run_detect_backend<W: Write>(writer: &mut W) -> Result<(), RunError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_args, usage, BrightnessCommand, Command, DevCommand, DevParseError, ParseError,
-        ParseOutcome, StartupMode, WebOsControlProbeCommand,
+        brightness_usage, parse_args, power_usage, screen_usage, settings_usage, updates_usage,
+        usage, BrightnessCommand, Command, DevCommand, DevParseError, HelpTopic, ParseError,
+        ParseOutcome, PowerCommand, ScreenCommand, SettingsHelpTopic, StartupMode,
+        UpdatesHelpTopic, WebOsControlProbeCommand,
     };
     use crate::settings::{SettingsCommand, SettingsParseError};
     use crate::tv::OledBrightness;
@@ -482,14 +1017,118 @@ mod tests {
 
     #[test]
     fn no_args_prints_help() {
-        assert_eq!(parse_args(Vec::<String>::new()), Ok(ParseOutcome::Help));
+        assert_eq!(
+            parse_args(Vec::<String>::new()),
+            Ok(ParseOutcome::Help(HelpTopic::Global))
+        );
     }
 
     #[test]
     fn explicit_help_prints_help() {
-        assert_eq!(parse_args(["--help"]), Ok(ParseOutcome::Help));
-        assert_eq!(parse_args(["-h"]), Ok(ParseOutcome::Help));
-        assert_eq!(parse_args(["help"]), Ok(ParseOutcome::Help));
+        assert_eq!(
+            parse_args(["--help"]),
+            Ok(ParseOutcome::Help(HelpTopic::Global))
+        );
+        assert_eq!(
+            parse_args(["-h"]),
+            Ok(ParseOutcome::Help(HelpTopic::Global))
+        );
+        assert_eq!(
+            parse_args(["help"]),
+            Ok(ParseOutcome::Help(HelpTopic::Global))
+        );
+        assert_eq!(
+            parse_args(["help", "brightness"]),
+            Ok(ParseOutcome::Help(HelpTopic::Brightness))
+        );
+        assert_eq!(
+            parse_args(["help", "brightness", "set"]),
+            Ok(ParseOutcome::Help(HelpTopic::Brightness))
+        );
+        assert_eq!(
+            parse_args(["brightness", "--help"]),
+            Ok(ParseOutcome::Help(HelpTopic::Brightness))
+        );
+        assert_eq!(
+            parse_args(["brightness", "get", "--help"]),
+            Ok(ParseOutcome::Help(HelpTopic::Brightness))
+        );
+        assert_eq!(
+            parse_args(["brightness", "set", "--help"]),
+            Ok(ParseOutcome::Help(HelpTopic::Brightness))
+        );
+        assert_eq!(
+            parse_args(["help", "power"]),
+            Ok(ParseOutcome::Help(HelpTopic::Power))
+        );
+        assert_eq!(
+            parse_args(["power", "--help"]),
+            Ok(ParseOutcome::Help(HelpTopic::Power))
+        );
+        assert_eq!(
+            parse_args(["power", "on", "--help"]),
+            Ok(ParseOutcome::Help(HelpTopic::Power))
+        );
+        assert_eq!(
+            parse_args(["help", "screen"]),
+            Ok(ParseOutcome::Help(HelpTopic::Screen))
+        );
+        assert_eq!(
+            parse_args(["screen", "--help"]),
+            Ok(ParseOutcome::Help(HelpTopic::Screen))
+        );
+        assert_eq!(
+            parse_args(["screen", "off", "--help"]),
+            Ok(ParseOutcome::Help(HelpTopic::Screen))
+        );
+        assert_eq!(
+            parse_args(["help", "settings"]),
+            Ok(ParseOutcome::Help(HelpTopic::Settings(
+                SettingsHelpTopic::Root
+            )))
+        );
+        assert_eq!(
+            parse_args(["help", "settings", "set"]),
+            Ok(ParseOutcome::Help(HelpTopic::Settings(
+                SettingsHelpTopic::Set
+            )))
+        );
+        assert_eq!(
+            parse_args(["settings", "--help"]),
+            Ok(ParseOutcome::Help(HelpTopic::Settings(
+                SettingsHelpTopic::Root
+            )))
+        );
+        assert_eq!(
+            parse_args(["settings", "set", "--help"]),
+            Ok(ParseOutcome::Help(HelpTopic::Settings(
+                SettingsHelpTopic::Set
+            )))
+        );
+        assert_eq!(
+            parse_args(["help", "updates"]),
+            Ok(ParseOutcome::Help(HelpTopic::Updates(
+                UpdatesHelpTopic::Root
+            )))
+        );
+        assert_eq!(
+            parse_args(["help", "updates", "check"]),
+            Ok(ParseOutcome::Help(HelpTopic::Updates(
+                UpdatesHelpTopic::Check
+            )))
+        );
+        assert_eq!(
+            parse_args(["updates", "--help"]),
+            Ok(ParseOutcome::Help(HelpTopic::Updates(
+                UpdatesHelpTopic::Root
+            )))
+        );
+        assert_eq!(
+            parse_args(["updates", "check", "--help"]),
+            Ok(ParseOutcome::Help(HelpTopic::Updates(
+                UpdatesHelpTopic::Check
+            )))
+        );
     }
 
     #[test]
@@ -515,6 +1154,14 @@ mod tests {
         assert_eq!(
             parse_args(["shutdown"]),
             Ok(ParseOutcome::Command(Command::Shutdown))
+        );
+        assert_eq!(
+            parse_args(["power", "on"]),
+            Ok(ParseOutcome::Command(Command::Power(PowerCommand::On)))
+        );
+        assert_eq!(
+            parse_args(["power", "off"]),
+            Ok(ParseOutcome::Command(Command::Power(PowerCommand::Off)))
         );
         assert_eq!(
             parse_args(["sleep-pre"]),
@@ -553,6 +1200,14 @@ mod tests {
         assert_eq!(
             parse_args(["screen-on"]),
             Ok(ParseOutcome::Command(Command::ScreenOn))
+        );
+        assert_eq!(
+            parse_args(["screen", "off"]),
+            Ok(ParseOutcome::Command(Command::Screen(ScreenCommand::Off)))
+        );
+        assert_eq!(
+            parse_args(["screen", "on"]),
+            Ok(ParseOutcome::Command(Command::Screen(ScreenCommand::On)))
         );
         assert_eq!(
             parse_args(["monitor"]),
@@ -731,6 +1386,45 @@ mod tests {
     }
 
     #[test]
+    fn invalid_power_command_is_rejected_with_power_help() {
+        assert_eq!(parse_args(["power"]), Err(ParseError::MissingPowerCommand));
+        assert_eq!(
+            parse_args(["power", "standby"]),
+            Err(ParseError::UnknownPowerCommand("standby".to_string()))
+        );
+        let error = parse_args(["power", "on", "extra"]).unwrap_err();
+        assert_eq!(
+            error,
+            ParseError::UnexpectedArguments {
+                command: Command::Power(PowerCommand::On),
+                arguments: vec!["extra".to_string()],
+            }
+        );
+        assert_eq!(error.help_topic(), HelpTopic::Power);
+    }
+
+    #[test]
+    fn invalid_screen_command_is_rejected_with_screen_help() {
+        assert_eq!(
+            parse_args(["screen"]),
+            Err(ParseError::MissingScreenCommand)
+        );
+        assert_eq!(
+            parse_args(["screen", "toggle"]),
+            Err(ParseError::UnknownScreenCommand("toggle".to_string()))
+        );
+        let error = parse_args(["screen", "off", "extra"]).unwrap_err();
+        assert_eq!(
+            error,
+            ParseError::UnexpectedArguments {
+                command: Command::Screen(ScreenCommand::Off),
+                arguments: vec!["extra".to_string()],
+            }
+        );
+        assert_eq!(error.help_topic(), HelpTopic::Screen);
+    }
+
+    #[test]
     fn invalid_brightness_command_is_rejected() {
         assert_eq!(
             parse_args(["brightness", "show"]),
@@ -740,10 +1434,9 @@ mod tests {
             parse_args(["brightness", "set"]),
             Err(ParseError::MissingBrightnessValue)
         );
-        assert!(matches!(
-            parse_args(["brightness", "set", "101"]),
-            Err(ParseError::InvalidBrightnessValue(_))
-        ));
+        let error = parse_args(["brightness", "set", "101"]).unwrap_err();
+        assert!(matches!(&error, ParseError::InvalidBrightnessValue(_)));
+        assert_eq!(error.help_topic(), HelpTopic::Brightness);
         assert!(matches!(
             parse_args(["brightness", "set", "abc"]),
             Err(ParseError::InvalidBrightnessValue(_))
@@ -754,6 +1447,10 @@ mod tests {
                 command: Command::Brightness(BrightnessCommand::Get),
                 arguments: vec!["extra".to_string()],
             })
+        );
+        assert_eq!(
+            ParseError::MissingBrightnessValue.help_topic(),
+            HelpTopic::Brightness
         );
     }
 
@@ -823,6 +1520,15 @@ mod tests {
                 }
             ))
         );
+        let error = parse_args(["settings", "set", "screen.backend"]).unwrap_err();
+        assert_eq!(
+            error,
+            ParseError::Settings(SettingsParseError::MissingValue { subcommand: "set" })
+        );
+        assert_eq!(
+            error.help_topic(),
+            HelpTopic::Settings(SettingsHelpTopic::Set)
+        );
     }
 
     #[test]
@@ -837,9 +1543,14 @@ mod tests {
                 "latest".to_string()
             )))
         );
+        let error = parse_args(["updates", "check", "--channel"]).unwrap_err();
         assert_eq!(
-            parse_args(["updates", "check", "--channel"]),
-            Err(ParseError::Updates(UpdatesParseError::MissingChannelValue))
+            error,
+            ParseError::Updates(UpdatesParseError::MissingChannelValue)
+        );
+        assert_eq!(
+            error.help_topic(),
+            HelpTopic::Updates(UpdatesHelpTopic::Check)
         );
         assert_eq!(
             parse_args(["updates", "check", "--channel", "nightly"]),
@@ -872,40 +1583,100 @@ mod tests {
     }
 
     #[test]
-    fn usage_mentions_all_commands() {
+    fn global_usage_only_mentions_public_commands() {
         let help = usage("lg-buddy");
 
         for command in [
-            "startup",
-            "shutdown",
-            "sleep-pre",
-            "sleep",
-            "nm-pre-down",
             "brightness",
-            "screen-off",
-            "screen-on",
-            "monitor",
-            "lifecycle",
-            "detect-backend",
+            "brightness get",
+            "brightness set <0-100>",
+            "power on",
+            "power off",
+            "screen off",
+            "screen on",
             "settings",
             "updates",
+            "help [COMMAND...]",
         ] {
             assert!(
                 help.contains(command),
                 "missing `{command}` from help output"
             );
         }
-        assert!(!help.contains("webos-auth-probe"));
-        assert!(!help.contains("webos-read-probe"));
+        for command in [
+            "startup",
+            "shutdown",
+            "sleep-pre",
+            "\n  sleep ",
+            "nm-pre-down",
+            "monitor",
+            "lifecycle",
+            "\n  dev ",
+            "screen-off",
+            "screen-on",
+            "detect-backend",
+            "updates background-check",
+            "webos-auth-probe",
+            "webos-read-probe",
+        ] {
+            assert!(
+                !help.contains(command),
+                "package-owned entrypoint `{command}` leaked into global help"
+            );
+        }
     }
 
     #[test]
-    fn usage_mentions_startup_modes() {
-        let help = usage("lg-buddy");
+    fn power_usage_mentions_public_commands() {
+        let help = power_usage("lg-buddy");
 
-        for mode in ["auto", "boot", "wake"] {
-            assert!(help.contains(mode), "missing startup mode `{mode}`");
-        }
+        assert!(help.contains("lg-buddy power on"));
+        assert!(help.contains("lg-buddy power off"));
+        assert!(!help.contains("startup"));
+        assert!(!help.contains("shutdown"));
+    }
+
+    #[test]
+    fn brightness_usage_mentions_public_commands() {
+        let help = brightness_usage("lg-buddy");
+
+        assert!(help.contains("lg-buddy brightness\n"));
+        assert!(help.contains("lg-buddy brightness get"));
+        assert!(help.contains("lg-buddy brightness set <0-100>"));
+    }
+
+    #[test]
+    fn screen_usage_mentions_public_commands() {
+        let help = screen_usage("lg-buddy");
+
+        assert!(help.contains("lg-buddy screen off"));
+        assert!(help.contains("lg-buddy screen on"));
+        assert!(!help.contains("screen-off"));
+        assert!(!help.contains("screen-on"));
+    }
+
+    #[test]
+    fn settings_usage_is_scoped_to_the_requested_level() {
+        let root = settings_usage("lg-buddy", SettingsHelpTopic::Root);
+        assert!(root.contains("lg-buddy settings list"));
+        assert!(root.contains("lg-buddy settings describe [KEY]"));
+        assert!(root.contains("set <KEY> <VALUE>"));
+
+        let set = settings_usage("lg-buddy", SettingsHelpTopic::Set);
+        assert!(set.contains("lg-buddy settings set <KEY> <VALUE>"));
+        assert!(!set.contains("settings list"));
+    }
+
+    #[test]
+    fn updates_usage_is_scoped_and_hides_the_timer_entrypoint() {
+        let root = updates_usage("lg-buddy", UpdatesHelpTopic::Root);
+        assert!(root.contains("lg-buddy updates check [--channel stable|prerelease] [--notify]"));
+        assert!(!root.contains("background-check"));
+
+        let check = updates_usage("lg-buddy", UpdatesHelpTopic::Check);
+        assert!(check.contains("--channel stable|prerelease"));
+        assert!(check.contains("--notify"));
+        assert!(!check.contains("background-check"));
     }
 
     #[test]
@@ -919,12 +1690,11 @@ mod tests {
         for command in [
             "--version, -V",
             "settings list",
-            "settings describe [key]",
-            "settings get <key>",
-            "settings set <key> <value>",
-            "settings unset <key>",
+            "settings describe [KEY]",
+            "settings get <KEY>",
+            "settings set <KEY> <VALUE>",
+            "settings unset <KEY>",
             "updates check [--channel stable|prerelease] [--notify]",
-            "updates background-check",
         ] {
             assert!(help.contains(command), "missing `{command}` from help");
         }

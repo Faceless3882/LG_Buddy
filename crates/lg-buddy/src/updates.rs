@@ -153,7 +153,7 @@ impl fmt::Display for UpdatesParseError {
         match self {
             Self::MissingSubcommand => write!(
                 f,
-                "missing updates command; expected `updates check [--channel stable|prerelease] [--notify]` or `updates background-check`"
+                "missing updates command; expected `updates check [--channel stable|prerelease] [--notify]`"
             ),
             Self::UnknownSubcommand(subcommand) => {
                 write!(f, "unknown updates command `{subcommand}`")

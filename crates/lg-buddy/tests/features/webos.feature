@@ -144,13 +144,13 @@ Feature: Native webOS TV platform
     And LG Buddy session runtime is isolated
     And a native webOS TV on input HDMI_2 with brightness 90
     And a valid native TV access token is stored
-    When I run the command "screen-off"
+    When I run the command "screen off"
     Then the command succeeds
     And the session marker exists
     And the TV screen is blanked
     And the native TV registration tokens are "webos-test-access-token"
     And the native TV pairing prompt count is 0
-    When I run the command "screen-on"
+    When I run the command "screen on"
     Then the command succeeds
     And the session marker is absent
     And the TV screen is visible
@@ -163,13 +163,13 @@ Feature: Native webOS TV platform
     And LG Buddy session runtime is isolated
     And a native webOS TV on input HDMI_2 with brightness 90
     And a valid native TV access token is stored
-    When I run the command "screen-off"
+    When I run the command "screen off"
     Then the command succeeds
     And the session marker exists
     And the TV screen is blanked
     Given the native webOS TV interrupts the first restore session and acknowledges input without unblanking
     And screen wake delays are disabled
-    When I run the command "screen-on"
+    When I run the command "screen on"
     Then the command succeeds
     And stdout contains "Screen visibility could not be verified. Falling back to full wake."
     And stdout does not contain "Screen unblank failed."
@@ -191,7 +191,7 @@ Feature: Native webOS TV platform
     And a native webOS TV on input HDMI_2 with brightness 90
     And a valid native TV access token is stored
     And the session marker exists
-    When I run the command "screen-on"
+    When I run the command "screen on"
     Then the command succeeds
     And stdout contains "Screen unblank succeeded. Clearing wake state."
     And stdout does not contain "Sending initial Wake-on-LAN packet"
@@ -220,7 +220,7 @@ Feature: Native webOS TV platform
     And the native TV registration tokens are "webos-test-access-token,webos-test-access-token"
     And the native TV pairing prompt count is 0
 
-  Scenario: Native startup input restoration is followed by native shutdown power-off
+  Scenario: Native power on restoration is followed by native power off
     Given a temporary LG Buddy config using input HDMI_2
     And the existing config selects TV platform "lg_webos"
     And LG Buddy session runtime is isolated
@@ -228,14 +228,14 @@ Feature: Native webOS TV platform
     And a valid native TV access token is stored
     And nm-online succeeds
     And startup delays are disabled
-    When I run the command "startup boot"
+    When I run the command "power on"
     Then the command succeeds
     And stdout contains "TV turned on and set to HDMI_2."
     And the TV input is HDMI_2
     And the native TV registration tokens are "webos-test-access-token"
     And the native TV pairing prompt count is 0
     Given reboot detection reports no pending reboot
-    When I run the command "shutdown"
+    When I run the command "power off"
     Then the command succeeds
     And stdout contains "TV is on HDMI_2. Turning off for shutdown."
     And the TV is powered off

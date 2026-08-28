@@ -1,5 +1,5 @@
 use crate::session::SessionEvent;
-use crate::{Command, StartupMode};
+use crate::{Command, PowerCommand, ScreenCommand, StartupMode};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuntimeEvent {
@@ -87,6 +87,10 @@ impl RuntimeEventKind {
         match command {
             Command::Startup(mode) => Some(Self::MachineStartup { mode }),
             Command::Shutdown => Some(Self::MachineShutdownRequested),
+            Command::Power(PowerCommand::On) => Some(Self::MachineStartup {
+                mode: StartupMode::Boot,
+            }),
+            Command::Power(PowerCommand::Off) => Some(Self::MachineShutdownRequested),
             Command::SleepPre => Some(Self::MachinePreparingForSleep),
             Command::Sleep | Command::NetworkManagerPreDown => {
                 Some(Self::NetworkTeardownImminent {
@@ -94,6 +98,8 @@ impl RuntimeEventKind {
                 })
             }
             Command::Brightness(_) => Some(Self::BrightnessRequested),
+            Command::Screen(ScreenCommand::Off) => Some(Self::ScreenBlankRequested),
+            Command::Screen(ScreenCommand::On) => Some(Self::ScreenRestoreRequested),
             Command::ScreenOff => Some(Self::ScreenBlankRequested),
             Command::ScreenOn => Some(Self::ScreenRestoreRequested),
             Command::Monitor
@@ -110,7 +116,7 @@ impl RuntimeEventKind {
 mod tests {
     use super::{EventSource, RuntimeEvent, RuntimeEventKind};
     use crate::session::SessionEvent;
-    use crate::{Command, StartupMode};
+    use crate::{Command, PowerCommand, ScreenCommand, StartupMode};
 
     #[test]
     fn cli_commands_map_to_canonical_runtime_events() {
@@ -129,6 +135,20 @@ mod tests {
             ))
         );
         assert_eq!(
+            RuntimeEvent::from_command(Command::Screen(ScreenCommand::Off)),
+            Some(RuntimeEvent::new(
+                EventSource::CliApi,
+                RuntimeEventKind::ScreenBlankRequested
+            ))
+        );
+        assert_eq!(
+            RuntimeEvent::from_command(Command::Screen(ScreenCommand::On)),
+            Some(RuntimeEvent::new(
+                EventSource::CliApi,
+                RuntimeEventKind::ScreenRestoreRequested
+            ))
+        );
+        assert_eq!(
             RuntimeEvent::from_command(Command::Startup(StartupMode::Wake)),
             Some(RuntimeEvent::new(
                 EventSource::CliApi,
@@ -139,6 +159,22 @@ mod tests {
         );
         assert_eq!(
             RuntimeEvent::from_command(Command::Shutdown),
+            Some(RuntimeEvent::new(
+                EventSource::CliApi,
+                RuntimeEventKind::MachineShutdownRequested
+            ))
+        );
+        assert_eq!(
+            RuntimeEvent::from_command(Command::Power(PowerCommand::On)),
+            Some(RuntimeEvent::new(
+                EventSource::CliApi,
+                RuntimeEventKind::MachineStartup {
+                    mode: StartupMode::Boot
+                }
+            ))
+        );
+        assert_eq!(
+            RuntimeEvent::from_command(Command::Power(PowerCommand::Off)),
             Some(RuntimeEvent::new(
                 EventSource::CliApi,
                 RuntimeEventKind::MachineShutdownRequested

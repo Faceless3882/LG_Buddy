@@ -1,14 +1,14 @@
 use std::env;
 use std::process::ExitCode;
 
-use lg_buddy::{parse_args, run_command, usage, version, ParseOutcome};
+use lg_buddy::{help, parse_args, run_command, version, ParseOutcome};
 
 fn main() -> ExitCode {
     let program = env::args().next().unwrap_or_else(|| "lg-buddy".to_string());
 
     match parse_args(env::args().skip(1)) {
-        Ok(ParseOutcome::Help) => {
-            print!("{}", usage(&program));
+        Ok(ParseOutcome::Help(topic)) => {
+            print!("{}", help(&program, topic));
             ExitCode::SUCCESS
         }
         Ok(ParseOutcome::Version) => {
@@ -23,9 +23,10 @@ fn main() -> ExitCode {
             }
         },
         Err(err) => {
+            let topic = err.help_topic();
             eprintln!("LG Buddy: {err}");
             eprintln!();
-            eprint!("{}", usage(&program));
+            eprint!("{}", help(&program, topic));
             ExitCode::from(2)
         }
     }

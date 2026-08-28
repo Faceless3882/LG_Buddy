@@ -108,10 +108,14 @@ With the default `bscpylgtv` platform, you may instead see the pairing prompt on
 
 LG Buddy is mostly automatic after installation.
 
+- To turn on the TV and restore the configured input, run `lg-buddy power on`
+- To turn off the TV when it is on the configured input, run `lg-buddy power off`
+- To blank or restore the TV screen, run `lg-buddy screen off` or `lg-buddy screen on`
 - To inspect settings, run `lg-buddy settings list`
 - To change supported settings, use `lg-buddy settings set <key> <value>`
 - To inspect the active TV platform, run `lg-buddy settings get tv.platform`
-- To see the active desktop idle backend, run `lg-buddy detect-backend`
+- To inspect the configured and currently resolved desktop idle backend, run
+  `lg-buddy settings describe screen.backend`
 - To inspect TV brightness, run `lg-buddy brightness get`
 - To set TV brightness directly, run `lg-buddy brightness set <0-100>`
 - To inspect the installed runtime version, run `lg-buddy --version`
@@ -123,6 +127,11 @@ LG Buddy is mostly automatic after installation.
   `./configure.sh`
 - To check the user-session service, run `systemctl --user status LG_Buddy_screen.service`
 - To remove LG Buddy, run `./uninstall.sh`
+
+For scoped syntax, run `lg-buddy <command> --help` or
+`lg-buddy help <command>`. Package-owned service, hook, timer, and compatibility
+entrypoints are not intended for ordinary TV control; they are identified in
+the [user guide](docs/user-guide.md#package-owned-runtime-entrypoints).
 
 The settings CLI is a structured layer over `config.env`. These examples write
 the same file that manual editing and `configure.sh` use:

@@ -1,13 +1,13 @@
 Feature: TV auth context
   LG Buddy should derive one consistent user-owned auth context for TV helper calls.
 
-  Scenario: screen-off uses the config-owned auth context by default
+  Scenario: Screen off uses the config-owned auth context by default
     Given a temporary LG Buddy config using input HDMI_2
     And LG Buddy session runtime is isolated
     And a mock TV client
     And the inherited user environment is cleared
     And the TV is on input HDMI_2
-    When I run the command "screen-off"
+    When I run the command "screen off"
     Then the command succeeds
     And the TV helper uses the expected auth context
 

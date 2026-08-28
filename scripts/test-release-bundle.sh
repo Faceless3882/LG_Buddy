@@ -25,6 +25,67 @@ assert_executable() {
     fi
 }
 
+assert_hidden_compatibility_alias() {
+    local binary="$1"
+    local command_name="$2"
+    local output=""
+    local status=0
+    shift 2
+
+    if output="$("$binary" "$@" extra 2>&1)"; then
+        echo "Compatibility alias unexpectedly accepted an extra argument: $command_name"
+        exit 1
+    else
+        status=$?
+    fi
+
+    if [ "$status" -ne 2 ]; then
+        echo "Compatibility alias returned status $status instead of 2: $command_name"
+        exit 1
+    fi
+
+    printf '%s\n' "$output" | grep -F -q "unexpected arguments for \`$command_name\`: extra"
+}
+
+assert_cli_surface() {
+    local binary="$1"
+    local help_output=""
+    local no_args_output=""
+
+    help_output="$("$binary" --help)"
+    no_args_output="$("$binary")"
+    if [ "$no_args_output" != "$help_output" ]; then
+        echo "No-argument output did not match global help: $binary"
+        exit 1
+    fi
+
+    printf '%s\n' "$help_output" | grep -q "lg-buddy"
+    printf '%s\n' "$help_output" | grep -F -q "power on"
+    printf '%s\n' "$help_output" | grep -F -q "power off"
+    printf '%s\n' "$help_output" | grep -F -q "screen off"
+    printf '%s\n' "$help_output" | grep -F -q "screen on"
+    printf '%s\n' "$help_output" | grep -q "settings list"
+    printf '%s\n' "$help_output" | grep -q "settings set <KEY> <VALUE>"
+    printf '%s\n' "$help_output" | grep -F -q "updates check [--channel stable|prerelease] [--notify]"
+
+    for hidden in startup shutdown screen-off screen-on "updates background-check"; do
+        if printf '%s\n' "$help_output" | grep -F -q "$hidden"; then
+            echo "Hidden entrypoint appeared in public help: $hidden"
+            exit 1
+        fi
+    done
+
+    "$binary" power on --help | grep -F -q "power on"
+    "$binary" power off --help | grep -F -q "power off"
+    "$binary" screen off --help | grep -F -q "screen off"
+    "$binary" screen on --help | grep -F -q "screen on"
+
+    assert_hidden_compatibility_alias "$binary" startup startup boot
+    assert_hidden_compatibility_alias "$binary" shutdown shutdown
+    assert_hidden_compatibility_alias "$binary" screen-off screen-off
+    assert_hidden_compatibility_alias "$binary" screen-on screen-on
+}
+
 assert_lifecycle_topology_installed() {
     assert_file "$SYSTEM_SERVICE"
     assert_file "$LIFECYCLE_SERVICE"
@@ -33,6 +94,7 @@ assert_lifecycle_topology_installed() {
     assert_file "$USER_UPDATE_CHECK_SERVICE"
     assert_file "$USER_UPDATE_CHECK_TIMER"
     assert_file "$USER_UPDATE_CHECK_OVERRIDE"
+    grep -q '^ExecStart=/usr/bin/lg-buddy updates background-check$' "$USER_UPDATE_CHECK_SERVICE"
     grep -q '^OnCalendar=weekly$' "$USER_UPDATE_CHECK_TIMER"
     grep -q '^WantedBy=graphical-session.target$' "$USER_UPDATE_CHECK_TIMER"
     [ ! -e "$LEGACY_SLEEP_SERVICE" ] || {
@@ -153,12 +215,7 @@ assert_file "$BUNDLE_DIR/systemd/LG_Buddy_screen.service"
 assert_file "$BUNDLE_DIR/systemd/LG_Buddy_update_check.service"
 assert_file "$BUNDLE_DIR/systemd/LG_Buddy_update_check.timer"
 
-HELP_OUTPUT="$("$BUNDLE_DIR/lg-buddy" 2>&1 || true)"
-printf '%s\n' "$HELP_OUTPUT" | grep -q "lg-buddy"
-printf '%s\n' "$HELP_OUTPUT" | grep -q "settings list"
-printf '%s\n' "$HELP_OUTPUT" | grep -q "settings set <key> <value>"
-printf '%s\n' "$HELP_OUTPUT" | grep -F -q "updates check [--channel stable|prerelease] [--notify]"
-printf '%s\n' "$HELP_OUTPUT" | grep -F -q "updates background-check"
+assert_cli_surface "$BUNDLE_DIR/lg-buddy"
 
 VERSION_OUTPUT="$("$BUNDLE_DIR/lg-buddy" --version)"
 printf '%s\n' "$VERSION_OUTPUT" | grep -q "^lg-buddy "
@@ -239,12 +296,7 @@ if [ "$SKIP_PIP_INSTALL" -eq 0 ]; then
     assert_executable "$INSTALLED_BSCPYLGTV"
 fi
 
-INSTALLED_HELP_OUTPUT="$("$INSTALLED_BINARY" 2>&1 || true)"
-printf '%s\n' "$INSTALLED_HELP_OUTPUT" | grep -q "lg-buddy"
-printf '%s\n' "$INSTALLED_HELP_OUTPUT" | grep -q "settings list"
-printf '%s\n' "$INSTALLED_HELP_OUTPUT" | grep -q "settings set <key> <value>"
-printf '%s\n' "$INSTALLED_HELP_OUTPUT" | grep -F -q "updates check [--channel stable|prerelease] [--notify]"
-printf '%s\n' "$INSTALLED_HELP_OUTPUT" | grep -F -q "updates background-check"
+assert_cli_surface "$INSTALLED_BINARY"
 
 INSTALLED_VERSION_OUTPUT="$("$INSTALLED_BINARY" --version)"
 printf '%s\n' "$INSTALLED_VERSION_OUTPUT" | grep -q "^lg-buddy "
@@ -281,6 +333,8 @@ grep -q '^screen_idle_timeout=86400$' "$CONFIG_FILE"
 "$INSTALLED_BINARY" settings get updates.auto_check | grep -q '^enabled$'
 "$INSTALLED_BINARY" settings set updates.auto_check disabled
 "$INSTALLED_BINARY" settings set updates.channel prerelease
+BACKGROUND_UPDATE_OUTPUT="$("$INSTALLED_BINARY" updates background-check)"
+printf '%s\n' "$BACKGROUND_UPDATE_OUTPUT" | grep -F -q 'background: skipped (automatic update checks disabled)'
 grep -q '^screen_backend=gnome$' "$CONFIG_FILE"
 grep -q '^screen_idle_blank=disabled$' "$CONFIG_FILE"
 grep -q '^screen_idle_timeout=900$' "$CONFIG_FILE"

@@ -738,8 +738,8 @@ fn run_gnome_monitor<W: Write, E: SessionActionExecutor>(
 fn run_swayidle_monitor<W: Write>(writer: &mut W) -> Result<(), SessionRunnerError> {
     let idle_timeout_secs = resolve_idle_timeout_secs();
     let current_exe = std::env::current_exe()?;
-    let screen_off_command = format!("{} screen-off", shell_quote(&current_exe));
-    let screen_on_command = format!("{} screen-on", shell_quote(&current_exe));
+    let screen_off_command = format!("{} screen off", shell_quote(&current_exe));
+    let screen_on_command = format!("{} screen on", shell_quote(&current_exe));
 
     writeln!(
         writer,
