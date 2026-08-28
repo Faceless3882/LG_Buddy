@@ -187,11 +187,19 @@ impl<E: SessionActionExecutor> SessionEventDispatcher<E> {
         writer: &mut W,
         event: SessionEvent,
     ) -> Result<(), SessionRunnerError> {
+        self.dispatch_event_from_source(writer, EventSource::DesktopSession, event)
+    }
+
+    fn dispatch_event_from_source<W: Write>(
+        &mut self,
+        writer: &mut W,
+        source: EventSource,
+        event: SessionEvent,
+    ) -> Result<(), SessionRunnerError> {
         match event {
             SessionEvent::Idle => {
                 writeln!(writer, "LG Buddy Monitor: Session became idle.")?;
-                let runtime_event =
-                    RuntimeEvent::from_session_event(EventSource::DesktopSession, event);
+                let runtime_event = RuntimeEvent::from_session_event(source, event);
                 match self.executor.screen_off(runtime_event) {
                     Ok(output) => write_command_output(writer, &output)?,
                     Err(err) => {
@@ -205,8 +213,7 @@ impl<E: SessionActionExecutor> SessionEventDispatcher<E> {
                     "LG Buddy Monitor: Session event `{}` requests screen restore.",
                     event.as_str()
                 )?;
-                let runtime_event =
-                    RuntimeEvent::from_session_event(EventSource::DesktopSession, event);
+                let runtime_event = RuntimeEvent::from_session_event(source, event);
                 match self.executor.screen_on(runtime_event) {
                     Ok(output) => write_command_output(writer, &output)?,
                     Err(err) => writeln!(
@@ -220,8 +227,7 @@ impl<E: SessionActionExecutor> SessionEventDispatcher<E> {
                     writer,
                     "LG Buddy Monitor: Session event `before-sleep` requests pre-sleep handling."
                 )?;
-                let runtime_event =
-                    RuntimeEvent::from_session_event(EventSource::DesktopSession, event);
+                let runtime_event = RuntimeEvent::from_session_event(source, event);
                 match self.executor.before_sleep(runtime_event) {
                     Ok(output) => write_command_output(writer, &output)?,
                     Err(err) => {
@@ -235,8 +241,7 @@ impl<E: SessionActionExecutor> SessionEventDispatcher<E> {
                     "LG Buddy Monitor: Session event `after-resume` requests wake restore."
                 )?;
                 writer.flush()?;
-                let runtime_event =
-                    RuntimeEvent::from_session_event(EventSource::DesktopSession, event);
+                let runtime_event = RuntimeEvent::from_session_event(source, event);
                 match self.executor.after_resume_streaming(writer, runtime_event) {
                     Ok(()) => {}
                     Err(err) => writeln!(
@@ -634,9 +639,28 @@ fn run_gnome_monitor<W: Write, E: SessionActionExecutor>(
 
     writeln!(writer, "LG Buddy Monitor: Using GNOME backend.")?;
 
+    run_native_session_monitor(
+        writer,
+        dispatcher,
+        ScreenBackend::Gnome,
+        spawn_gnome_monitor_thread,
+    )
+}
+
+fn run_native_session_monitor<W, E, S>(
+    writer: &mut W,
+    dispatcher: &mut SessionEventDispatcher<E>,
+    backend: ScreenBackend,
+    spawn_monitor: S,
+) -> Result<(), SessionRunnerError>
+where
+    W: Write,
+    E: SessionActionExecutor,
+    S: FnOnce(mpsc::Sender<RunnerMessage>, Arc<LatestInactivityObservation>) -> JoinHandle<()>,
+{
     let blank_after = Duration::from_millis(resolve_idle_timeout_ms());
     let started_at = Instant::now();
-    let mut inactivity = if session_screen_ownership_marker_exists()? {
+    let mut inactivity = if session_screen_ownership_marker_exists(backend)? {
         InactivityEngine::new_with_restore_pending(blank_after, started_at)
     } else {
         InactivityEngine::new(blank_after, started_at)
@@ -644,7 +668,7 @@ fn run_gnome_monitor<W: Write, E: SessionActionExecutor>(
 
     let (sender, receiver) = mpsc::channel();
     let latest_inactivity = Arc::new(LatestInactivityObservation::default());
-    let monitor_handle = spawn_gnome_monitor_thread(sender.clone(), Arc::clone(&latest_inactivity));
+    let monitor_handle = spawn_monitor(sender.clone(), Arc::clone(&latest_inactivity));
     let _gamepad_monitor = spawn_gamepad_activity_thread(sender.clone());
     let mut monitor_result = Ok(());
 
@@ -653,12 +677,7 @@ fn run_gnome_monitor<W: Write, E: SessionActionExecutor>(
             Some(wait) => match receiver.recv_timeout(wait) {
                 Ok(message) => message,
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    handle_gnome_inactivity_timeout(
-                        writer,
-                        dispatcher,
-                        &mut inactivity,
-                        Instant::now(),
-                    )?;
+                    handle_inactivity_timeout(writer, dispatcher, &mut inactivity, Instant::now())?;
                     continue;
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -672,49 +691,65 @@ fn run_gnome_monitor<W: Write, E: SessionActionExecutor>(
         match message {
             RunnerMessage::InactivityObservationReady => {
                 if let Some(observation) = latest_inactivity.take() {
-                    handle_gnome_activity_observation(
+                    handle_inactivity_observation(
                         writer,
                         dispatcher,
                         &mut inactivity,
+                        EventSource::DesktopSession,
                         observation.observation,
                         observation.observed_at,
                     )?;
                 }
             }
+            RunnerMessage::ActivityObservation {
+                source,
+                observation,
+                observed_at,
+            } => handle_inactivity_observation(
+                writer,
+                dispatcher,
+                &mut inactivity,
+                source,
+                observation,
+                observed_at,
+            )?,
             RunnerMessage::SessionEvent {
                 event: SessionEvent::Idle,
                 ..
             } => {
-                // GNOME ScreenSaver idle is observational. Only LG Buddy's
-                // inactivity deadline decides when to blank.
+                // Provider idle is observational. Only LG Buddy's inactivity
+                // deadline decides when to blank.
             }
             RunnerMessage::SessionEvent {
                 event: SessionEvent::Active,
                 observed_at,
-            } => handle_gnome_activity_observation(
+            } => handle_inactivity_observation(
                 writer,
                 dispatcher,
                 &mut inactivity,
+                EventSource::DesktopSession,
                 InactivityObservation::ProviderActive,
                 observed_at,
             )?,
             RunnerMessage::SessionEvent {
                 event: SessionEvent::WakeRequested,
                 observed_at,
-            } => handle_gnome_activity_observation(
+            } => handle_inactivity_observation(
                 writer,
                 dispatcher,
                 &mut inactivity,
+                EventSource::DesktopSession,
                 InactivityObservation::WakeRequested,
                 observed_at,
             )?,
             RunnerMessage::SessionEvent {
                 event: SessionEvent::UserActivity,
                 observed_at,
-            } => handle_gnome_activity_observation(
+            } => handle_inactivity_observation(
                 writer,
                 dispatcher,
                 &mut inactivity,
+                EventSource::DesktopSession,
                 InactivityObservation::UserActivityObserved,
                 observed_at,
             )?,
@@ -798,11 +833,13 @@ fn resolve_idle_timeout_secs() -> u64 {
     )
 }
 
-fn session_screen_ownership_marker_exists() -> Result<bool, SessionRunnerError> {
+fn session_screen_ownership_marker_exists(
+    backend: ScreenBackend,
+) -> Result<bool, SessionRunnerError> {
     ScreenOwnershipMarker::from_env(StateScope::Session)
         .map(|marker| marker.exists())
         .map_err(|err| SessionRunnerError::Failed {
-            backend: ScreenBackend::Gnome,
+            backend,
             message: format!("failed to inspect session screen ownership: {err}"),
         })
 }
@@ -912,8 +949,9 @@ fn run_synthetic_gamepad_activity_process(
     }
 
     if !stop.load(Ordering::SeqCst) {
-        let _ = sender.send(RunnerMessage::SessionEvent {
-            event: SessionEvent::UserActivity,
+        let _ = sender.send(RunnerMessage::ActivityObservation {
+            source: EventSource::AuxiliaryInput,
+            observation: InactivityObservation::UserActivityObserved,
             observed_at: Instant::now(),
         });
     }
@@ -1003,8 +1041,9 @@ fn run_gamepad_activity_process(sender: mpsc::Sender<RunnerMessage>, stop: Arc<A
 
         if poll.activity && gamepad_activity_send_due(last_activity_sent_at, observed_at) {
             if sender
-                .send(RunnerMessage::SessionEvent {
-                    event: SessionEvent::UserActivity,
+                .send(RunnerMessage::ActivityObservation {
+                    source: EventSource::AuxiliaryInput,
+                    observation: InactivityObservation::UserActivityObserved,
                     observed_at,
                 })
                 .is_err()
@@ -1109,6 +1148,11 @@ fn run_gnome_monitor_process(
 enum RunnerMessage {
     SessionEvent {
         event: SessionEvent,
+        observed_at: Instant,
+    },
+    ActivityObservation {
+        source: EventSource,
+        observation: InactivityObservation,
         observed_at: Instant,
     },
     InactivityObservationReady,
@@ -1368,10 +1412,11 @@ fn poll_gnome_idle_monitor_once(
     )
 }
 
-fn handle_gnome_activity_observation<W: Write, E: SessionActionExecutor>(
+fn handle_inactivity_observation<W: Write, E: SessionActionExecutor>(
     writer: &mut W,
     dispatcher: &mut SessionEventDispatcher<E>,
     inactivity: &mut InactivityEngine,
+    source: EventSource,
     observation: InactivityObservation,
     observed_at: Instant,
 ) -> Result<(), SessionRunnerError> {
@@ -1393,13 +1438,13 @@ fn handle_gnome_activity_observation<W: Write, E: SessionActionExecutor>(
     };
 
     if let Some(event) = event {
-        dispatcher.dispatch_event(writer, event)?;
+        dispatcher.dispatch_event_from_source(writer, source, event)?;
     }
 
     Ok(())
 }
 
-fn handle_gnome_inactivity_timeout<W: Write, E: SessionActionExecutor>(
+fn handle_inactivity_timeout<W: Write, E: SessionActionExecutor>(
     writer: &mut W,
     dispatcher: &mut SessionEventDispatcher<E>,
     inactivity: &mut InactivityEngine,
@@ -1445,15 +1490,16 @@ fn write_command_output<W: Write>(writer: &mut W, output: &str) -> io::Result<()
 mod tests {
     use super::{
         complete_gamepad_refresh, gamepad_activity_send_due,
-        gamepad_device_event_refresh_requested, gamepad_refresh_due,
-        handle_gnome_activity_observation, handle_gnome_inactivity_timeout,
-        normalize_idle_timeout_secs, poll_gnome_idle_monitor_once, run_lifecycle_monitor_with_bus,
-        schedule_gamepad_refresh, shell_quote, GamepadDeviceEventMonitor,
-        GamepadDeviceEventRefresh, GamepadDiagnosticEmitter, LatestInactivityObservation,
-        RunnerMessage, SessionActionExecutor, SessionEventDispatcher, TimedInactivityObservation,
+        gamepad_device_event_refresh_requested, gamepad_refresh_due, handle_inactivity_observation,
+        handle_inactivity_timeout, normalize_idle_timeout_secs, poll_gnome_idle_monitor_once,
+        run_lifecycle_monitor_with_bus, run_native_session_monitor, schedule_gamepad_refresh,
+        shell_quote, GamepadDeviceEventMonitor, GamepadDeviceEventRefresh,
+        GamepadDiagnosticEmitter, LatestInactivityObservation, RunnerMessage,
+        SessionActionExecutor, SessionEventDispatcher, TimedInactivityObservation,
         TrustedScreenSaverSignals, GAMEPAD_ACTIVITY_REFRESH_RETRY_INTERVAL,
         GAMEPAD_ACTIVITY_SEND_INTERVAL,
     };
+    use crate::config::ScreenBackend;
     use crate::events::{EventSource, RuntimeEvent, RuntimeEventKind};
     use crate::session::inactivity::{InactivityEngine, InactivityObservation};
     use crate::session::SessionEvent;
@@ -1473,6 +1519,7 @@ mod tests {
     use std::io;
     use std::path::{Path, PathBuf};
     use std::sync::{mpsc, Mutex, OnceLock};
+    use std::thread;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     fn env_lock() -> &'static Mutex<()> {
@@ -1496,6 +1543,7 @@ mod tests {
         after_resume_output: String,
         screen_off_error: Option<String>,
         screen_on_error: Option<String>,
+        screen_on_signal: Option<mpsc::Sender<()>>,
         before_sleep_error: Option<String>,
         after_resume_error: Option<String>,
     }
@@ -1524,6 +1572,9 @@ mod tests {
         fn screen_on(&mut self, event: RuntimeEvent) -> Result<String, RunError> {
             self.screen_on_calls += 1;
             self.screen_on_events.push(event);
+            if let Some(sender) = &self.screen_on_signal {
+                let _ = sender.send(());
+            }
             if let Some(message) = &self.screen_on_error {
                 return Err(RunError::Policy(message.clone()));
             }
@@ -2414,14 +2465,14 @@ system_sleep_wake_policy={policy}
         let mut inactivity = InactivityEngine::new(Duration::from_secs(1), started_at);
         let mut output = Vec::new();
 
-        handle_gnome_inactivity_timeout(
+        handle_inactivity_timeout(
             &mut output,
             &mut dispatcher,
             &mut inactivity,
             started_at + Duration::from_secs(1),
         )
         .expect("blank when the LG Buddy timeout expires");
-        handle_gnome_inactivity_timeout(
+        handle_inactivity_timeout(
             &mut output,
             &mut dispatcher,
             &mut inactivity,
@@ -2446,7 +2497,7 @@ system_sleep_wake_policy={policy}
         let mut inactivity = InactivityEngine::new(Duration::from_secs(1), started_at);
         let mut output = Vec::new();
 
-        handle_gnome_inactivity_timeout(
+        handle_inactivity_timeout(
             &mut output,
             &mut dispatcher,
             &mut inactivity,
@@ -2455,15 +2506,16 @@ system_sleep_wake_policy={policy}
         .expect("blank when the timeout expires");
         let mut output = Vec::new();
 
-        handle_gnome_activity_observation(
+        handle_inactivity_observation(
             &mut output,
             &mut dispatcher,
             &mut inactivity,
+            EventSource::DesktopSession,
             InactivityObservation::DesktopActivityObserved,
             started_at + Duration::from_millis(1_100),
         )
         .expect("restore from desktop activity");
-        handle_gnome_inactivity_timeout(
+        handle_inactivity_timeout(
             &mut output,
             &mut dispatcher,
             &mut inactivity,
@@ -2489,7 +2541,7 @@ system_sleep_wake_policy={policy}
         let mut inactivity = InactivityEngine::new(Duration::from_secs(1), started_at);
         let mut output = Vec::new();
 
-        handle_gnome_inactivity_timeout(
+        handle_inactivity_timeout(
             &mut output,
             &mut dispatcher,
             &mut inactivity,
@@ -2498,18 +2550,20 @@ system_sleep_wake_policy={policy}
         .expect("blank when the timeout expires");
 
         let mut output = Vec::new();
-        handle_gnome_activity_observation(
+        handle_inactivity_observation(
             &mut output,
             &mut dispatcher,
             &mut inactivity,
+            EventSource::AuxiliaryInput,
             InactivityObservation::UserActivityObserved,
             started_at + Duration::from_millis(1_100),
         )
         .expect("restore from auxiliary activity");
-        handle_gnome_activity_observation(
+        handle_inactivity_observation(
             &mut output,
             &mut dispatcher,
             &mut inactivity,
+            EventSource::DesktopSession,
             InactivityObservation::ProviderActive,
             started_at + Duration::from_millis(1_200),
         )
@@ -2523,7 +2577,64 @@ system_sleep_wake_policy={policy}
         assert_eq!(
             dispatcher.executor.screen_on_events,
             vec![RuntimeEvent::new(
-                EventSource::DesktopSession,
+                EventSource::AuxiliaryInput,
+                RuntimeEventKind::UserActivityObserved,
+            )]
+        );
+    }
+
+    #[test]
+    fn native_session_runtime_starts_gamepad_without_a_desktop_provider() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let runtime_dir = unique_config_path("native-session-runtime");
+        std::env::set_var("LG_BUDDY_SESSION_RUNTIME_DIR", &runtime_dir);
+        std::env::set_var("LG_BUDDY_IDLE_TIMEOUT", "300");
+        std::env::set_var(super::GAMEPAD_ACTIVITY_SOURCE_ENV, "synthetic");
+        std::env::set_var(super::GAMEPAD_ACTIVITY_TEST_AFTER_SECS_ENV, "0");
+
+        let (activity_sender, activity_receiver) = mpsc::channel();
+        let executor = FakeActionExecutor {
+            screen_on_output: "screen-on output\n".to_string(),
+            screen_on_signal: Some(activity_sender),
+            ..FakeActionExecutor::default()
+        };
+        let mut dispatcher = SessionEventDispatcher::new(executor);
+        let mut output = Vec::new();
+
+        let result = run_native_session_monitor(
+            &mut output,
+            &mut dispatcher,
+            ScreenBackend::Auto,
+            |sender, _latest_inactivity| {
+                thread::spawn(move || {
+                    let result = activity_receiver
+                        .recv_timeout(Duration::from_secs(1))
+                        .map(|()| ())
+                        .map_err(|err| super::SessionRunnerError::Failed {
+                            backend: ScreenBackend::Auto,
+                            message: format!(
+                                "synthetic gamepad activity was not dispatched: {err}"
+                            ),
+                        });
+                    let _ = sender.send(RunnerMessage::MonitorExited(result));
+                })
+            },
+        );
+
+        std::env::remove_var("LG_BUDDY_SESSION_RUNTIME_DIR");
+        std::env::remove_var("LG_BUDDY_IDLE_TIMEOUT");
+        std::env::remove_var(super::GAMEPAD_ACTIVITY_SOURCE_ENV);
+        std::env::remove_var(super::GAMEPAD_ACTIVITY_TEST_AFTER_SECS_ENV);
+
+        result.expect("shared native session runtime should start and process gamepad activity");
+
+        assert_eq!(dispatcher.executor.screen_on_calls, 1);
+        assert_eq!(
+            dispatcher.executor.screen_on_events,
+            vec![RuntimeEvent::new(
+                EventSource::AuxiliaryInput,
                 RuntimeEventKind::UserActivityObserved,
             )]
         );
@@ -2541,7 +2652,7 @@ system_sleep_wake_policy={policy}
         let mut inactivity = InactivityEngine::new(Duration::from_secs(1), started_at);
         let mut output = Vec::new();
 
-        handle_gnome_inactivity_timeout(
+        handle_inactivity_timeout(
             &mut output,
             &mut dispatcher,
             &mut inactivity,
@@ -2549,23 +2660,24 @@ system_sleep_wake_policy={policy}
         )
         .expect("blank when the timeout expires");
 
-        handle_gnome_activity_observation(
+        handle_inactivity_observation(
             &mut output,
             &mut dispatcher,
             &mut inactivity,
+            EventSource::AuxiliaryInput,
             InactivityObservation::UserActivityObserved,
             started_at + Duration::from_millis(1_100),
         )
         .expect("restore from auxiliary activity");
 
-        handle_gnome_inactivity_timeout(
+        handle_inactivity_timeout(
             &mut output,
             &mut dispatcher,
             &mut inactivity,
             started_at + Duration::from_secs(2),
         )
         .expect("the original deadline must stay retired");
-        handle_gnome_inactivity_timeout(
+        handle_inactivity_timeout(
             &mut output,
             &mut dispatcher,
             &mut inactivity,
@@ -2588,14 +2700,14 @@ system_sleep_wake_policy={policy}
         let mut inactivity = InactivityEngine::new(Duration::from_secs(1), started_at);
         let mut output = Vec::new();
 
-        handle_gnome_inactivity_timeout(
+        handle_inactivity_timeout(
             &mut output,
             &mut dispatcher,
             &mut inactivity,
             started_at + Duration::from_secs(1),
         )
         .expect("initial blank attempt should be logged");
-        handle_gnome_inactivity_timeout(
+        handle_inactivity_timeout(
             &mut output,
             &mut dispatcher,
             &mut inactivity,
@@ -2619,18 +2731,20 @@ system_sleep_wake_policy={policy}
         let mut inactivity = InactivityEngine::new(Duration::from_secs(1), started_at);
         let mut output = Vec::new();
 
-        handle_gnome_activity_observation(
+        handle_inactivity_observation(
             &mut output,
             &mut dispatcher,
             &mut inactivity,
+            EventSource::DesktopSession,
             InactivityObservation::ProviderActive,
             started_at,
         )
         .expect("initial provider active should restore");
-        handle_gnome_activity_observation(
+        handle_inactivity_observation(
             &mut output,
             &mut dispatcher,
             &mut inactivity,
+            EventSource::DesktopSession,
             InactivityObservation::ProviderActive,
             started_at + Duration::from_millis(100),
         )

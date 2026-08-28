@@ -10,11 +10,10 @@ modes or device-specific configuration.
 ## Purpose
 
 The subsystem watches readable Linux input devices and reports controller input
-as `UserActivity` to the session runner. The current runtime starts it from the
-native GNOME monitor path because GNOME is the only production adapter on the
-native inactivity path today. The source itself is not GNOME-specific; future
-native desktop adapters can consume the same auxiliary activity signal when
-their idle APIs miss controller input.
+as auxiliary user activity to the session runner. The shared native-session
+runtime starts it independently of the selected desktop provider. GNOME is the
+only production provider using that runtime today, but neither the gamepad
+source nor its lifecycle belongs to GNOME or any other desktop environment.
 
 The subsystem does not decide whether to blank or restore the TV. It only
 reports activity. The session runner and screen policy remain responsible for
@@ -22,8 +21,8 @@ screen behavior.
 
 ## Runtime Flow
 
-1. `session/runner.rs` starts a background gamepad activity thread for the
-   current native monitor path.
+1. The shared native-session runtime in `session/runner.rs` starts a background
+   gamepad activity thread alongside the selected desktop provider.
 2. `session/gamepad/devices.rs` scans `/dev/input/event*`, opens each event
    node, checks whether its capabilities look gamepad-like, records
    vendor/product IDs, and maps related `/dev/hidraw*` paths through sysfs.
@@ -38,7 +37,8 @@ screen behavior.
    immediate. Axis activity is compared against a moving baseline so arbitrary
    resting positions, such as a wheel left turned, do not continuously count as
    input.
-7. The runner receives throttled `UserActivity` events and resets the same
+7. The runner receives throttled `AuxiliaryInput` activity observations,
+   preserves that source on the resulting runtime event, and resets the same
    inactivity deadline used by desktop activity.
 
 ## Module Map
@@ -127,7 +127,8 @@ Default tests should cover the behavior without requiring real hardware:
 - adapter support matching and reader spec keys
 - registry cleanup and retention rules
 - button, axis, baseline, and cooldown policy
-- runner integration of gamepad activity into inactivity observations
+- backend-neutral native-session integration of gamepad activity into
+  inactivity observations
 
 Use the hardware smoke test when changing behavior that depends on real input
 devices:

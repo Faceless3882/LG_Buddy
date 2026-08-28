@@ -8,12 +8,14 @@ Feature: GNOME monitor
     And a mock TV client
     And the TV is on input HDMI_2
     And the executable PATH is isolated
+    And gamepad activity is observed after 0 seconds
     And GNOME monitor stays open for 0.1 seconds
     When I run the command "monitor"
     Then the command succeeds
     And stdout contains "screen idle blanking is disabled by config"
     And the TV client did not receive "get_input"
     And the TV client did not receive "turn_screen_off"
+    And the TV client did not receive "turn_screen_on"
 
   Scenario: GNOME ScreenSaver idle does not bypass the LG Buddy timeout
     Given a temporary LG Buddy config using input HDMI_2
@@ -111,7 +113,7 @@ Feature: GNOME monitor
     And the session marker exists
     And the TV screen is blanked
 
-  Scenario: GNOME gamepad activity restores a blanked TV while idletime remains stale
+  Scenario: Gamepad activity restores a blanked TV while GNOME idletime remains stale
     Given a temporary LG Buddy config using input HDMI_2
     And the idle timeout is 1 seconds
     And LG Buddy session runtime is isolated
