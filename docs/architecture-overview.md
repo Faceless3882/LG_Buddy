@@ -138,6 +138,7 @@ flowchart LR
                 LOGINDADAPTER["sources/linux/logind.rs<br/>logind lifecycle mapping"]
                 NMGATE["sources/linux/network_manager.rs<br/>pre-down event source"]
                 GADAPTER["sources/desktop/gnome.rs<br/>GNOME probe + signal mapping"]
+                WADAPTER["sources/desktop/wayland.rs<br/>Wayland registry + activity mapping"]
                 SADAPTER["sources/desktop/swayidle.rs<br/>hook mapping + capability probe"]
             end
         end
@@ -159,11 +160,13 @@ flowchart LR
     RUNNER --> BACKEND
     RUNNER --> BUS
     BACKEND --> GADAPTER
+    BACKEND --> WADAPTER
     BACKEND --> SADAPTER
 
     GNOME --> BUS
     BUS --> GADAPTER
     GADAPTER -->|"SessionEvent"| SESSIONMODEL
+    WADAPTER -->|"DesktopActivityObserved"| RUNNER
     LOGIND --> BUS
     BUS --> LOGINDADAPTER
     LOGINDADAPTER -->|"RuntimeEvent"| EVENTS
@@ -273,7 +276,7 @@ The intended split is:
   - native Wake-on-LAN packet generation and UDP send
 - `backend.rs`
   - backend selection and detection
-  - `auto`, `gnome`, and `swayidle` support
+  - `auto`, `gnome`, explicit `wayland`, and `swayidle` support
 - `session.rs`
   - backend-neutral session event model
   - capability surface for desktop backends
@@ -318,6 +321,9 @@ The intended split is:
 - `sources/desktop/gnome.rs`
   - GNOME-specific capability probing plus ScreenSaver signal and IdleMonitor
     method mapping
+- `sources/desktop/wayland.rs`
+  - native Wayland capability probing and dynamic registry/seat ownership
+  - maps zero-timeout resumed notifications into desktop activity facts
 - `sources/desktop/swayidle.rs`
   - `swayidle`-specific capability probing and hook-to-event mapping
   - models the `swayidle` hook surface; production timeout/resume handling
@@ -346,7 +352,8 @@ The session-facing pieces should be read as one subsystem:
   - owns the `lifecycle` event loop for system sleep/wake handling
 - `sources/linux/logind.rs`
   - adapts Linux system lifecycle signals into canonical lifecycle events
-- `sources/desktop/gnome.rs` and `sources/desktop/swayidle.rs`
+- `sources/desktop/gnome.rs`, `sources/desktop/wayland.rs`, and
+  `sources/desktop/swayidle.rs`
   - adapt or model backend-specific surfaces against that shared session
     contract; the production `swayidle` timeout/resume path enters through
     CLI/API commands
@@ -529,7 +536,10 @@ Detection behavior:
 
 - `auto` prefers GNOME when the current session satisfies the full GNOME contract and the session bus is reachable
 - otherwise falls back to `swayidle` if installed
-- forced backends validate required commands
+- explicit `wayland` validates `ext_idle_notifier_v1` version 2 or newer plus
+  at least one advertised seat and does not fall back
+- `auto` does not select native Wayland yet
+- other forced backends validate their required services or commands
 
 ## TV Integration Boundary
 
@@ -693,6 +703,11 @@ The detailed session model is documented in `docs/session-backend-model.md`.
 - mapping from GNOME D-Bus monitor lines into `SessionEvent`
 - the GNOME event and idletime sources used by `lg-buddy monitor`
 
+`sources/desktop/wayland.rs` is the native non-GNOME adapter. It owns the
+Wayland connection, registry, every advertised seat, and zero-timeout idle
+notifications. Resumed notifications become desktop activity observations in
+the shared inactivity runtime; compositor idle does not directly blank the TV.
+
 `sources/desktop/swayidle.rs` is the delegated-tool adapter. It currently provides:
 
 - capability probing
@@ -718,7 +733,7 @@ asymmetric:
   idle is not a blanking authority
 - the shared native-session runtime consumes gamepad activity directly from
   Linux input devices as `AuxiliaryInput`, independently of desktop providers;
-  GNOME is currently the only production provider using this runtime
+  GNOME and native Wayland use this runtime
 - the gamepad source refreshes its device set from Linux device add, remove, and
   change events, with periodic reconciliation for missed events
 - delegated `swayidle` monitor execution is implemented as CLI/API delegation
@@ -728,10 +743,9 @@ asymmetric:
   handled by the NetworkManager pre-down gate plus logind lifecycle service
   instead
 
-`swayidle` remains the current external-tool compatibility backend. Its
-delegated CLI/API shape is intentionally conservative: native non-GNOME Wayland
-idle/activity sources can later replace delegated timeout and resume execution
-without redefining screen policy.
+`swayidle` remains the external-tool compatibility backend while native
+Wayland is explicit opt-in. Automatic native selection and later deprecation of
+the delegated path are separate work.
 
 ## Configuration and Override Surface
 
@@ -796,7 +810,7 @@ The Rust runtime currently owns:
 - screen off
 - screen on
 - brightness control
-- `monitor` command with GNOME and `swayidle` parity paths
+- `monitor` command with GNOME, native Wayland, and `swayidle` paths
 
 The shell layer still owns:
 

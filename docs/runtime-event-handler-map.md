@@ -28,9 +28,8 @@ the lifecycle policy domain. The inactivity observation layer owns one
 deadline. Every activity observation resets it; expiry produces an
 edge-triggered blank decision.
 
-GNOME is the production pilot for the native inactivity path today, but the
-model is not GNOME-specific. A future non-GNOME Wayland adapter should feed the
-same normalized inactivity observations.
+GNOME and native Wayland feed the same normalized inactivity observations into
+the shared native-session path.
 
 ## Current Top-Level Handlers
 
@@ -97,10 +96,9 @@ Examples:
 
 ### Native Inactivity Path
 
-The native inactivity path is the intended path for desktop adapters that can
-report activity facts directly. GNOME is the first production backend on this
-path. A future non-GNOME Wayland adapter should feed the same inactivity model
-instead of delegating blank/restore commands to an external tool.
+The native inactivity path is used by GNOME and the explicit native Wayland
+backend. Both feed activity facts into the same inactivity model instead of
+delegating blank/restore commands to an external tool.
 
 ```text
 native desktop activity facts
@@ -255,10 +253,10 @@ lifecycle path:
   not parallel runtime handlers
 - legacy cleanup honors a persisted opt-out config value
 
-## Target Non-GNOME Wayland Shape
+## Native Non-GNOME Wayland Shape
 
-Native non-GNOME Wayland idle work is separate from logind lifecycle work and
-should follow the same native inactivity path.
+Native non-GNOME Wayland idle monitoring is separate from logind lifecycle work
+and follows the same native inactivity path.
 
 Target event path:
 
@@ -285,8 +283,8 @@ lifecycle policy, runtime phase guard, and source adapter namespace in place.
 Remaining work should stay scoped:
 
 1. Keep native Wayland idle replacement separate from the logind lifecycle path.
-2. Retire the delegated `swayidle` monitor once native non-GNOME Wayland
-   activity facts are available.
+2. Keep `swayidle` available while native Wayland remains explicit opt-in;
+   automatic promotion and deprecation are separate work.
 3. Preserve the one-lifecycle-owner invariant in installer, release-bundle, and
    uninstall tests.
 4. Treat future platform lifecycle providers, such as a possible macOS provider,

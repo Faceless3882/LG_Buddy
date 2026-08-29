@@ -52,7 +52,7 @@ validate_tv_platform() {
 
 validate_backend() {
     case "$1" in
-        auto|gnome|swayidle) return 0 ;;
+        auto|gnome|wayland|swayidle) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -161,7 +161,7 @@ if [ "${LG_BUDDY_NONINTERACTIVE:-0}" = "1" ]; then
         exit 1
     }
     validate_backend "$screen_backend" || {
-        echo "LG_BUDDY_SCREEN_BACKEND must be one of auto, gnome, or swayidle."
+        echo "LG_BUDDY_SCREEN_BACKEND must be one of auto, gnome, wayland, or swayidle."
         exit 1
     }
     validate_screen_idle_blank "$screen_idle_blank" || {
@@ -309,22 +309,25 @@ else
         echo "Choose the screen idle backend:"
         echo "  1) auto"
         echo "  2) gnome"
-        echo "  3) swayidle"
+        echo "  3) wayland"
+        echo "  4) swayidle"
 
         case "$current_screen_backend" in
             auto) default_backend_choice="1" ;;
             gnome) default_backend_choice="2" ;;
-            swayidle) default_backend_choice="3" ;;
+            wayland) default_backend_choice="3" ;;
+            swayidle) default_backend_choice="4" ;;
             *) default_backend_choice="1" ;;
         esac
 
         while true; do
-            BACKEND_CHOICE="$(prompt_with_default "Enter number (1-3)" "$default_backend_choice")"
+            BACKEND_CHOICE="$(prompt_with_default "Enter number (1-4)" "$default_backend_choice")"
             case "$BACKEND_CHOICE" in
                 1) screen_backend="auto"; break ;;
                 2) screen_backend="gnome"; break ;;
-                3) screen_backend="swayidle"; break ;;
-                *) echo "  Please enter a number between 1 and 3." ;;
+                3) screen_backend="wayland"; break ;;
+                4) screen_backend="swayidle"; break ;;
+                *) echo "  Please enter a number between 1 and 4." ;;
             esac
         done
 

@@ -229,7 +229,7 @@ lg_buddy_load_config() {
         echo "LG Buddy: invalid tv platform '$tv_platform'; expected bscpylgtv or lg_webos."
         return 2
     fi
-    screen_backend="$(lg_buddy_config_get_valid "screen_backend" '^(auto|gnome|swayidle)$' "$LG_BUDDY_DEFAULT_SCREEN_BACKEND" "$LG_BUDDY_CONFIG_FILE")"
+    screen_backend="$(lg_buddy_config_get_valid "screen_backend" '^(auto|gnome|wayland|swayidle)$' "$LG_BUDDY_DEFAULT_SCREEN_BACKEND" "$LG_BUDDY_CONFIG_FILE")"
     screen_idle_blank="$(lg_buddy_config_get_valid "screen_idle_blank" '^(enabled|disabled)$' "$LG_BUDDY_DEFAULT_SCREEN_IDLE_BLANK" "$LG_BUDDY_CONFIG_FILE")"
     screen_idle_timeout="$(lg_buddy_config_get_valid "screen_idle_timeout" '^[0-9]+$' "$LG_BUDDY_DEFAULT_IDLE_TIMEOUT" "$LG_BUDDY_CONFIG_FILE")"
     screen_idle_timeout="$(lg_buddy_normalize_idle_timeout "$screen_idle_timeout")"

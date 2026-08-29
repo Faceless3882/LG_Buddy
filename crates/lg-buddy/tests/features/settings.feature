@@ -52,7 +52,7 @@ Feature: Settings CLI
     When I run the command "settings describe screen.backend"
     Then the command succeeds
     And stdout contains "current: auto (gnome)"
-    And stdout contains "allowed values: auto (gnome), gnome, swayidle"
+    And stdout contains "allowed values: auto (gnome), gnome, wayland, swayidle"
     When I run the command "settings get screen.backend"
     Then the command succeeds
     And stdout is "auto"
@@ -64,7 +64,7 @@ Feature: Settings CLI
     When I run the command "settings describe screen.backend"
     Then the command succeeds
     And stdout contains "current: auto (swayidle)"
-    And stdout contains "allowed values: auto (swayidle), gnome, swayidle"
+    And stdout contains "allowed values: auto (swayidle), gnome, wayland, swayidle"
 
   Scenario: settings describe remains available without a detected backend
     Given a temporary LG Buddy config using input HDMI_2
@@ -72,7 +72,7 @@ Feature: Settings CLI
     When I run the command "settings describe screen.backend"
     Then the command succeeds
     And stdout contains "current: auto (no backend currently available)"
-    And stdout contains "allowed values: auto (no backend currently available), gnome, swayidle"
+    And stdout contains "allowed values: auto (no backend currently available), gnome, wayland, swayidle"
 
   Scenario: settings describe shows required TV operations
     Given a temporary LG Buddy config using input HDMI_2

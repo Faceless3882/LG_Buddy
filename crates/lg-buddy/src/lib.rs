@@ -24,7 +24,7 @@ pub mod web_os;
 pub mod wol;
 
 pub use dev::{DevCommand, DevError, DevParseError, WebOsControlProbeCommand};
-pub use sources::desktop::{gnome, swayidle};
+pub use sources::desktop::{gnome, swayidle, wayland};
 pub use sources::linux::{logind, network_manager};
 
 use crate::backend::{

@@ -11,9 +11,9 @@ modes or device-specific configuration.
 
 The subsystem watches readable Linux input devices and reports controller input
 as auxiliary user activity to the session runner. The shared native-session
-runtime starts it independently of the selected desktop provider. GNOME is the
-only production provider using that runtime today, but neither the gamepad
-source nor its lifecycle belongs to GNOME or any other desktop environment.
+runtime starts it independently of the selected desktop provider. GNOME and
+native Wayland both use that runtime, but neither the gamepad source nor its
+lifecycle belongs to a desktop environment.
 
 The subsystem does not decide whether to blank or restore the TV. It only
 reports activity. The session runner and screen policy remain responsible for
