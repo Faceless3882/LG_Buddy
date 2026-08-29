@@ -509,6 +509,23 @@ fn lifecycle_policy_enabled_from_config(config_path: &Path) -> Result<bool, Sess
     Ok(config.system_sleep_wake_policy.is_enabled())
 }
 
+fn select_monitor_backend<F>(
+    configured: ScreenBackend,
+    detect: F,
+) -> Result<ScreenBackend, BackendDetectionError>
+where
+    F: FnOnce(ScreenBackend) -> Result<ScreenBackend, BackendDetectionError>,
+{
+    if configured == ScreenBackend::Wayland {
+        // The provider validates the protocol and seats while opening its
+        // production connection. A separate probe would consume an inherited
+        // WAYLAND_SOCKET before the provider can use it.
+        Ok(ScreenBackend::Wayland)
+    } else {
+        detect(configured)
+    }
+}
+
 fn run_monitor_with_executor<W: Write, E: SessionActionExecutor>(
     writer: &mut W,
     executor: E,
@@ -544,7 +561,7 @@ fn run_monitor_with_executor<W: Write, E: SessionActionExecutor>(
         let configured = configured_backend_from_env_or_config()
             .map_err(SessionRunnerError::BackendSelection)?;
 
-        match detect_backend_from_system(configured) {
+        match select_monitor_backend(configured, detect_backend_from_system) {
             Ok(ScreenBackend::Gnome) => {
                 let mut dispatcher =
                     SessionEventDispatcher::new(executor.take().expect("executor available"));
@@ -1534,7 +1551,7 @@ mod tests {
         gamepad_device_event_refresh_requested, gamepad_refresh_due, handle_inactivity_observation,
         handle_inactivity_timeout, normalize_idle_timeout_secs, poll_gnome_idle_monitor_once,
         run_lifecycle_monitor_with_bus, run_native_session_monitor, schedule_gamepad_refresh,
-        shell_quote, GamepadDeviceEventMonitor, GamepadDeviceEventRefresh,
+        select_monitor_backend, shell_quote, GamepadDeviceEventMonitor, GamepadDeviceEventRefresh,
         GamepadDiagnosticEmitter, LatestInactivityObservation, RunnerMessage,
         SessionActionExecutor, SessionEventDispatcher, TimedInactivityObservation,
         TrustedScreenSaverSignals, GAMEPAD_ACTIVITY_REFRESH_RETRY_INTERVAL,
@@ -1566,6 +1583,27 @@ mod tests {
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[test]
+    fn explicit_wayland_monitor_selection_does_not_probe_a_second_connection() {
+        let backend = select_monitor_backend(ScreenBackend::Wayland, |_| {
+            panic!("explicit Wayland monitor selection must not run capability detection")
+        })
+        .expect("select explicit Wayland backend");
+
+        assert_eq!(backend, ScreenBackend::Wayland);
+    }
+
+    #[test]
+    fn other_monitor_backend_selection_still_uses_detection() {
+        let backend = select_monitor_backend(ScreenBackend::Auto, |configured| {
+            assert_eq!(configured, ScreenBackend::Auto);
+            Ok(ScreenBackend::Swayidle)
+        })
+        .expect("resolve automatic backend");
+
+        assert_eq!(backend, ScreenBackend::Swayidle);
     }
 
     #[derive(Debug, Default)]
