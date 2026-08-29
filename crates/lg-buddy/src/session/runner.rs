@@ -41,7 +41,7 @@ use crate::sources::desktop::gnome::{
     screen_saver_owner_changed, GnomeBackend, SystemGnomeProbe, GNOME_SCREEN_SAVER_INTERFACE,
     GNOME_SCREEN_SAVER_PATH, GNOME_SHELL_NAME,
 };
-use crate::sources::desktop::wayland::run_wayland_activity_monitor;
+use crate::sources::desktop::wayland::{connect_wayland, run_wayland_activity_monitor};
 use crate::sources::linux::logind::{
     acquire_sleep_delay_inhibitor, add_logind_signal_match, map_prepare_for_sleep_signal,
 };
@@ -530,6 +530,26 @@ fn run_monitor_with_executor<W: Write, E: SessionActionExecutor>(
     writer: &mut W,
     executor: E,
 ) -> Result<(), SessionRunnerError> {
+    let screen_idle_blank_enabled = screen_idle_blank_enabled_from_config()?;
+    let configured = if screen_idle_blank_enabled {
+        Some(
+            configured_backend_from_env_or_config()
+                .map_err(SessionRunnerError::BackendSelection)?,
+        )
+    } else {
+        None
+    };
+    let mut wayland_connection = if configured == Some(ScreenBackend::Wayland) {
+        // wayland-client consumes an inherited WAYLAND_SOCKET by mutating the
+        // process environment. Do that while monitor startup is single-threaded.
+        Some(connect_wayland().map_err(|err| SessionRunnerError::Failed {
+            backend: ScreenBackend::Wayland,
+            message: err.to_string(),
+        })?)
+    } else {
+        None
+    };
+
     let _session_service = match spawn_session_notification_service() {
         Ok(service) => Some(service),
         Err(err) => {
@@ -541,7 +561,7 @@ fn run_monitor_with_executor<W: Write, E: SessionActionExecutor>(
         }
     };
 
-    if !screen_idle_blank_enabled_from_config()? {
+    if !screen_idle_blank_enabled {
         writeln!(
             writer,
             "LG Buddy Monitor: screen idle blanking is disabled by config."
@@ -550,6 +570,7 @@ fn run_monitor_with_executor<W: Write, E: SessionActionExecutor>(
     }
 
     let mut executor = Some(executor);
+    let mut initial_configured = configured;
     let started = Instant::now();
     let test_timeout = resolve_gnome_monitor_test_timeout();
 
@@ -558,8 +579,11 @@ fn run_monitor_with_executor<W: Write, E: SessionActionExecutor>(
             return Ok(());
         }
 
-        let configured = configured_backend_from_env_or_config()
-            .map_err(SessionRunnerError::BackendSelection)?;
+        let configured = match initial_configured.take() {
+            Some(configured) => configured,
+            None => configured_backend_from_env_or_config()
+                .map_err(SessionRunnerError::BackendSelection)?,
+        };
 
         match select_monitor_backend(configured, detect_backend_from_system) {
             Ok(ScreenBackend::Gnome) => {
@@ -570,7 +594,14 @@ fn run_monitor_with_executor<W: Write, E: SessionActionExecutor>(
             Ok(ScreenBackend::Wayland) => {
                 let mut dispatcher =
                     SessionEventDispatcher::new(executor.take().expect("executor available"));
-                return run_wayland_monitor(writer, &mut dispatcher);
+                let connection = wayland_connection.take().ok_or_else(|| {
+                    SessionRunnerError::Failed {
+                        backend: ScreenBackend::Wayland,
+                        message: "native Wayland was selected after threaded monitor startup; restart the monitor to acquire its connection safely"
+                            .to_string(),
+                    }
+                })?;
+                return run_wayland_monitor(writer, &mut dispatcher, connection);
             }
             Ok(ScreenBackend::Swayidle) => return run_swayidle_monitor(writer),
             Ok(ScreenBackend::Auto) => {
@@ -673,6 +704,7 @@ fn run_gnome_monitor<W: Write, E: SessionActionExecutor>(
 fn run_wayland_monitor<W: Write, E: SessionActionExecutor>(
     writer: &mut W,
     dispatcher: &mut SessionEventDispatcher<E>,
+    connection: wayland_client::Connection,
 ) -> Result<(), SessionRunnerError> {
     writeln!(writer, "LG Buddy Monitor: Using native Wayland backend.")?;
 
@@ -680,7 +712,9 @@ fn run_wayland_monitor<W: Write, E: SessionActionExecutor>(
         writer,
         dispatcher,
         ScreenBackend::Wayland,
-        spawn_wayland_monitor_thread,
+        move |sender, latest_observation| {
+            spawn_wayland_monitor_thread(connection, sender, latest_observation)
+        },
     )
 }
 
@@ -919,12 +953,13 @@ fn spawn_gnome_monitor_thread(
 }
 
 fn spawn_wayland_monitor_thread(
+    connection: wayland_client::Connection,
     sender: mpsc::Sender<RunnerMessage>,
     latest_observation: Arc<LatestInactivityObservation>,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
         let activity_sender = sender.clone();
-        let result = run_wayland_activity_monitor(move |observed_at| {
+        let result = run_wayland_activity_monitor(connection, move |observed_at| {
             latest_observation.publish(
                 &activity_sender,
                 InactivityObservation::DesktopActivityObserved,

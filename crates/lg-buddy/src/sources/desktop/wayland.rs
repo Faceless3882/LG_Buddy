@@ -357,13 +357,12 @@ type InitializedWaylandProvider<F> = (
 );
 
 fn initialize_provider<F>(
+    connection: Connection,
     on_activity: F,
 ) -> Result<InitializedWaylandProvider<F>, WaylandProviderError>
 where
     F: FnMut(Instant) -> bool + 'static,
 {
-    let connection = Connection::connect_to_env()
-        .map_err(|err| WaylandProviderError::Connection(err.to_string()))?;
     let display = connection.display();
     let mut event_queue = connection.new_event_queue();
     let queue_handle = event_queue.handle();
@@ -385,16 +384,27 @@ where
     Ok((event_queue, state, capabilities))
 }
 
-pub fn probe_wayland_capabilities() -> Result<WaylandProviderCapabilities, WaylandProviderError> {
-    let (_, _, capabilities) = initialize_provider(|_| true)?;
+pub(crate) fn connect_wayland() -> Result<Connection, WaylandProviderError> {
+    // `connect_to_env` removes an inherited WAYLAND_SOCKET from the process
+    // environment. Monitor startup must call this before spawning any threads.
+    Connection::connect_to_env().map_err(|err| WaylandProviderError::Connection(err.to_string()))
+}
+
+pub(crate) fn probe_wayland_capabilities(
+) -> Result<WaylandProviderCapabilities, WaylandProviderError> {
+    let connection = connect_wayland()?;
+    let (_, _, capabilities) = initialize_provider(connection, |_| true)?;
     Ok(capabilities)
 }
 
-pub fn run_wayland_activity_monitor<F>(on_activity: F) -> Result<(), WaylandProviderError>
+pub(crate) fn run_wayland_activity_monitor<F>(
+    connection: Connection,
+    on_activity: F,
+) -> Result<(), WaylandProviderError>
 where
     F: FnMut(Instant) -> bool + 'static,
 {
-    let (mut event_queue, mut state, _) = initialize_provider(on_activity)?;
+    let (mut event_queue, mut state, _) = initialize_provider(connection, on_activity)?;
 
     while state.running {
         event_queue
