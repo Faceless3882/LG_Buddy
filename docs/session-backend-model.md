@@ -8,7 +8,7 @@ For the broader map of systemd, lifecycle, desktop, and command-entrypoint
 events that consume these semantics, see
 [runtime-event-handler-map.md](runtime-event-handler-map.md).
 
-GNOME, `swayidle`, and future backends do not expose the same APIs or the same
+GNOME, native Wayland, `swayidle`, and future backends do not expose the same APIs or the same
 event richness. LG Buddy should not force them to look identical at the
 transport layer. Instead, the `session` module should define:
 
@@ -108,7 +108,7 @@ This needs to be explicit because different providers work differently.
 `LgBuddyConfigured`
 - LG Buddy must supply or manage the timeout value.
 - The backend tool or adapter consumes that LG Buddy-controlled value.
-- Examples: GNOME and `swayidle`.
+- Examples: GNOME, native Wayland, and `swayidle`.
 
 This is separate from startup and wake retry delays.
 
@@ -121,6 +121,7 @@ This is the current mapping for the known backends, with implementation status c
 | Backend | Idle | Active | WakeRequested | UserActivity | BeforeSleep | AfterResume | Lock/Unlock | Idle Timeout Source | Current Rust Status |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | GNOME | Yes | Yes | Yes | Yes | No current surface in LG Buddy | No current surface in LG Buddy | No current surface in LG Buddy | `LgBuddyConfigured` | Implemented with LG Buddy-owned timeout policy over ScreenSaver and Mutter observations |
+| Native Wayland | Observed but not authoritative | Resumed notification | No | Yes | No | No | No | `LgBuddyConfigured` | Explicit opt-in using `ext_idle_notifier_v1` version 2 or newer |
 | `swayidle` | Yes | Yes | No | No direct equivalent | Yes | Yes | Yes, when built with systemd support | `LgBuddyConfigured` | Implemented for delegated `timeout -> Idle` and `resume -> Active`; `before-sleep`, `after-resume`, `lock`, and `unlock` are modeled but not executed |
 
 ## Provider-Specific Mapping
@@ -161,9 +162,23 @@ reconciles in case an event is missed. Standard controller input is read from
 evdev. Logitech G923 wheel and pedal activity has a narrow raw HID fallback for
 hosts where those reports do not appear on the evdev node.
 
-GNOME is currently the only production desktop provider using the shared
-native-session runtime. A future native Wayland provider should plug into that
-runtime without acquiring any gamepad responsibility.
+GNOME and native Wayland use the shared native-session runtime. The Wayland
+provider owns only its connection, registry, seats, notifications, and activity
+facts; it does not acquire gamepad responsibility.
+
+### Native Wayland
+
+The explicit `wayland` backend requires `ext_idle_notifier_v1` version 2 or
+newer and at least one advertised `wl_seat`. It monitors every seat, including
+seats that currently advertise no input capabilities, using zero-timeout idle
+notifications. `resumed` maps to desktop activity; `idled` remains
+observational, so only LG Buddy's inactivity deadline can trigger blanking.
+
+Seats are added and removed dynamically. Connection or dispatch loss, removal
+of the bound notifier, or removal of the last seat is fatal to the provider and
+causes the user service to retry. Explicit selection reports capability errors
+without falling back. `auto` does not select this backend yet, and `swayidle`
+remains available.
 
 ### `swayidle`
 
@@ -198,6 +213,8 @@ The code split is:
   - desktop-independent auxiliary input discovery and activity observations
 - `crates/lg-buddy/src/sources/desktop/gnome.rs`
   - GNOME-specific probing and event mapping
+- `crates/lg-buddy/src/sources/desktop/wayland.rs`
+  - native Wayland registry, seat, idle-notification, and activity mapping
 - `crates/lg-buddy/src/sources/desktop/swayidle.rs`
   - `swayidle`-specific probing and event mapping
 

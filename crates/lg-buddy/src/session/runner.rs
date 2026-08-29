@@ -41,6 +41,7 @@ use crate::sources::desktop::gnome::{
     screen_saver_owner_changed, GnomeBackend, SystemGnomeProbe, GNOME_SCREEN_SAVER_INTERFACE,
     GNOME_SCREEN_SAVER_PATH, GNOME_SHELL_NAME,
 };
+use crate::sources::desktop::wayland::run_wayland_activity_monitor;
 use crate::sources::linux::logind::{
     acquire_sleep_delay_inhibitor, add_logind_signal_match, map_prepare_for_sleep_signal,
 };
@@ -549,6 +550,11 @@ fn run_monitor_with_executor<W: Write, E: SessionActionExecutor>(
                     SessionEventDispatcher::new(executor.take().expect("executor available"));
                 return run_gnome_monitor(writer, &mut dispatcher);
             }
+            Ok(ScreenBackend::Wayland) => {
+                let mut dispatcher =
+                    SessionEventDispatcher::new(executor.take().expect("executor available"));
+                return run_wayland_monitor(writer, &mut dispatcher);
+            }
             Ok(ScreenBackend::Swayidle) => return run_swayidle_monitor(writer),
             Ok(ScreenBackend::Auto) => {
                 return Err(SessionRunnerError::Failed {
@@ -644,6 +650,20 @@ fn run_gnome_monitor<W: Write, E: SessionActionExecutor>(
         dispatcher,
         ScreenBackend::Gnome,
         spawn_gnome_monitor_thread,
+    )
+}
+
+fn run_wayland_monitor<W: Write, E: SessionActionExecutor>(
+    writer: &mut W,
+    dispatcher: &mut SessionEventDispatcher<E>,
+) -> Result<(), SessionRunnerError> {
+    writeln!(writer, "LG Buddy Monitor: Using native Wayland backend.")?;
+
+    run_native_session_monitor(
+        writer,
+        dispatcher,
+        ScreenBackend::Wayland,
+        spawn_wayland_monitor_thread,
     )
 }
 
@@ -877,6 +897,27 @@ fn spawn_gnome_monitor_thread(
 ) -> JoinHandle<()> {
     thread::spawn(move || {
         let result = run_gnome_monitor_process(&sender, &latest_observation);
+        let _ = sender.send(RunnerMessage::MonitorExited(result));
+    })
+}
+
+fn spawn_wayland_monitor_thread(
+    sender: mpsc::Sender<RunnerMessage>,
+    latest_observation: Arc<LatestInactivityObservation>,
+) -> JoinHandle<()> {
+    thread::spawn(move || {
+        let activity_sender = sender.clone();
+        let result = run_wayland_activity_monitor(move |observed_at| {
+            latest_observation.publish(
+                &activity_sender,
+                InactivityObservation::DesktopActivityObserved,
+                observed_at,
+            )
+        })
+        .map_err(|err| SessionRunnerError::Failed {
+            backend: ScreenBackend::Wayland,
+            message: err.to_string(),
+        });
         let _ = sender.send(RunnerMessage::MonitorExited(result));
     })
 }

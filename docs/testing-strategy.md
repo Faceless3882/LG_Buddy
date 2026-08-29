@@ -28,6 +28,7 @@ This is where most tests should live.
 - Wake-on-LAN packet construction
 - backend selection rules
 - GNOME signal-to-event mapping
+- native Wayland registry, seat, and resumed-notification mapping
 - gamepad device discovery, device-event filtering, raw event mapping, registry
   behavior, and activity policy
 - TV command output parsing
@@ -46,6 +47,7 @@ This is where most tests should live.
 - `crates/lg-buddy/src/state.rs`
 - `crates/lg-buddy/src/backend.rs`
 - `crates/lg-buddy/src/sources/desktop/gnome.rs`
+- `crates/lg-buddy/src/sources/desktop/wayland.rs`
 - `crates/lg-buddy/src/wol.rs`
 - `crates/lg-buddy/src/tv.rs`
 - `crates/lg-buddy/src/commands.rs`
@@ -77,6 +79,7 @@ This is the place for integration tests and contract tests.
 - subprocess contracts to external tools
 - backend detection against mocked command/process boundaries
 - GNOME runner behavior against a private session-bus harness
+- native Wayland provider capability and registry-churn behavior
 - logind lifecycle and NetworkManager gate behavior against a private system-bus
   harness
 - desktop and auxiliary gamepad activity resetting one LG Buddy-owned deadline
@@ -101,6 +104,9 @@ Examples:
 
 - the TV mock reproduces `bscpylgtvcommand` command line, exit status, stdout, and stderr behavior that LG Buddy cares about
 - GNOME monitor/runtime tests should use the private session-bus harness for ScreenSaver signals and Mutter idletime
+- native Wayland provider tests should model registry discovery, protocol-version
+  rejection, every advertised seat, resumed-only activity, and fatal provider
+  loss without requiring a compositor
 - logind lifecycle/runtime tests should use the private system-bus harness for
   `PreparingForSleep` and `PrepareForSleep` behavior
 
@@ -227,8 +233,17 @@ Examples:
 - GNOME capability probing
 - GNOME signal mapping
 - GNOME monitor and idletime integration over the session-bus seam
+- native Wayland protocol-version and seat discovery
+- native Wayland resumed-notification and registry-removal mapping
 - gamepad activity integration with the LG Buddy inactivity deadline
 - screen runtime-phase eligibility over the private logind system-bus seam
+
+Native Wayland changes also require manual opt-in checks on Plasma/KWin and at
+least one other target compositor. Verify that explicit `wayland` detection and
+monitor startup succeed, unsupported capability or connection cases fail with
+a precise diagnostic, and `auto` retains its existing GNOME-then-`swayidle`
+selection. Release-facing changes must keep the static x86_64 musl build and
+release-bundle smoke test green.
 
 ### Gamepad activity
 

@@ -48,7 +48,7 @@ const SCREEN_RESTORE_POLICY_ALIASES: &[SettingAlias] = &[SettingAlias {
 
 const TV_INPUT_VALUES: &[&str] = &["HDMI_1", "HDMI_2", "HDMI_3", "HDMI_4"];
 const TV_PLATFORM_VALUES: &[&str] = &["bscpylgtv", "lg_webos"];
-const SCREEN_BACKEND_VALUES: &[&str] = &["auto", "gnome", "swayidle"];
+const SCREEN_BACKEND_VALUES: &[&str] = &["auto", "gnome", "wayland", "swayidle"];
 const SCREEN_IDLE_BLANK_VALUES: &[&str] = &["enabled", "disabled"];
 const SCREEN_RESTORE_POLICY_VALUES: &[&str] = &["conservative", "aggressive"];
 const SYSTEM_SLEEP_WAKE_POLICY_VALUES: &[&str] = &["enabled", "disabled"];
@@ -2571,7 +2571,7 @@ mod tests {
                 "tv.mac | storage=tvs_primary_mac | fallbacks=tv_mac | type=mac-address | default=required | mutability=read-write | ops=get,describe,set | apply=no-runtime-apply-required | description=MAC address of the primary configured TV for Wake-on-LAN.",
                 "tv.input | storage=tvs_primary_input | fallbacks=input | type=enum values=HDMI_1,HDMI_2,HDMI_3,HDMI_4 aliases=(none) | default=required | mutability=read-write | ops=get,describe,set | apply=no-runtime-apply-required | description=HDMI input used by the primary configured TV.",
                 "tv.platform | storage=tvs_primary_platform | fallbacks=(none) | type=enum values=bscpylgtv,lg_webos aliases=(none) | default=bscpylgtv | mutability=read-write | ops=get,describe,set,unset | apply=no-runtime-apply-required | description=Control platform for the primary configured TV.",
-                "screen.backend | storage=screen_backend | fallbacks=(none) | type=enum values=auto,gnome,swayidle aliases=(none) | default=auto | mutability=read-write | ops=get,describe,set,unset | apply=restart-user-screen-service | description=Screen backend selection for user-session blanking and restore behavior.",
+                "screen.backend | storage=screen_backend | fallbacks=(none) | type=enum values=auto,gnome,wayland,swayidle aliases=(none) | default=auto | mutability=read-write | ops=get,describe,set,unset | apply=restart-user-screen-service | description=Screen backend selection for user-session blanking and restore behavior.",
                 "screen.idle_blank | storage=screen_idle_blank | fallbacks=(none) | type=enum values=enabled,disabled aliases=(none) | default=enabled | mutability=read-write | ops=get,describe,set,unset | apply=restart-user-screen-service | description=Idle-driven blanking and restore behavior for the configured screen.",
                 "screen.idle_timeout | storage=screen_idle_timeout | fallbacks=(none) | type=integer range=1..=86400 | default=300 | mutability=read-write | ops=get,describe,set,unset | apply=restart-user-screen-service | description=Idle timeout in seconds before LG Buddy blanks the configured screen.",
                 "screen.restore_policy | storage=screen_restore_policy | fallbacks=(none) | type=enum values=conservative,aggressive aliases=marker_only->conservative | default=conservative | mutability=read-write | ops=get,describe,set,unset | apply=restart-user-screen-service | description=Screen restore policy after LG Buddy blanks the configured screen.",
@@ -2735,7 +2735,7 @@ updates.channel=stable (default, read-write, ops: get,describe,set,unset)
 
         let output = String::from_utf8(output).unwrap();
         assert!(output.contains("  current: auto (gnome)\n"));
-        assert!(output.contains("  allowed values: auto (gnome), gnome, swayidle\n"));
+        assert!(output.contains("  allowed values: auto (gnome), gnome, wayland, swayidle\n"));
 
         let mut raw_output = Vec::new();
         runner
@@ -2763,7 +2763,7 @@ updates.channel=stable (default, read-write, ops: get,describe,set,unset)
         let output = String::from_utf8(output).unwrap();
         assert!(output.contains("  current: auto (no backend currently available)\n"));
         assert!(output.contains(
-            "  allowed values: auto (no backend currently available), gnome, swayidle\n"
+            "  allowed values: auto (no backend currently available), gnome, wayland, swayidle\n"
         ));
     }
 
@@ -2835,7 +2835,7 @@ screen.backend
   default: auto
   mutability: read-write
   supported operations: get, describe, set, unset
-  allowed values: auto, gnome, swayidle
+  allowed values: auto, gnome, wayland, swayidle
   apply: restart-user-screen-service
   description: Screen backend selection for user-session blanking and restore behavior.
 
@@ -3860,7 +3860,7 @@ tvs_primary_ip=192.0.2.43
     fn screen_backend_values_are_validated() {
         let definition = SETTINGS_REGISTRY.get_by_name("screen.backend").unwrap();
 
-        for value in ["auto", "gnome", "swayidle"] {
+        for value in ["auto", "gnome", "wayland", "swayidle"] {
             assert_eq!(definition.parse_value(value), Ok(SettingValue::Enum(value)));
         }
 

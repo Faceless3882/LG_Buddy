@@ -60,6 +60,7 @@ impl Error for ConfigPathError {}
 pub enum ScreenBackend {
     Auto,
     Gnome,
+    Wayland,
     Swayidle,
 }
 
@@ -68,6 +69,7 @@ impl ScreenBackend {
         match self {
             Self::Auto => "auto",
             Self::Gnome => "gnome",
+            Self::Wayland => "wayland",
             Self::Swayidle => "swayidle",
         }
     }
@@ -80,6 +82,7 @@ impl FromStr for ScreenBackend {
         match value {
             "auto" => Ok(Self::Auto),
             "gnome" => Ok(Self::Gnome),
+            "wayland" => Ok(Self::Wayland),
             "swayidle" => Ok(Self::Swayidle),
             _ => Err(()),
         }
@@ -680,7 +683,7 @@ vas:x:1000:1000:vas:/home/vas:/bin/bash\n";
             tvs_primary_mac=aa:bb:cc:dd:ee:ff
             tvs_primary_input=HDMI_2
             tvs_primary_platform=lg_webos
-            screen_backend=gnome
+            screen_backend=wayland
             screen_idle_timeout=450
             screen_restore_policy=aggressive
             screen_idle_blank=disabled
@@ -693,7 +696,7 @@ vas:x:1000:1000:vas:/home/vas:/bin/bash\n";
         assert_eq!(config.tv_mac.to_string(), "aa:bb:cc:dd:ee:ff");
         assert_eq!(config.input, HdmiInput::Hdmi2);
         assert_eq!(config.tv_platform, TvPlatform::LgWebOs);
-        assert_eq!(config.screen_backend, ScreenBackend::Gnome);
+        assert_eq!(config.screen_backend, ScreenBackend::Wayland);
         assert_eq!(config.screen_idle_timeout, 450);
         assert_eq!(
             config.screen_restore_policy,

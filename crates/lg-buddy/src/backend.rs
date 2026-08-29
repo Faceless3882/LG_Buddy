@@ -10,6 +10,7 @@ use crate::sources::desktop::gnome::{
     GNOME_IDLE_MONITOR_NAME, GNOME_REQUIRED_SERVICES_REASON, GNOME_SCREEN_SAVER_NAME,
     GNOME_SHELL_NAME,
 };
+use crate::sources::desktop::wayland::probe_wayland_capabilities;
 
 const GNOME_SHELL_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -23,7 +24,7 @@ impl fmt::Display for BackendSelectionError {
         match self {
             Self::InvalidOverride(value) => write!(
                 f,
-                "invalid LG_BUDDY_SCREEN_BACKEND value `{value}`; expected auto, gnome, or swayidle"
+                "invalid LG_BUDDY_SCREEN_BACKEND value `{value}`; expected auto, gnome, wayland, or swayidle"
             ),
         }
     }
@@ -36,7 +37,7 @@ pub enum BackendDetectionError {
     NoSupportedBackend,
     UnavailableBackend {
         backend: ScreenBackend,
-        reason: &'static str,
+        reason: String,
     },
     MissingRequiredCommand {
         backend: ScreenBackend,
@@ -72,6 +73,9 @@ pub trait BackendProbe {
     fn gnome_shell_available(&self) -> bool;
     fn gnome_screen_saver_available(&self) -> bool;
     fn gnome_idle_monitor_available(&self) -> bool;
+    fn wayland_capabilities(&self) -> Result<(), String> {
+        Err("native Wayland capability probing is unavailable".to_string())
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -109,6 +113,12 @@ impl BackendProbe for SystemBackendProbe {
             Err(_) => return false,
         };
         bus.name_has_owner(GNOME_IDLE_MONITOR_NAME).unwrap_or(false)
+    }
+
+    fn wayland_capabilities(&self) -> Result<(), String> {
+        probe_wayland_capabilities()
+            .map(|_| ())
+            .map_err(|err| err.to_string())
     }
 }
 
@@ -158,7 +168,7 @@ pub fn detect_backend_with_probe(
 
                 return Err(BackendDetectionError::UnavailableBackend {
                     backend: ScreenBackend::Gnome,
-                    reason: GNOME_REQUIRED_SERVICES_REASON,
+                    reason: GNOME_REQUIRED_SERVICES_REASON.to_string(),
                 });
             }
 
@@ -177,10 +187,17 @@ pub fn detect_backend_with_probe(
             } else {
                 Err(BackendDetectionError::UnavailableBackend {
                     backend: ScreenBackend::Gnome,
-                    reason: GNOME_REQUIRED_SERVICES_REASON,
+                    reason: GNOME_REQUIRED_SERVICES_REASON.to_string(),
                 })
             }
         }
+        ScreenBackend::Wayland => probe
+            .wayland_capabilities()
+            .map(|()| ScreenBackend::Wayland)
+            .map_err(|reason| BackendDetectionError::UnavailableBackend {
+                backend: ScreenBackend::Wayland,
+                reason,
+            }),
         ScreenBackend::Swayidle => {
             if probe.has_command("swayidle") {
                 Ok(ScreenBackend::Swayidle)
@@ -243,6 +260,30 @@ mod tests {
         }
     }
 
+    struct WaylandProbe(Result<(), &'static str>);
+
+    impl BackendProbe for WaylandProbe {
+        fn has_command(&self, _command: &str) -> bool {
+            false
+        }
+
+        fn gnome_shell_available(&self) -> bool {
+            false
+        }
+
+        fn gnome_screen_saver_available(&self) -> bool {
+            false
+        }
+
+        fn gnome_idle_monitor_available(&self) -> bool {
+            false
+        }
+
+        fn wayland_capabilities(&self) -> Result<(), String> {
+            self.0.map_err(str::to_string)
+        }
+    }
+
     #[test]
     fn env_override_wins_over_config_backend() {
         let backend = configured_backend_from_sources(Some("swayidle"), Some(ScreenBackend::Gnome))
@@ -265,6 +306,14 @@ mod tests {
             configured_backend_from_sources(None, None).expect("fallback to auto backend");
 
         assert_eq!(backend, ScreenBackend::Auto);
+    }
+
+    #[test]
+    fn wayland_override_is_accepted() {
+        let backend = configured_backend_from_sources(Some("wayland"), None)
+            .expect("parse native Wayland backend");
+
+        assert_eq!(backend, ScreenBackend::Wayland);
     }
 
     #[test]
@@ -340,7 +389,8 @@ mod tests {
             BackendDetectionError::UnavailableBackend {
                 backend: ScreenBackend::Gnome,
                 reason:
-                    "GNOME Shell, org.gnome.ScreenSaver, and org.gnome.Mutter.IdleMonitor are required",
+                    "GNOME Shell, org.gnome.ScreenSaver, and org.gnome.Mutter.IdleMonitor are required"
+                        .to_string(),
             }
         );
     }
@@ -362,7 +412,8 @@ mod tests {
             BackendDetectionError::UnavailableBackend {
                 backend: ScreenBackend::Gnome,
                 reason:
-                    "GNOME Shell, org.gnome.ScreenSaver, and org.gnome.Mutter.IdleMonitor are required",
+                    "GNOME Shell, org.gnome.ScreenSaver, and org.gnome.Mutter.IdleMonitor are required"
+                        .to_string(),
             }
         );
     }
@@ -399,7 +450,8 @@ mod tests {
             BackendDetectionError::UnavailableBackend {
                 backend: ScreenBackend::Gnome,
                 reason:
-                    "GNOME Shell, org.gnome.ScreenSaver, and org.gnome.Mutter.IdleMonitor are required",
+                    "GNOME Shell, org.gnome.ScreenSaver, and org.gnome.Mutter.IdleMonitor are required"
+                        .to_string(),
             }
         );
     }
@@ -423,5 +475,34 @@ mod tests {
                 command: "swayidle",
             }
         );
+    }
+
+    #[test]
+    fn forced_wayland_requires_the_native_protocol_surface() {
+        let err = detect_backend_with_probe(
+            &WaylandProbe(Err(
+                "ext_idle_notifier_v1 version 1 is unsupported; version 2 or newer is required",
+            )),
+            ScreenBackend::Wayland,
+        )
+        .expect_err("forced Wayland without protocol v2 should fail");
+
+        assert_eq!(
+            err,
+            BackendDetectionError::UnavailableBackend {
+                backend: ScreenBackend::Wayland,
+                reason:
+                    "ext_idle_notifier_v1 version 1 is unsupported; version 2 or newer is required"
+                        .to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn forced_wayland_is_selected_when_the_native_protocol_surface_is_available() {
+        let backend = detect_backend_with_probe(&WaylandProbe(Ok(())), ScreenBackend::Wayland)
+            .expect("forced Wayland should be available");
+
+        assert_eq!(backend, ScreenBackend::Wayland);
     }
 }

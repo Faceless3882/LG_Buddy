@@ -19,16 +19,16 @@ compiled as part of the build.
 
 ## Desktop Compatibility
 
-| Functionality | GNOME | Non-GNOME Wayland with `swayidle` | Other Linux sessions | Notes |
-| --- | --- | --- | --- | --- |
-| Turn TV on at boot and wake | ✅ | ✅ | ✅ | Desktop-independent Linux lifecycle integration |
-| Turn TV off at shutdown and before system sleep | ✅ | ✅ | ✅ | Desktop-independent Linux lifecycle integration |
-| Blank and restore on desktop idle/activity | ✅ | ✅ | ❌ | `screen_backend=auto` prefers GNOME, then falls back to `swayidle` when installed |
-| Keep the panel awake from gamepad activity | ✅ | ❌ | ❌ | Implemented in the GNOME monitor runtime |
-| OLED brightness CLI | ✅ | ✅ | ✅ | Desktop-independent runtime command |
-| OLED brightness desktop dialog | ✅ | ✅ | ✅ | Requires `zenity` |
-| Settings CLI | ✅ | ✅ | ✅ | Desktop-independent runtime command |
-| Manual and background update checks | ✅ | ✅ | ✅ | Desktop notifications depend on the session notification service and desktop notification support |
+| Functionality | GNOME | Native Wayland | Wayland with `swayidle` | Other Linux sessions | Notes |
+| --- | --- | --- | --- | --- | --- |
+| Turn TV on at boot and wake | ✅ | ✅ | ✅ | ✅ | Desktop-independent Linux lifecycle integration |
+| Turn TV off at shutdown and before system sleep | ✅ | ✅ | ✅ | ✅ | Desktop-independent Linux lifecycle integration |
+| Blank and restore on desktop idle/activity | ✅ | ✅ | ✅ | ❌ | Native Wayland is currently explicit opt-in; `auto` remains GNOME then `swayidle` |
+| Keep the panel awake from gamepad activity | ✅ | ✅ | ❌ | ❌ | Available through the shared native-session runtime |
+| OLED brightness CLI | ✅ | ✅ | ✅ | ✅ | Desktop-independent runtime command |
+| OLED brightness desktop dialog | ✅ | ✅ | ✅ | ✅ | Requires `zenity` |
+| Settings CLI | ✅ | ✅ | ✅ | ✅ | Desktop-independent runtime command |
+| Manual and background update checks | ✅ | ✅ | ✅ | ✅ | Desktop notifications depend on the session notification service and desktop notification support |
 
 ## Before You Install
 
@@ -41,13 +41,32 @@ Install prerequisites:
 Backend-specific:
 
 - GNOME backend: compatible GNOME Shell session
-- Non-GNOME Wayland backend: `swayidle`
+- Native Wayland backend: a compositor advertising `ext_idle_notifier_v1`
+  version 2 or newer and at least one `wl_seat`
+- Delegated Wayland backend: `swayidle`
 
 The GNOME backend requires a compatible GNOME session with:
 
 - GNOME Shell
 - `org.gnome.ScreenSaver`
 - `org.gnome.Mutter.IdleMonitor`
+
+Native Wayland monitoring is an explicit opt-in:
+
+```bash
+lg-buddy settings set screen.backend wayland
+```
+
+It creates a zero-timeout idle notification for every advertised seat and
+treats each resumed notification as desktop activity. LG Buddy's shared
+inactivity engine still owns `screen_idle_timeout`; compositor idle events do
+not blank the TV directly. Protocol or connection loss, removal of the bound
+notifier, and removal of the last seat stop the provider so the user service can
+retry. An unsupported compositor produces a specific capability diagnostic and
+does not fall back to another backend.
+
+`screen_backend=auto` is unchanged: it prefers GNOME and otherwise uses
+`swayidle` when installed. The delegated `swayidle` backend remains supported.
 
 At runtime, GNOME support now uses a persistent in-process session-bus client
 for shell detection, ScreenSaver signals, and Mutter idletime polling.

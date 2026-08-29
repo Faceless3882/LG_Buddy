@@ -322,6 +322,18 @@ else
                 echo "            The user-session service will retry until a compatible session is available."
             fi
             ;;
+        wayland)
+            SCREEN_MONITOR_AVAILABLE=1
+            SCREEN_MONITOR_RUNTIME_BACKEND="$(LG_BUDDY_SCREEN_BACKEND=wayland "$RUNTIME_BINARY" detect-backend 2>/dev/null || true)"
+            if [ "$SCREEN_MONITOR_RUNTIME_BACKEND" = "wayland" ]; then
+                echo "  [OK]      current session satisfies the native Wayland backend contract"
+            else
+                SCREEN_MONITOR_RUNTIME_BACKEND=""
+                echo "  [INFO]    current session did not verify the native Wayland backend contract"
+                echo "            Wayland requires ext_idle_notifier_v1 version 2 or newer and at least one advertised seat."
+                echo "            The user-session service will retry until a compatible session is available."
+            fi
+            ;;
         swayidle)
             if command -v swayidle &>/dev/null; then
                 echo "  [OK]      swayidle (configured backend)"

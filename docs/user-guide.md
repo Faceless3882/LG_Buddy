@@ -111,9 +111,10 @@ unit instead of manually invoking its runtime entrypoint.
 
 ## Desktop Idle Monitoring
 
-LG Buddy supports two session backends:
+LG Buddy supports three session backends:
 
 - `gnome`
+- `wayland`
 - `swayidle`
 
 `LG_Buddy_screen.service` is the user-session service. It owns the LG Buddy
@@ -124,7 +125,9 @@ enabled, it also runs screen idle/restore monitoring.
 `screen_idle_blank=disabled` keeps the user-session service running for
 notifications but makes idle blank/restore behavior passive.
 
-`screen_backend=auto` prefers GNOME when the current session satisfies the full GNOME contract, then falls back to `swayidle` if installed.
+`screen_backend=auto` prefers GNOME when the current session satisfies the full
+GNOME contract, then falls back to `swayidle` if installed. It does not select
+native Wayland yet.
 
 The GNOME backend requires:
 
@@ -135,9 +138,24 @@ The GNOME backend requires:
 The monitor runtime keeps one persistent session-bus connection open for GNOME
 shell detection, ScreenSaver signals, and Mutter idletime polling.
 
-When the GNOME backend is active, LG Buddy also watches readable Linux gamepad
-input devices and treats controller activity as user activity. This is automatic
-and has no configuration switch. Devices are discovered at monitor startup,
+The native Wayland backend is an explicit opt-in. It requires
+`ext_idle_notifier_v1` version 2 or newer and at least one advertised `wl_seat`:
+
+```bash
+lg-buddy settings set screen.backend wayland
+```
+
+LG Buddy monitors every advertised seat with a zero-timeout notification,
+treats resumed notifications as desktop activity, and keeps ownership of the
+configured inactivity deadline. If the protocol is unsupported, backend
+detection reports the missing capability and does not fall back. The provider
+also exits on connection loss, notifier removal, or removal of its last seat so
+the user service can retry.
+
+When either native-session backend (`gnome` or `wayland`) is active, LG Buddy
+also watches readable Linux gamepad input devices and treats controller activity
+as user activity. This is automatic and has no configuration switch. Devices
+are discovered at monitor startup,
 refreshed when Linux reports input-device add, remove, or change events, and
 periodically reconciled so hot-plugged controllers can be picked up without
 restarting the service. Standard controllers are read through evdev. The
@@ -169,7 +187,7 @@ Then add:
 Environment=LG_BUDDY_SCREEN_BACKEND=gnome
 ```
 
-Supported values are `auto`, `gnome`, and `swayidle`.
+Supported values are `auto`, `gnome`, `wayland`, and `swayidle`.
 
 For backend semantics and implementation details, see [session-backend-model.md](session-backend-model.md).
 
