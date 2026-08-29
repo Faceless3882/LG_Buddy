@@ -288,7 +288,7 @@ grep -q '^screen_idle_blank=enabled$' "$CONFIG_FILE"
 grep -q '^screen_backend=auto$' "$CONFIG_FILE"
 grep -q '^system_sleep_wake_policy=enabled$' "$CONFIG_FILE"
 grep -q "$CONFIG_FILE" "$INSTALLED_POINTER"
-grep -q 'cooperating suspend sources' "$BUNDLE_DIR/README.md"
+grep -F -q 'TV control at boot, shutdown, sleep, and wake' "$BUNDLE_DIR/README.md"
 grep -q 'cooperative suspend rail' "$BUNDLE_DIR/docs/architecture-overview.md"
 grep -q 'NetworkManager and logind cooperate through one suspend rail' "$BUNDLE_DIR/docs/runtime-event-handler-map.md"
 
