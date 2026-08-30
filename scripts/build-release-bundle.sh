@@ -66,6 +66,7 @@ python3 "$SCRIPT_DIR/release_bundle_manifest.py" create \
     --release-tag "v$VERSION" \
     --target "$TARGET" \
     --binary "$BUNDLE_DIR/lg-buddy"
+chmod 644 "$BUNDLE_DIR/release-manifest.json"
 install -m 644 "$REPO_ROOT/systemd/LG_Buddy.service" "$BUNDLE_DIR/systemd/LG_Buddy.service"
 install -m 644 "$REPO_ROOT/systemd/LG_Buddy_lifecycle.service" "$BUNDLE_DIR/systemd/LG_Buddy_lifecycle.service"
 install -m 644 "$REPO_ROOT/systemd/LG_Buddy_screen.service" "$BUNDLE_DIR/systemd/LG_Buddy_screen.service"

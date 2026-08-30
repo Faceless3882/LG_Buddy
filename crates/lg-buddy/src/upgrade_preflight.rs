@@ -1,41 +1,113 @@
 use std::collections::BTreeSet;
 use std::env;
-use std::ffi::CString;
+use std::ffi::{CString, OsString};
 use std::fmt;
 use std::fs;
 use std::io;
-use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const SYSTEM_FILES: &[(&str, bool)] = &[
-    ("/usr/bin/lg-buddy", true),
-    ("/etc/systemd/system/LG_Buddy.service", false),
-    ("/etc/systemd/system/LG_Buddy.service.d/config.conf", false),
-    ("/etc/systemd/system/LG_Buddy_lifecycle.service", false),
-    (
-        "/etc/systemd/system/LG_Buddy_lifecycle.service.d/config.conf",
-        false,
-    ),
-    ("/etc/tmpfiles.d/lg_buddy.conf", false),
-    (
-        "/etc/NetworkManager/dispatcher.d/pre-down.d/LG_Buddy_lifecycle",
-        true,
-    ),
-    ("/usr/share/applications/LG_Buddy_Brightness.desktop", false),
-];
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InstallerPathPolicy {
+    ReplaceFile,
+    ReplaceExecutable,
+    MutateDirectory,
+    RecursiveClear,
+    ExactDropInDirectory { expected_entry: &'static str },
+    ReadableInput,
+    ExecutableInput,
+    InputDirectory,
+}
 
-const SYSTEM_MUTABLE_DIRECTORIES: &[&str] = &[
-    "/usr/bin",
-    "/usr/bin/LG_Buddy_PIP",
-    "/usr/lib/lg-buddy",
-    "/etc/systemd/system",
-    "/etc/systemd/system/LG_Buddy.service.d",
-    "/etc/systemd/system/LG_Buddy_lifecycle.service.d",
-    "/etc/tmpfiles.d",
-    "/etc/NetworkManager/dispatcher.d/pre-down.d",
-    "/usr/share/applications",
+impl InstallerPathPolicy {
+    fn expects_file(self) -> bool {
+        matches!(
+            self,
+            Self::ReplaceFile
+                | Self::ReplaceExecutable
+                | Self::ReadableInput
+                | Self::ExecutableInput
+        )
+    }
+
+    fn expects_directory(self) -> bool {
+        matches!(
+            self,
+            Self::MutateDirectory
+                | Self::RecursiveClear
+                | Self::ExactDropInDirectory { .. }
+                | Self::InputDirectory
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InstallerPathRequirement {
+    path: &'static str,
+    policy: InstallerPathPolicy,
+}
+
+const fn requirement(path: &'static str, policy: InstallerPathPolicy) -> InstallerPathRequirement {
+    InstallerPathRequirement { path, policy }
+}
+
+const SYSTEM_PATH_REQUIREMENTS: &[InstallerPathRequirement] = &[
+    requirement("/usr/bin/lg-buddy", InstallerPathPolicy::ReplaceExecutable),
+    requirement(
+        "/etc/systemd/system/LG_Buddy.service",
+        InstallerPathPolicy::ReplaceFile,
+    ),
+    requirement(
+        "/etc/systemd/system/LG_Buddy.service.d/config.conf",
+        InstallerPathPolicy::ReplaceFile,
+    ),
+    requirement(
+        "/etc/systemd/system/LG_Buddy_lifecycle.service",
+        InstallerPathPolicy::ReplaceFile,
+    ),
+    requirement(
+        "/etc/systemd/system/LG_Buddy_lifecycle.service.d/config.conf",
+        InstallerPathPolicy::ReplaceFile,
+    ),
+    requirement(
+        "/etc/tmpfiles.d/lg_buddy.conf",
+        InstallerPathPolicy::ReplaceFile,
+    ),
+    requirement(
+        "/etc/NetworkManager/dispatcher.d/pre-down.d/LG_Buddy_lifecycle",
+        InstallerPathPolicy::ReplaceExecutable,
+    ),
+    requirement(
+        "/usr/share/applications/LG_Buddy_Brightness.desktop",
+        InstallerPathPolicy::ReplaceFile,
+    ),
+    requirement("/usr/bin", InstallerPathPolicy::MutateDirectory),
+    requirement("/usr/bin/LG_Buddy_PIP", InstallerPathPolicy::RecursiveClear),
+    requirement("/usr/lib/lg-buddy", InstallerPathPolicy::MutateDirectory),
+    requirement("/etc/systemd/system", InstallerPathPolicy::MutateDirectory),
+    requirement(
+        "/etc/systemd/system/LG_Buddy.service.d",
+        InstallerPathPolicy::ExactDropInDirectory {
+            expected_entry: "config.conf",
+        },
+    ),
+    requirement(
+        "/etc/systemd/system/LG_Buddy_lifecycle.service.d",
+        InstallerPathPolicy::ExactDropInDirectory {
+            expected_entry: "config.conf",
+        },
+    ),
+    requirement("/etc/tmpfiles.d", InstallerPathPolicy::MutateDirectory),
+    requirement(
+        "/etc/NetworkManager/dispatcher.d/pre-down.d",
+        InstallerPathPolicy::MutateDirectory,
+    ),
+    requirement(
+        "/usr/share/applications",
+        InstallerPathPolicy::MutateDirectory,
+    ),
 ];
 
 const LEGACY_SYSTEM_PATHS: &[&str] = &[
@@ -55,31 +127,72 @@ const LEGACY_SYSTEM_PATHS: &[&str] = &[
     "/etc/NetworkManager/dispatcher.d/pre-down.d/LG_Buddy_sleep",
 ];
 
-const USER_SYSTEMD_FILES: &[(&str, bool)] = &[
-    ("LG_Buddy_screen.service", false),
-    ("LG_Buddy_screen.service.d/config.conf", false),
-    ("LG_Buddy_update_check.service", false),
-    ("LG_Buddy_update_check.service.d/config.conf", false),
-    ("LG_Buddy_update_check.timer", false),
+const USER_PATH_REQUIREMENTS: &[InstallerPathRequirement] = &[
+    requirement("LG_Buddy_screen.service", InstallerPathPolicy::ReplaceFile),
+    requirement(
+        "LG_Buddy_screen.service.d/config.conf",
+        InstallerPathPolicy::ReplaceFile,
+    ),
+    requirement(
+        "LG_Buddy_update_check.service",
+        InstallerPathPolicy::ReplaceFile,
+    ),
+    requirement(
+        "LG_Buddy_update_check.service.d/config.conf",
+        InstallerPathPolicy::ReplaceFile,
+    ),
+    requirement(
+        "LG_Buddy_update_check.timer",
+        InstallerPathPolicy::ReplaceFile,
+    ),
+    requirement("", InstallerPathPolicy::MutateDirectory),
+    requirement(
+        "LG_Buddy_screen.service.d",
+        InstallerPathPolicy::ExactDropInDirectory {
+            expected_entry: "config.conf",
+        },
+    ),
+    requirement(
+        "LG_Buddy_update_check.service.d",
+        InstallerPathPolicy::ExactDropInDirectory {
+            expected_entry: "config.conf",
+        },
+    ),
 ];
 
-const USER_MUTABLE_DIRECTORIES: &[&str] = &[
-    ".config/systemd/user",
-    ".config/systemd/user/LG_Buddy_screen.service.d",
-    ".config/systemd/user/LG_Buddy_update_check.service.d",
-];
-
-const CANDIDATE_FILES: &[(&str, bool)] = &[
-    ("release-manifest.json", false),
-    ("install.sh", true),
-    ("lg-buddy", true),
-    ("LG_Buddy_Brightness.desktop", false),
-    ("systemd/LG_Buddy.service", false),
-    ("systemd/LG_Buddy_lifecycle.service", false),
-    ("systemd/LG_Buddy_screen.service", false),
-    ("systemd/LG_Buddy_update_check.service", false),
-    ("systemd/LG_Buddy_update_check.timer", false),
-    ("systemd/lg_buddy.conf", false),
+// These are the inputs consumed by the non-interactive `install.sh --upgrade`
+// contract. Configuration and pairing scripts are deliberately not upgrade inputs.
+const CANDIDATE_PATH_REQUIREMENTS: &[InstallerPathRequirement] = &[
+    requirement("", InstallerPathPolicy::InputDirectory),
+    requirement("systemd", InstallerPathPolicy::InputDirectory),
+    requirement("release-manifest.json", InstallerPathPolicy::ReadableInput),
+    requirement("install.sh", InstallerPathPolicy::ExecutableInput),
+    requirement("lg-buddy", InstallerPathPolicy::ExecutableInput),
+    requirement(
+        "LG_Buddy_Brightness.desktop",
+        InstallerPathPolicy::ReadableInput,
+    ),
+    requirement(
+        "systemd/LG_Buddy.service",
+        InstallerPathPolicy::ReadableInput,
+    ),
+    requirement(
+        "systemd/LG_Buddy_lifecycle.service",
+        InstallerPathPolicy::ReadableInput,
+    ),
+    requirement(
+        "systemd/LG_Buddy_screen.service",
+        InstallerPathPolicy::ReadableInput,
+    ),
+    requirement(
+        "systemd/LG_Buddy_update_check.service",
+        InstallerPathPolicy::ReadableInput,
+    ),
+    requirement(
+        "systemd/LG_Buddy_update_check.timer",
+        InstallerPathPolicy::ReadableInput,
+    ),
+    requirement("systemd/lg_buddy.conf", InstallerPathPolicy::ReadableInput),
 ];
 
 const MAX_CONFIG_TREE_ENTRIES: usize = 256;
@@ -106,6 +219,7 @@ pub trait FilesystemFacts {
     fn path_facts(&self, path: &Path) -> io::Result<PathFacts>;
     fn read_to_string(&self, path: &Path) -> io::Result<String>;
     fn read_directory(&self, path: &Path) -> io::Result<Vec<PathBuf>>;
+    fn mount_points(&self) -> io::Result<Vec<PathBuf>>;
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -136,7 +250,7 @@ impl FilesystemFacts for OsFilesystemFacts {
                 false
             },
             mount_point: if matches!(kind, PathKind::File | PathKind::Directory) {
-                path_is_mount_point(path)?
+                mounted_paths()?.iter().any(|mounted| mounted == path)
             } else {
                 false
             },
@@ -154,6 +268,10 @@ impl FilesystemFacts for OsFilesystemFacts {
         entries.sort();
         Ok(entries)
     }
+
+    fn mount_points(&self) -> io::Result<Vec<PathBuf>> {
+        mounted_paths()
+    }
 }
 
 fn filesystem_is_read_only(path: &Path) -> io::Result<bool> {
@@ -168,14 +286,13 @@ fn filesystem_is_read_only(path: &Path) -> io::Result<bool> {
     Ok(stat.f_flag & libc::ST_RDONLY as libc::c_ulong != 0)
 }
 
-fn path_is_mount_point(path: &Path) -> io::Result<bool> {
+fn mounted_paths() -> io::Result<Vec<PathBuf>> {
     let mountinfo = fs::read("/proc/self/mountinfo")?;
-    let path = path.as_os_str().as_bytes();
-    Ok(mountinfo.split(|byte| *byte == b'\n').any(|line| {
-        line.split(|byte| *byte == b' ')
-            .nth(4)
-            .is_some_and(|field| decode_mountinfo_field(field) == path)
-    }))
+    Ok(mountinfo
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| line.split(|byte| *byte == b' ').nth(4))
+        .map(|field| PathBuf::from(OsString::from_vec(decode_mountinfo_field(field))))
+        .collect())
 }
 
 fn decode_mountinfo_field(field: &[u8]) -> Vec<u8> {
@@ -450,6 +567,8 @@ fn evaluate_installed_state(
     executable_remedy: &'static str,
 ) -> CompatibilityReport {
     let mut checker = Checker::new(filesystem);
+    let system_trust = TrustedRoot::strict(&facts.layout.system_root, facts.system_owner_uid);
+    let user_trust = TrustedRoot::owned(&facts.layout.user_home, facts.user_owner_uid);
 
     if facts.effective_uid == 0 {
         checker.report.refuse(
@@ -478,42 +597,34 @@ fn evaluate_installed_state(
         );
     }
 
-    for (path, executable) in SYSTEM_FILES {
-        checker.check_file(
-            &facts.layout.system_path(path),
+    for requirement in SYSTEM_PATH_REQUIREMENTS {
+        let check = match requirement.policy {
+            InstallerPathPolicy::MutateDirectory | InstallerPathPolicy::RecursiveClear => {
+                "mutable-installation"
+            }
+            InstallerPathPolicy::ExactDropInDirectory { .. } => "integration-config",
+            _ => "installed-layout",
+        };
+        checker.check_requirement(
+            &facts.layout.system_path(requirement.path),
             facts.system_owner_uid,
-            *executable,
-            true,
-            Some(&facts.layout.system_root),
-            "installed-layout",
+            Some(system_trust),
+            requirement.policy,
+            check,
         );
     }
-    for path in SYSTEM_MUTABLE_DIRECTORIES {
-        checker.check_directory(
-            &facts.layout.system_path(path),
-            facts.system_owner_uid,
-            true,
-            Some(&facts.layout.system_root),
-            "mutable-installation",
-        );
-    }
-    for (path, executable) in USER_SYSTEMD_FILES {
-        checker.check_file(
-            &facts.layout.user_systemd_path(path),
+    for requirement in USER_PATH_REQUIREMENTS {
+        let check = match requirement.policy {
+            InstallerPathPolicy::MutateDirectory => "mutable-user-integration",
+            InstallerPathPolicy::ExactDropInDirectory { .. } => "integration-config",
+            _ => "user-integration",
+        };
+        checker.check_requirement(
+            &facts.layout.user_systemd_path(requirement.path),
             facts.user_owner_uid,
-            *executable,
-            true,
-            None,
-            "user-integration",
-        );
-    }
-    for path in USER_MUTABLE_DIRECTORIES {
-        checker.check_directory(
-            &facts.layout.user_home.join(path),
-            facts.user_owner_uid,
-            true,
-            None,
-            "mutable-user-integration",
+            Some(user_trust),
+            requirement.policy,
+            check,
         );
     }
 
@@ -571,40 +682,16 @@ pub fn evaluate_candidate_preflight(
         return checker.report;
     }
 
-    checker.check_directory(
-        candidate_root,
-        user_owner_uid,
-        true,
-        None,
-        "candidate-layout",
-    );
-    checker.check_directory(
-        &candidate_root.join("systemd"),
-        user_owner_uid,
-        false,
-        None,
-        "candidate-layout",
-    );
-    for (path, executable) in CANDIDATE_FILES {
-        checker.check_file(
-            &candidate_root.join(path),
+    let candidate_trust = TrustedRoot::strict(candidate_root, user_owner_uid);
+    for requirement in CANDIDATE_PATH_REQUIREMENTS {
+        checker.check_requirement(
+            &candidate_root.join(requirement.path),
             user_owner_uid,
-            *executable,
-            false,
-            None,
+            Some(candidate_trust),
+            requirement.policy,
             "candidate-layout",
         );
     }
-    checker.check_owner_permissions(
-        &candidate_root.join("lg-buddy"),
-        0o100,
-        "candidate runtime is not executable by its owner",
-    );
-    checker.check_owner_permissions(
-        &candidate_root.join("install.sh"),
-        0o500,
-        "candidate installer is not readable and executable by its owner",
-    );
     checker.report
 }
 
@@ -661,10 +748,35 @@ fn systemd_config_override_line(config_path: &Path) -> String {
     format!("Environment=\"LG_BUDDY_CONFIG={escaped}\"")
 }
 
+#[derive(Debug, Clone, Copy)]
+struct TrustedRoot<'a> {
+    path: &'a Path,
+    owner_uid: u32,
+    reject_other_writes: bool,
+}
+
+impl<'a> TrustedRoot<'a> {
+    fn strict(path: &'a Path, owner_uid: u32) -> Self {
+        Self {
+            path,
+            owner_uid,
+            reject_other_writes: true,
+        }
+    }
+
+    fn owned(path: &'a Path, owner_uid: u32) -> Self {
+        Self {
+            path,
+            owner_uid,
+            reject_other_writes: false,
+        }
+    }
+}
+
 struct Checker<'a, F> {
     filesystem: &'a F,
     report: CompatibilityReport,
-    checked_ancestors: BTreeSet<(PathBuf, Option<u32>)>,
+    checked_ancestors: BTreeSet<(PathBuf, Option<(u32, bool)>)>,
 }
 
 impl<'a, F: FilesystemFacts> Checker<'a, F> {
@@ -676,21 +788,20 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
         }
     }
 
-    fn check_file(
+    fn check_requirement(
         &mut self,
         path: &Path,
         owner_uid: u32,
-        executable: bool,
-        must_be_mutable: bool,
-        trusted_system_root: Option<&Path>,
+        trusted_root: Option<TrustedRoot<'_>>,
+        policy: InstallerPathPolicy,
         check: &'static str,
     ) {
-        self.check_ancestors(path, trusted_system_root, owner_uid);
+        self.check_ancestors(path, trusted_root);
         let facts = match self.path_facts(path, check) {
             Some(facts) => facts,
             None => return,
         };
-        if facts.kind != PathKind::File {
+        if policy.expects_file() && facts.kind != PathKind::File {
             self.report.refuse(
                 check,
                 Some(path.to_path_buf()),
@@ -699,11 +810,69 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
             );
             return;
         }
+        if policy.expects_directory() && facts.kind != PathKind::Directory {
+            self.report.refuse(
+                check,
+                Some(path.to_path_buf()),
+                format!("expected a directory, found {:?}", facts.kind),
+                "restore this directory as part of a current release-bundle installation",
+            );
+            return;
+        }
         self.check_owner(path, &facts, owner_uid, check);
-        if trusted_system_root.is_some() {
+        if trusted_root.is_some_and(|root| root.reject_other_writes) {
             self.check_not_writable_by_others(path, &facts);
         }
-        if must_be_mutable && facts.read_only_filesystem {
+
+        match policy {
+            InstallerPathPolicy::ReplaceFile => self.check_replace_file(path, &facts, check),
+            InstallerPathPolicy::ReplaceExecutable => {
+                self.check_replace_file(path, &facts, check);
+                self.check_permissions(
+                    path,
+                    &facts,
+                    0o111,
+                    check,
+                    "installed executable has no execute permission",
+                );
+            }
+            InstallerPathPolicy::MutateDirectory => {
+                self.check_mutable_directory(path, &facts, check, 0o300);
+            }
+            InstallerPathPolicy::RecursiveClear => {
+                self.check_mutable_directory(path, &facts, check, 0o300);
+                self.check_recursive_clear_mounts(path, check);
+            }
+            InstallerPathPolicy::ExactDropInDirectory { expected_entry } => {
+                self.check_mutable_directory(path, &facts, check, 0o700);
+                self.check_exact_directory(path, expected_entry, check);
+            }
+            InstallerPathPolicy::ReadableInput => self.check_permissions(
+                path,
+                &facts,
+                0o400,
+                check,
+                "input is not readable by its owner",
+            ),
+            InstallerPathPolicy::ExecutableInput => self.check_permissions(
+                path,
+                &facts,
+                0o500,
+                check,
+                "input is not readable and executable by its owner",
+            ),
+            InstallerPathPolicy::InputDirectory => self.check_permissions(
+                path,
+                &facts,
+                0o500,
+                check,
+                "input directory is not readable and searchable by its owner",
+            ),
+        }
+    }
+
+    fn check_replace_file(&mut self, path: &Path, facts: &PathFacts, check: &'static str) {
+        if facts.read_only_filesystem {
             self.report.refuse(
                 check,
                 Some(path.to_path_buf()),
@@ -711,7 +880,7 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
                 "use the host's native package manager or make this installation file mutable",
             );
         }
-        if must_be_mutable && facts.link_count != 1 {
+        if facts.link_count != 1 {
             self.report.refuse(
                 check,
                 Some(path.to_path_buf()),
@@ -722,7 +891,7 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
                 "replace the path with an independent regular file before upgrading",
             );
         }
-        if must_be_mutable && facts.mount_point {
+        if facts.mount_point {
             self.report.refuse(
                 check,
                 Some(path.to_path_buf()),
@@ -730,51 +899,23 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
                 "replace the mounted path with an ordinary installation file before upgrading",
             );
         }
-        if must_be_mutable && facts.mode & 0o200 == 0 {
-            self.report.refuse(
-                check,
-                Some(path.to_path_buf()),
-                "file is not writable by its owner",
-                "restore owner-write permission before upgrading",
-            );
-        }
-        if executable && facts.mode & 0o111 == 0 {
-            self.report.refuse(
-                check,
-                Some(path.to_path_buf()),
-                "file is not executable",
-                "restore the executable mode from a current release bundle",
-            );
-        }
+        self.check_permissions(
+            path,
+            facts,
+            0o200,
+            check,
+            "file is not writable by its owner",
+        );
     }
 
-    fn check_directory(
+    fn check_mutable_directory(
         &mut self,
         path: &Path,
-        owner_uid: u32,
-        must_be_mutable: bool,
-        trusted_system_root: Option<&Path>,
+        facts: &PathFacts,
         check: &'static str,
+        required_permissions: u32,
     ) {
-        self.check_ancestors(path, trusted_system_root, owner_uid);
-        let facts = match self.path_facts(path, check) {
-            Some(facts) => facts,
-            None => return,
-        };
-        if facts.kind != PathKind::Directory {
-            self.report.refuse(
-                check,
-                Some(path.to_path_buf()),
-                format!("expected a directory, found {:?}", facts.kind),
-                "restore this directory as part of a current release-bundle installation",
-            );
-            return;
-        }
-        self.check_owner(path, &facts, owner_uid, check);
-        if trusted_system_root.is_some() {
-            self.check_not_writable_by_others(path, &facts);
-        }
-        if must_be_mutable && facts.read_only_filesystem {
+        if facts.read_only_filesystem {
             self.report.refuse(
                 check,
                 Some(path.to_path_buf()),
@@ -782,7 +923,7 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
                 "use the host's native package manager or make the installed release-bundle paths mutable",
             );
         }
-        if must_be_mutable && facts.mount_point {
+        if facts.mount_point {
             self.report.refuse(
                 check,
                 Some(path.to_path_buf()),
@@ -790,12 +931,88 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
                 "replace the mounted path with an ordinary installation directory before upgrading",
             );
         }
-        if must_be_mutable && facts.mode & 0o200 == 0 {
+        self.check_permissions(
+            path,
+            facts,
+            required_permissions,
+            check,
+            if required_permissions & 0o400 != 0 {
+                "directory is not readable, writable, and searchable by its owner"
+            } else {
+                "directory is not writable and searchable by its owner"
+            },
+        );
+    }
+
+    fn check_recursive_clear_mounts(&mut self, path: &Path, check: &'static str) {
+        match self.filesystem.mount_points() {
+            Ok(mount_points) => {
+                for mount_point in mount_points {
+                    if mount_point != path && mount_point.starts_with(path) {
+                        self.report.refuse(
+                            check,
+                            Some(mount_point),
+                            "recursively cleared directory contains a nested mount point",
+                            "unmount nested filesystems from the managed virtualenv before upgrading",
+                        );
+                    }
+                }
+            }
+            Err(err) => self.report.refuse(
+                check,
+                Some(path.to_path_buf()),
+                format!("could not inspect nested mount points: {err}"),
+                "make mount information available before upgrading",
+            ),
+        }
+    }
+
+    fn check_exact_directory(&mut self, path: &Path, expected_entry: &str, check: &'static str) {
+        let expected_path = path.join(expected_entry);
+        match self.filesystem.read_directory(path) {
+            Ok(entries) => {
+                if !entries.iter().any(|entry| entry == &expected_path) {
+                    self.report.refuse(
+                        check,
+                        Some(expected_path.clone()),
+                        "required drop-in entry is missing",
+                        "restore the exact drop-in directory from a current release bundle",
+                    );
+                }
+                for entry in entries {
+                    if entry != expected_path {
+                        self.report.refuse(
+                            check,
+                            Some(entry),
+                            "drop-in directory contains an unexpected entry",
+                            "remove unexpected drop-ins before upgrading",
+                        );
+                    }
+                }
+            }
+            Err(err) => self.report.refuse(
+                check,
+                Some(path.to_path_buf()),
+                format!("could not inspect drop-in directory: {err}"),
+                "make the drop-in directory readable before upgrading",
+            ),
+        }
+    }
+
+    fn check_permissions(
+        &mut self,
+        path: &Path,
+        facts: &PathFacts,
+        required: u32,
+        check: &'static str,
+        detail: &'static str,
+    ) {
+        if facts.mode & required != required {
             self.report.refuse(
                 check,
                 Some(path.to_path_buf()),
-                "directory is not writable by its owner",
-                "restore owner-write permission before upgrading",
+                detail,
+                "restore the path permissions from a current release bundle",
             );
         }
     }
@@ -833,30 +1050,6 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
                 "restore a readable integration override",
             ),
         }
-
-        let Some(directory) = path.parent() else {
-            return;
-        };
-        match self.filesystem.read_directory(directory) {
-            Ok(entries) => {
-                for entry in entries {
-                    if entry != path {
-                        self.report.refuse(
-                            "integration-config",
-                            Some(entry),
-                            "integration override directory contains an unexpected entry",
-                            "remove unexpected drop-ins before upgrading",
-                        );
-                    }
-                }
-            }
-            Err(err) => self.report.refuse(
-                "integration-config",
-                Some(directory.to_path_buf()),
-                format!("could not inspect the integration override directory: {err}"),
-                "make the integration override directory readable before upgrading",
-            ),
-        }
     }
 
     fn check_absent(&mut self, path: &Path) {
@@ -883,12 +1076,11 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
         owner_uid: u32,
         system_root: &Path,
     ) -> Option<PathBuf> {
-        self.check_file(
+        self.check_requirement(
             path,
             owner_uid,
-            false,
-            true,
-            Some(system_root),
+            Some(TrustedRoot::strict(system_root, owner_uid)),
+            InstallerPathPolicy::ReplaceFile,
             "config-discovery",
         );
         if self
@@ -932,7 +1124,6 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
     }
 
     fn check_config_tree(&mut self, config_path: &Path, owner_uid: u32) {
-        self.check_file(config_path, owner_uid, false, false, None, "config-state");
         let Some(config_directory) = config_path.parent() else {
             self.report.refuse(
                 "config-state",
@@ -942,12 +1133,20 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
             );
             return;
         };
-        self.check_directory(
+        let config_trust = TrustedRoot::owned(config_directory, owner_uid);
+        self.check_requirement(
             config_directory,
             owner_uid,
-            true,
-            None,
-            "mutable-config-state",
+            Some(config_trust),
+            InstallerPathPolicy::InputDirectory,
+            "config-state",
+        );
+        self.check_requirement(
+            config_path,
+            owner_uid,
+            Some(config_trust),
+            InstallerPathPolicy::ReadableInput,
+            "config-state",
         );
         if self
             .report
@@ -990,8 +1189,23 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
                 };
                 self.check_owner(&entry, &facts, owner_uid, "config-state");
                 match facts.kind {
-                    PathKind::Directory => pending.push(entry),
-                    PathKind::File => {}
+                    PathKind::Directory => {
+                        self.check_permissions(
+                            &entry,
+                            &facts,
+                            0o500,
+                            "config-state",
+                            "config directory is not readable and searchable by its owner",
+                        );
+                        pending.push(entry);
+                    }
+                    PathKind::File => self.check_permissions(
+                        &entry,
+                        &facts,
+                        0o400,
+                        "config-state",
+                        "config file is not readable by its owner",
+                    ),
                     PathKind::Symlink | PathKind::Other => self.report.refuse(
                         "config-state",
                         Some(entry),
@@ -1015,56 +1229,35 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
         }
     }
 
-    fn check_owner_permissions(&mut self, path: &Path, required: u32, detail: &'static str) {
-        if self
-            .report
-            .failures
-            .iter()
-            .any(|failure| failure.path.as_deref() == Some(path))
-        {
-            return;
-        }
-        let Some(facts) = self.path_facts(path, "candidate-layout") else {
-            return;
-        };
-        if facts.mode & required != required {
-            self.report.refuse(
-                "candidate-layout",
-                Some(path.to_path_buf()),
-                detail,
-                "restore the candidate file mode from a verified release bundle",
-            );
-        }
-    }
-
     fn check_not_writable_by_others(&mut self, path: &Path, facts: &PathFacts) {
         if facts.mode & 0o022 != 0 {
             self.report.refuse(
                 "path-containment",
                 Some(path.to_path_buf()),
-                "system path is writable by its group or by other users",
-                "remove group and other write permission from the system installation path",
+                "trusted path is writable by its group or by other users",
+                "remove group and other write permission from the trusted path",
             );
         }
     }
 
-    fn check_ancestors(&mut self, path: &Path, trusted_system_root: Option<&Path>, owner_uid: u32) {
+    fn check_ancestors(&mut self, path: &Path, trusted_root: Option<TrustedRoot<'_>>) {
         for ancestor in path.ancestors().skip(1) {
-            let trusted_owner = match trusted_system_root {
-                Some(root) if ancestor.starts_with(root) => Some(owner_uid),
-                _ => None,
-            };
+            let trusted_properties = trusted_root
+                .filter(|root| ancestor.starts_with(root.path))
+                .map(|root| (root.owner_uid, root.reject_other_writes));
             if !self
                 .checked_ancestors
-                .insert((ancestor.to_path_buf(), trusted_owner))
+                .insert((ancestor.to_path_buf(), trusted_properties))
             {
                 continue;
             }
             match self.filesystem.path_facts(ancestor) {
                 Ok(facts) if facts.kind == PathKind::Directory => {
-                    if let Some(expected_uid) = trusted_owner {
+                    if let Some((expected_uid, reject_other_writes)) = trusted_properties {
                         self.check_owner(ancestor, &facts, expected_uid, "path-containment");
-                        self.check_not_writable_by_others(ancestor, &facts);
+                        if reject_other_writes {
+                            self.check_not_writable_by_others(ancestor, &facts);
+                        }
                     }
                 }
                 Ok(facts) => self.report.refuse(
@@ -1158,6 +1351,157 @@ mod tests {
     }
 
     #[test]
+    fn installer_path_policy_permission_matrix_is_enforced() {
+        let cases = [
+            (
+                "replace-file",
+                InstallerPathPolicy::ReplaceFile,
+                0o400,
+                "not writable by its owner",
+            ),
+            (
+                "replace-executable",
+                InstallerPathPolicy::ReplaceExecutable,
+                0o600,
+                "no execute permission",
+            ),
+            (
+                "mutate-directory",
+                InstallerPathPolicy::MutateDirectory,
+                0o500,
+                "not writable and searchable",
+            ),
+            (
+                "recursive-clear",
+                InstallerPathPolicy::RecursiveClear,
+                0o500,
+                "not writable and searchable",
+            ),
+            (
+                "exact-drop-in",
+                InstallerPathPolicy::ExactDropInDirectory {
+                    expected_entry: "config.conf",
+                },
+                0o500,
+                "not readable, writable, and searchable",
+            ),
+            (
+                "readable-input",
+                InstallerPathPolicy::ReadableInput,
+                0o200,
+                "not readable by its owner",
+            ),
+            (
+                "executable-input",
+                InstallerPathPolicy::ExecutableInput,
+                0o400,
+                "not readable and executable",
+            ),
+            (
+                "input-directory",
+                InstallerPathPolicy::InputDirectory,
+                0o400,
+                "not readable and searchable",
+            ),
+        ];
+
+        for (label, policy, mode, expected_detail) in cases {
+            let fixture = InstalledFixture::new(label);
+            let (path, trusted_root, owner_uid) = match policy {
+                InstallerPathPolicy::ReplaceFile => (
+                    fixture
+                        .facts
+                        .layout
+                        .system_path("/etc/systemd/system/LG_Buddy.service"),
+                    fixture.facts.layout.system_root.clone(),
+                    fixture.facts.system_owner_uid,
+                ),
+                InstallerPathPolicy::ReplaceExecutable => (
+                    fixture.facts.layout.installed_executable(),
+                    fixture.facts.layout.system_root.clone(),
+                    fixture.facts.system_owner_uid,
+                ),
+                InstallerPathPolicy::MutateDirectory => (
+                    fixture.facts.layout.system_path("/usr/bin"),
+                    fixture.facts.layout.system_root.clone(),
+                    fixture.facts.system_owner_uid,
+                ),
+                InstallerPathPolicy::RecursiveClear => (
+                    fixture.facts.layout.system_path("/usr/bin/LG_Buddy_PIP"),
+                    fixture.facts.layout.system_root.clone(),
+                    fixture.facts.system_owner_uid,
+                ),
+                InstallerPathPolicy::ExactDropInDirectory { .. } => (
+                    fixture
+                        .facts
+                        .layout
+                        .system_path("/etc/systemd/system/LG_Buddy.service.d"),
+                    fixture.facts.layout.system_root.clone(),
+                    fixture.facts.system_owner_uid,
+                ),
+                InstallerPathPolicy::ReadableInput => (
+                    fixture.candidate_root.join("release-manifest.json"),
+                    fixture.candidate_root.clone(),
+                    fixture.facts.user_owner_uid,
+                ),
+                InstallerPathPolicy::ExecutableInput => (
+                    fixture.candidate_root.join("install.sh"),
+                    fixture.candidate_root.clone(),
+                    fixture.facts.user_owner_uid,
+                ),
+                InstallerPathPolicy::InputDirectory => (
+                    fixture.candidate_root.join("systemd"),
+                    fixture.candidate_root.clone(),
+                    fixture.facts.user_owner_uid,
+                ),
+            };
+            let filesystem = OverriddenFilesystem {
+                path: path.clone(),
+                owner_uid: None,
+                mode: Some(mode),
+                read_only: None,
+                mount_point: None,
+            };
+            let mut checker = Checker::new(&filesystem);
+            checker.check_requirement(
+                &path,
+                owner_uid,
+                Some(TrustedRoot::strict(&trusted_root, owner_uid)),
+                policy,
+                "policy-contract",
+            );
+
+            assert_failure(&checker.report, "policy-contract", &path, expected_detail);
+        }
+    }
+
+    #[test]
+    fn candidate_input_policy_refuses_group_or_other_write_access() {
+        for (label, path, mode) in [
+            ("writable-manifest", "release-manifest.json", 0o660),
+            ("writable-installer", "install.sh", 0o770),
+            ("writable-input-directory", "systemd", 0o770),
+        ] {
+            let fixture = InstalledFixture::new(label);
+            let input = fixture.candidate_root.join(path);
+            set_mode(&input, mode);
+
+            let report = evaluate_candidate_preflight(
+                &OsFilesystemFacts,
+                &fixture.candidate_root,
+                fixture.facts.user_owner_uid,
+            );
+
+            assert_failure(
+                &report,
+                "path-containment",
+                &input,
+                "writable by its group or by other users",
+            );
+        }
+    }
+
+    #[test]
     fn initial_preflight_refuses_a_symlinked_installed_runtime() {
         let fixture = InstalledFixture::new("symlink-runtime");
         let runtime = fixture.facts.layout.installed_executable();
@@ -1181,6 +1525,32 @@ mod tests {
         let report = evaluate_initial_preflight(&OsFilesystemFacts, &fixture.facts);
 
         assert_failure(&report, "mutable-installation", &virtualenv, "Symlink");
+    }
+
+    #[test]
+    fn initial_preflight_refuses_a_nested_mount_in_the_recursively_cleared_virtualenv() {
+        let fixture = InstalledFixture::new("nested-virtualenv-mount");
+        let nested_mount = fixture
+            .facts
+            .layout
+            .system_path("/usr/bin/LG_Buddy_PIP/lib/python/site-packages");
+        fs::create_dir_all(&nested_mount).unwrap();
+        let filesystem = OverriddenFilesystem {
+            path: nested_mount.clone(),
+            owner_uid: None,
+            mode: None,
+            read_only: None,
+            mount_point: Some(true),
+        };
+
+        let report = evaluate_initial_preflight(&filesystem, &fixture.facts);
+
+        assert_failure(
+            &report,
+            "mutable-installation",
+            &nested_mount,
+            "nested mount point",
+        );
     }
 
     #[test]
@@ -1423,6 +1793,25 @@ mod tests {
     }
 
     #[test]
+    fn initial_preflight_refuses_a_missing_exact_systemd_drop_in() {
+        let fixture = InstalledFixture::new("missing-systemd-drop-in");
+        let drop_in = fixture
+            .facts
+            .layout
+            .system_path("/etc/systemd/system/LG_Buddy.service.d/config.conf");
+        fs::remove_file(&drop_in).unwrap();
+
+        let report = evaluate_initial_preflight(&OsFilesystemFacts, &fixture.facts);
+
+        assert_failure(
+            &report,
+            "integration-config",
+            &drop_in,
+            "required drop-in entry is missing",
+        );
+    }
+
+    #[test]
     fn initial_preflight_refuses_legacy_state_instead_of_migrating_it() {
         let fixture = InstalledFixture::new("legacy-state");
         let legacy = fixture
@@ -1479,7 +1868,12 @@ mod tests {
         );
 
         assert_failure(&report, "candidate-layout", &manifest, "missing");
-        assert_failure(&report, "candidate-layout", &installer, "not executable");
+        assert_failure(
+            &report,
+            "candidate-layout",
+            &installer,
+            "not readable and executable",
+        );
     }
 
     #[test]
@@ -1505,20 +1899,28 @@ mod tests {
     }
 
     #[test]
-    fn candidate_preflight_refuses_a_missing_upgrade_asset() {
-        let fixture = InstalledFixture::new("missing-candidate-service");
-        let service = fixture
-            .candidate_root
-            .join("systemd/LG_Buddy_screen.service");
-        fs::remove_file(&service).unwrap();
+    fn candidate_preflight_refuses_each_missing_upgrade_input() {
+        for (index, requirement) in CANDIDATE_PATH_REQUIREMENTS
+            .iter()
+            .filter(|requirement| !requirement.path.is_empty())
+            .enumerate()
+        {
+            let fixture = InstalledFixture::new(&format!("missing-candidate-input-{index}"));
+            let input = fixture.candidate_root.join(requirement.path);
+            if requirement.policy.expects_directory() {
+                fs::remove_dir_all(&input).unwrap();
+            } else {
+                fs::remove_file(&input).unwrap();
+            }
 
-        let report = evaluate_candidate_preflight(
-            &OsFilesystemFacts,
-            &fixture.candidate_root,
-            fixture.facts.user_owner_uid,
-        );
+            let report = evaluate_candidate_preflight(
+                &OsFilesystemFacts,
+                &fixture.candidate_root,
+                fixture.facts.user_owner_uid,
+            );
 
-        assert_failure(&report, "candidate-layout", &service, "missing");
+            assert_failure(&report, "candidate-layout", &input, "missing");
+        }
     }
 
     #[test]
@@ -1631,6 +2033,18 @@ mod tests {
         fn read_directory(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
             OsFilesystemFacts.read_directory(path)
         }
+
+        fn mount_points(&self) -> io::Result<Vec<PathBuf>> {
+            let mut mount_points = OsFilesystemFacts.mount_points()?;
+            match self.mount_point {
+                Some(true) if !mount_points.contains(&self.path) => {
+                    mount_points.push(self.path.clone());
+                }
+                Some(false) => mount_points.retain(|path| path != &self.path),
+                _ => {}
+            }
+            Ok(mount_points)
+        }
     }
 
     struct InstalledFixture {
@@ -1654,19 +2068,9 @@ mod tests {
             let config_directory = user_home.join(".config/lg-buddy");
             let config_path = config_directory.join("config.env");
 
-            for path in SYSTEM_MUTABLE_DIRECTORIES {
-                fs::create_dir_all(layout.system_path(path)).unwrap();
-            }
-            for (path, executable) in SYSTEM_FILES {
-                write_file(&layout.system_path(path), *executable);
-            }
+            create_system_requirements(&layout);
             set_directory_tree_mode(&system_root, 0o755);
-            for path in USER_MUTABLE_DIRECTORIES {
-                fs::create_dir_all(user_home.join(path)).unwrap();
-            }
-            for (path, executable) in USER_SYSTEMD_FILES {
-                write_file(&layout.user_systemd_path(path), *executable);
-            }
+            create_relative_requirements(&layout.user_systemd_path(""), USER_PATH_REQUIREMENTS);
             fs::create_dir_all(config_directory.join("tvs/primary")).unwrap();
             fs::write(&config_path, "updates_channel=stable\n").unwrap();
             fs::write(
@@ -1692,12 +2096,11 @@ mod tests {
             ] {
                 fs::write(path, &config_override).unwrap();
             }
+            set_directory_tree_mode(&user_home, 0o755);
 
             let candidate_root = root.join("candidate");
-            fs::create_dir_all(&candidate_root).unwrap();
-            for (path, executable) in CANDIDATE_FILES {
-                write_file(&candidate_root.join(path), *executable);
-            }
+            create_relative_requirements(&candidate_root, CANDIDATE_PATH_REQUIREMENTS);
+            set_directory_tree_mode(&candidate_root, 0o755);
 
             let owner_uid = unsafe { libc::geteuid() };
             let facts = HostPreflightFacts {
@@ -1721,6 +2124,42 @@ mod tests {
     impl Drop for InstalledFixture {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn create_system_requirements(layout: &InstalledLayout) {
+        for requirement in SYSTEM_PATH_REQUIREMENTS
+            .iter()
+            .filter(|requirement| requirement.policy.expects_directory())
+        {
+            fs::create_dir_all(layout.system_path(requirement.path)).unwrap();
+        }
+        for requirement in SYSTEM_PATH_REQUIREMENTS
+            .iter()
+            .filter(|requirement| requirement.policy.expects_file())
+        {
+            write_file(
+                &layout.system_path(requirement.path),
+                matches!(requirement.policy, InstallerPathPolicy::ReplaceExecutable),
+            );
+        }
+    }
+
+    fn create_relative_requirements(base: &Path, requirements: &[InstallerPathRequirement]) {
+        for requirement in requirements
+            .iter()
+            .filter(|requirement| requirement.policy.expects_directory())
+        {
+            fs::create_dir_all(base.join(requirement.path)).unwrap();
+        }
+        for requirement in requirements
+            .iter()
+            .filter(|requirement| requirement.policy.expects_file())
+        {
+            write_file(
+                &base.join(requirement.path),
+                matches!(requirement.policy, InstallerPathPolicy::ExecutableInput),
+            );
         }
     }
 

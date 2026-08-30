@@ -105,6 +105,9 @@ types and mount boundaries, trusted system containment, integration override
 state, and system/user service-manager availability before an updater performs
 release or privilege-related effects. A verified candidate's binary performs a
 second pass for its own installer requirements before privileged mutation.
+The checker assigns each target an installer-operation policy so replacement,
+directory mutation, recursive repair, exact drop-in, and candidate-input
+requirements cannot silently lose their operation-specific safeguards.
 
 This is intentionally a conservative and evolving refusal boundary. It does
 not migrate legacy layouts, declare broad host support, or guarantee that a
