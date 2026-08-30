@@ -93,6 +93,11 @@ fn native_webos_tv_has_ambiguous_restore(world: &mut LgBuddyWorld) {
     world.make_native_restore_ambiguous();
 }
 
+#[given("the native webOS TV rejects mute changes")]
+fn native_webos_tv_rejects_mute_changes(world: &mut LgBuddyWorld) {
+    world.reject_native_set_mute();
+}
+
 #[given(regex = r#"mock system logind reports PreparingForSleep=(true|false)"#)]
 fn mock_system_logind_preparing_for_sleep(world: &mut LgBuddyWorld, value: String) {
     world.configure_system_logind(value == "true");

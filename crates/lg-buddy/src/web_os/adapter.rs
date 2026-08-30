@@ -864,6 +864,21 @@ mod tests {
     }
 
     #[test]
+    fn audio_status_preserves_tv_reported_unknown_volume() {
+        let server =
+            WebOsTestServer::active(WebOsTestVersion::WebOs24Version92261, WebOsTestInput::Hdmi3);
+        server.set_volume(-1);
+        let token_fixture = TestAccessTokenStore::new();
+        let client = client_for_server(&server, &token_fixture);
+
+        let status = client.audio_status().expect("read unknown audio status");
+
+        assert_eq!(status.volume(), CurrentVolume::Unknown);
+        assert!(!status.is_muted());
+        server.finish();
+    }
+
+    #[test]
     fn ambiguous_write_is_not_replayed_and_safe_readback_resolves_success() {
         let server = WebOsTestServer::for_scenario(
             WebOsTestVersion::WebOs24Version92261,

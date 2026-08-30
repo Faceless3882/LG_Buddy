@@ -73,6 +73,7 @@ pub(in crate::web_os) enum WebOsTestScenario {
     RegistrationTimeout,
     RegistrationMissingClientKey,
     PowerStatePermissionDenied,
+    SetAudioMuteRejected,
     BacklightWriteAcknowledgedWithoutChange,
     CloseAfterFirstInputWrite,
     StallFirstRequest,
@@ -736,6 +737,25 @@ impl WebOsTestServer {
     }
 
     #[allow(dead_code)]
+    pub(in crate::web_os) fn set_volume(&self, volume: i16) {
+        assert!(volume == -1 || (0..=100).contains(&volume));
+        self.runtime
+            .lock()
+            .expect("webOS test server state")
+            .tv
+            .volume = volume;
+    }
+
+    #[allow(dead_code)]
+    pub(in crate::web_os) fn set_muted(&self, muted: bool) {
+        self.runtime
+            .lock()
+            .expect("webOS test server state")
+            .tv
+            .muted = muted;
+    }
+
+    #[allow(dead_code)]
     pub(in crate::web_os) fn assert_healthy(&self) {
         assert!(
             !self.handle.as_ref().is_some_and(JoinHandle::is_finished),
@@ -870,6 +890,7 @@ fn serve_connection<S>(
             WebOsTestScenario::StatefulTv
             | WebOsTestScenario::StoredTokenPairingPrompt
             | WebOsTestScenario::PowerStatePermissionDenied
+            | WebOsTestScenario::SetAudioMuteRejected
             | WebOsTestScenario::BacklightWriteAcknowledgedWithoutChange
             | WebOsTestScenario::CloseAfterFirstInputWrite
             | WebOsTestScenario::StallFirstRequest
@@ -883,6 +904,17 @@ fn serve_connection<S>(
                         Some(webos_error_without_payload(
                             request["id"].as_str().expect("webOS request ID"),
                             "-401 not permitted",
+                        ))
+                    } else if scenario == WebOsTestScenario::SetAudioMuteRejected
+                        && request["uri"] == SET_AUDIO_MUTE_URI
+                    {
+                        Some(response(
+                            request["id"].as_str().expect("webOS request ID"),
+                            json!({
+                                "returnValue": false,
+                                "errorCode": "-102",
+                                "errorText": "mute rejected",
+                            }),
                         ))
                     } else if scenario == WebOsTestScenario::CloseAfterFirstInputWrite
                         && request["uri"] == SET_INPUT_URI
@@ -1002,6 +1034,7 @@ where
     match scenario {
         WebOsTestScenario::StatefulTv
         | WebOsTestScenario::PowerStatePermissionDenied
+        | WebOsTestScenario::SetAudioMuteRejected
         | WebOsTestScenario::BacklightWriteAcknowledgedWithoutChange
         | WebOsTestScenario::CloseAfterFirstInputWrite
         | WebOsTestScenario::StallFirstRequest
@@ -1137,6 +1170,7 @@ where
         | WebOsTestScenario::RegistrationTimeout
         | WebOsTestScenario::RegistrationMissingClientKey
         | WebOsTestScenario::PowerStatePermissionDenied
+        | WebOsTestScenario::SetAudioMuteRejected
         | WebOsTestScenario::BacklightWriteAcknowledgedWithoutChange
         | WebOsTestScenario::CloseAfterFirstInputWrite
         | WebOsTestScenario::StallFirstRequest
@@ -1828,13 +1862,17 @@ mod tests {
             WebOsTestServer::active(WebOsTestVersion::WebOs24Version92261, WebOsTestInput::Hdmi3);
         let mut without_audio = connect_registered(&server, &["READ_POWER_STATE"], None);
 
-        for (request_id, uri) in [
-            ("request_0", GET_AUDIO_STATUS_URI),
-            ("request_1", GET_AUDIO_VOLUME_URI),
-            ("request_2", GET_SOUND_OUTPUT_URI),
+        for (request_id, uri, payload) in [
+            ("request_0", GET_AUDIO_STATUS_URI, json!({})),
+            ("request_1", GET_AUDIO_VOLUME_URI, json!({})),
+            ("request_2", GET_SOUND_OUTPUT_URI, json!({})),
+            ("request_3", SET_AUDIO_VOLUME_URI, json!({"volume": 19})),
+            ("request_4", AUDIO_VOLUME_UP_URI, json!({})),
+            ("request_5", AUDIO_VOLUME_DOWN_URI, json!({})),
+            ("request_6", SET_AUDIO_MUTE_URI, json!({"mute": true})),
         ] {
             assert_eq!(
-                exchange(&mut without_audio, request_id, uri, json!({})),
+                exchange(&mut without_audio, request_id, uri, payload),
                 json!({
                     "id": request_id,
                     "type": "error",

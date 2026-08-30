@@ -56,12 +56,18 @@ Feature: Volume
     When I run the command "volume mute"
     Then the command succeeds
     And the TV is muted
+    And the TV client received "get_audio_status" exactly 1 times
+    And the TV client received "set_mute" exactly 1 times
     When I run the command "volume mute off"
     Then the command succeeds
     And the TV is unmuted
+    And the TV client received "get_audio_status" exactly 1 times
+    And the TV client received "set_mute" exactly 2 times
     When I run the command "volume mute on"
     Then the command succeeds
     And the TV is muted
+    And the TV client received "get_audio_status" exactly 1 times
+    And the TV client received "set_mute" exactly 3 times
 
   Scenario: Invalid volume is rejected before touching the TV
     Given the TV volume is 20
@@ -103,3 +109,20 @@ Feature: Volume
     Then the command succeeds
     And the TV volume is 19
     And the TV is unmuted
+    Given the TV volume is unknown
+    When I run the command "volume"
+    Then the command succeeds
+    And stdout is "unknown"
+
+  Scenario: Native webOS does not replay volume when unmuting is rejected
+    Given the existing config selects TV platform "lg_webos"
+    And a native webOS TV on input HDMI_2 with brightness 90
+    And a valid native TV access token is stored
+    And the TV volume is 20
+    And the TV is muted
+    And the native webOS TV rejects mute changes
+    When I run the command "volume up"
+    Then the command fails
+    And stderr contains "volume was changed, but unmuting failed"
+    And the TV volume is 21
+    And the TV is muted

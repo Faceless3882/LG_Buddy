@@ -78,6 +78,19 @@ impl MockWebOsTv {
             .set_scenario(WebOsTestScenario::RestoreSessionInterruptedAndInputAckLeavesScreenOff);
     }
 
+    pub fn reject_set_mute(&self) {
+        self.server
+            .set_scenario(WebOsTestScenario::SetAudioMuteRejected);
+    }
+
+    pub fn set_volume(&self, volume: i16) {
+        self.server.set_volume(volume);
+    }
+
+    pub fn set_muted(&self, muted: bool) {
+        self.server.set_muted(muted);
+    }
+
     pub fn snapshot(&self) -> MockWebOsTvSnapshot {
         self.assert_healthy();
         let snapshot = self.server.snapshot();
