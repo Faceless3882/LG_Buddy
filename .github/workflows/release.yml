@@ -207,6 +207,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh pr checks "${{ needs.authorize.outputs.pr_number }}" --repo "$GITHUB_REPOSITORY" --required
 
+      - name: Download verified release bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: lg-buddy-release-${{ needs.validate.outputs.tag }}
+          path: dist
+
+      - name: Verify downloaded checksums
+        run: cd dist && sha256sum -c sha256sums.txt
+
       - name: Create repository-scoped promotion token
         id: promotion-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
@@ -216,15 +225,6 @@ jobs:
           owner: ${{ github.repository_owner }}
           repositories: LG_Buddy
           permission-contents: write
-
-      - name: Download verified release bundle
-        uses: actions/download-artifact@v4
-        with:
-          name: lg-buddy-release-${{ needs.validate.outputs.tag }}
-          path: dist
-
-      - name: Verify downloaded checksums
-        run: cd dist && sha256sum -c sha256sums.txt
 
       - name: Publish release and advance channel refs
         env:
