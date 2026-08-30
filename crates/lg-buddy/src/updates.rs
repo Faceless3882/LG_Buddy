@@ -28,10 +28,7 @@ const UPDATE_CHECK_CACHE_FILE_NAME: &str = "update-check.json";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UpdatesCommand {
-    Check {
-        channel: Option<UpdateChannel>,
-        notify: bool,
-    },
+    Check { notify: bool },
     BackgroundCheck,
 }
 
@@ -62,15 +59,8 @@ impl UpdatesCommand {
 
     fn notify(&self) -> bool {
         match self {
-            Self::Check { notify, .. } => *notify,
+            Self::Check { notify } => *notify,
             Self::BackgroundCheck => true,
-        }
-    }
-
-    fn check_channel(&self) -> Option<UpdateChannel> {
-        match self {
-            Self::Check { channel, .. } => *channel,
-            Self::BackgroundCheck => None,
         }
     }
 }
@@ -100,19 +90,10 @@ where
     S: AsRef<str>,
 {
     let mut args = args.into_iter();
-    let mut channel = None;
     let mut notify = false;
 
     while let Some(arg) = args.next() {
         match arg.as_ref() {
-            "--channel" => {
-                if channel.is_some() {
-                    return Err(UpdatesParseError::DuplicateChannel);
-                }
-
-                let value = args.next().ok_or(UpdatesParseError::MissingChannelValue)?;
-                channel = Some(UpdateChannel::parse(value.as_ref())?);
-            }
             "--notify" => {
                 if notify {
                     return Err(UpdatesParseError::DuplicateNotify);
@@ -131,17 +112,14 @@ where
         }
     }
 
-    Ok(UpdatesCommand::Check { channel, notify })
+    Ok(UpdatesCommand::Check { notify })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UpdatesParseError {
     MissingSubcommand,
     UnknownSubcommand(String),
-    MissingChannelValue,
-    DuplicateChannel,
     DuplicateNotify,
-    UnknownChannel(String),
     UnexpectedArguments {
         subcommand: &'static str,
         arguments: Vec<String>,
@@ -153,18 +131,12 @@ impl fmt::Display for UpdatesParseError {
         match self {
             Self::MissingSubcommand => write!(
                 f,
-                "missing updates command; expected `updates check [--channel stable|prerelease] [--notify]`"
+                "missing updates command; expected `updates check [--notify]`"
             ),
             Self::UnknownSubcommand(subcommand) => {
                 write!(f, "unknown updates command `{subcommand}`")
             }
-            Self::MissingChannelValue => write!(f, "missing channel value for `updates check`"),
-            Self::DuplicateChannel => write!(f, "duplicate `--channel` option"),
             Self::DuplicateNotify => write!(f, "duplicate `--notify` option"),
-            Self::UnknownChannel(channel) => write!(
-                f,
-                "unknown updates channel `{channel}`; expected stable or prerelease"
-            ),
             Self::UnexpectedArguments {
                 subcommand,
                 arguments,
@@ -187,83 +159,87 @@ pub enum UpdateChannel {
 }
 
 impl UpdateChannel {
-    fn parse(value: &str) -> Result<Self, UpdatesParseError> {
-        match value {
-            "stable" => Ok(Self::Stable),
-            "prerelease" => Ok(Self::Prerelease),
-            other => Err(UpdatesParseError::UnknownChannel(other.to_string())),
-        }
-    }
-
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Stable => "stable",
             Self::Prerelease => "prerelease",
         }
     }
+}
 
-    fn default_for(version: VersionInfo) -> Self {
-        match version.channel() {
-            ReleaseChannel::Prerelease => Self::Prerelease,
-            ReleaseChannel::Dev | ReleaseChannel::Stable => Self::Stable,
-        }
+trait UpdateSettings {
+    fn automatic_checks_enabled(&self) -> Result<bool, UpdatesError>;
+    fn channel(&self) -> Result<UpdateChannel, UpdatesError>;
+}
+
+#[derive(Debug)]
+struct EnvUpdateSettings {
+    store: SettingsStore,
+}
+
+impl EnvUpdateSettings {
+    fn from_env() -> Result<Self, UpdatesError> {
+        Ok(Self {
+            store: SettingsStore::load_from_env()?,
+        })
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BackgroundUpdateChannel {
-    Stable,
-    Prerelease,
-}
-
-impl BackgroundUpdateChannel {
-    fn update_channel(self) -> UpdateChannel {
-        match self {
-            Self::Stable => UpdateChannel::Stable,
-            Self::Prerelease => UpdateChannel::Prerelease,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BackgroundUpdateCheckPolicy {
-    Disabled,
-    Enabled { channel: BackgroundUpdateChannel },
-}
-
-impl BackgroundUpdateCheckPolicy {
-    fn from_settings(store: &SettingsStore) -> Result<Self, UpdatesError> {
+impl UpdateSettings for EnvUpdateSettings {
+    fn automatic_checks_enabled(&self) -> Result<bool, UpdatesError> {
+        let store = &self.store;
         match required_enum_setting(store, "updates.auto_check")? {
-            "disabled" => Ok(Self::Disabled),
-            "enabled" => Ok(Self::Enabled {
-                channel: parse_background_update_channel(store)?,
-            }),
+            "disabled" => Ok(false),
+            "enabled" => Ok(true),
             _ => Err(UpdatesError::SettingsInvariant(
                 "updates.auto_check resolved to an unsupported value".to_string(),
             )),
         }
     }
 
-    fn check_command(self) -> Option<UpdatesCommand> {
-        match self {
-            Self::Disabled => None,
-            Self::Enabled { channel } => Some(UpdatesCommand::Check {
-                channel: Some(channel.update_channel()),
-                notify: true,
-            }),
+    fn channel(&self) -> Result<UpdateChannel, UpdatesError> {
+        match required_enum_setting(&self.store, "updates.channel")? {
+            "stable" => Ok(UpdateChannel::Stable),
+            "prerelease" => Ok(UpdateChannel::Prerelease),
+            _ => Err(UpdatesError::SettingsInvariant(
+                "updates.channel resolved to an unsupported value".to_string(),
+            )),
         }
     }
 }
 
-fn parse_background_update_channel(
-    store: &SettingsStore,
-) -> Result<BackgroundUpdateChannel, UpdatesError> {
-    match required_enum_setting(store, "updates.channel")? {
-        "stable" => Ok(BackgroundUpdateChannel::Stable),
-        "prerelease" => Ok(BackgroundUpdateChannel::Prerelease),
-        _ => Err(UpdatesError::SettingsInvariant(
-            "updates.channel resolved to an unsupported value".to_string(),
-        )),
+#[cfg(test)]
+#[derive(Debug, Clone, Copy)]
+struct StaticUpdateSettings {
+    automatic_checks_enabled: bool,
+    channel: UpdateChannel,
+}
+
+#[cfg(test)]
+impl StaticUpdateSettings {
+    fn enabled(channel: UpdateChannel) -> Self {
+        Self {
+            automatic_checks_enabled: true,
+            channel,
+        }
+    }
+
+    fn disabled(channel: UpdateChannel) -> Self {
+        Self {
+            automatic_checks_enabled: false,
+            channel,
+        }
+    }
+}
+
+#[cfg(test)]
+impl UpdateSettings for StaticUpdateSettings {
+    fn automatic_checks_enabled(&self) -> Result<bool, UpdatesError> {
+        Ok(self.automatic_checks_enabled)
+    }
+
+    fn channel(&self) -> Result<UpdateChannel, UpdatesError> {
+        Ok(self.channel)
     }
 }
 
@@ -278,20 +254,6 @@ fn required_enum_setting(
         .ok_or_else(|| {
             UpdatesError::SettingsInvariant(format!("{key} resolved to a non-enum value"))
         })
-}
-
-trait BackgroundUpdateSettings {
-    fn background_update_check_policy(&self) -> Result<BackgroundUpdateCheckPolicy, UpdatesError>;
-}
-
-#[derive(Debug, Clone, Copy)]
-struct EnvBackgroundUpdateSettings;
-
-impl BackgroundUpdateSettings for EnvBackgroundUpdateSettings {
-    fn background_update_check_policy(&self) -> Result<BackgroundUpdateCheckPolicy, UpdatesError> {
-        let store = SettingsStore::load_from_env()?;
-        BackgroundUpdateCheckPolicy::from_settings(&store)
-    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1017,18 +979,20 @@ pub fn run_updates_command<W: io::Write>(
     let version = VersionInfo::current();
     let notification_handoff = SessionBusUpdateNotificationHandoff;
     let cache_store = DefaultUpdateCacheStore::from_env();
-
-    run_updates_command_with(
-        command,
-        writer,
+    let update_settings = EnvUpdateSettings::from_env()?;
+    let context = UpdatesRunContext {
         version,
-        &client,
-        &notification_handoff,
-        &cache_store,
-        current_unix_seconds(),
-    )
+        client: &client,
+        notifier: &notification_handoff,
+        cache_store: &cache_store,
+        update_settings: &update_settings,
+        now_unix_seconds: current_unix_seconds(),
+    };
+
+    run_updates_command_with_update_settings(command, writer, context)
 }
 
+#[cfg(test)]
 fn run_updates_command_with<
     W: io::Write,
     C: GitHubReleasesClient,
@@ -1043,52 +1007,46 @@ fn run_updates_command_with<
     cache_store: &S,
     now_unix_seconds: u64,
 ) -> Result<(), UpdatesError> {
-    let background_settings = EnvBackgroundUpdateSettings;
+    let update_settings = StaticUpdateSettings::enabled(UpdateChannel::Stable);
     let context = UpdatesRunContext {
         version,
         client,
         notifier,
         cache_store,
-        background_settings: &background_settings,
+        update_settings: &update_settings,
         now_unix_seconds,
     };
-    run_updates_command_with_background_settings(command, writer, context)
+    run_updates_command_with_update_settings(command, writer, context)
 }
 
-struct UpdatesRunContext<'a, C, N, S, B> {
+struct UpdatesRunContext<'a, C, N, S, U> {
     version: VersionInfo,
     client: &'a C,
     notifier: &'a N,
     cache_store: &'a S,
-    background_settings: &'a B,
+    update_settings: &'a U,
     now_unix_seconds: u64,
 }
 
-fn run_updates_command_with_background_settings<
+fn run_updates_command_with_update_settings<
     W: io::Write,
     C: GitHubReleasesClient,
     N: UpdateNotificationHandoff,
     S: UpdateCacheStore,
-    B: BackgroundUpdateSettings,
+    U: UpdateSettings,
 >(
     command: UpdatesCommand,
     writer: &mut W,
-    context: UpdatesRunContext<'_, C, N, S, B>,
+    context: UpdatesRunContext<'_, C, N, S, U>,
 ) -> Result<(), UpdatesError> {
-    let command = match command {
-        UpdatesCommand::Check { .. } => command,
-        UpdatesCommand::BackgroundCheck => {
-            let policy = context
-                .background_settings
-                .background_update_check_policy()?;
-            let Some(command) = policy.check_command() else {
-                writer.write_all(b"background: skipped (automatic update checks disabled)\n")?;
-                return Ok(());
-            };
-            command
-        }
-    };
+    if matches!(command, UpdatesCommand::BackgroundCheck)
+        && !context.update_settings.automatic_checks_enabled()?
+    {
+        writer.write_all(b"background: skipped (automatic update checks disabled)\n")?;
+        return Ok(());
+    }
     let notify = command.notify();
+    let channel = context.update_settings.channel()?;
     let mut deferred_failures = Vec::new();
     let mut cache = match context.cache_store.load() {
         Ok(cache) => cache,
@@ -1098,7 +1056,7 @@ fn run_updates_command_with_background_settings<
         }
     };
     let result = check_updates_with_cache(
-        command.check_channel(),
+        channel,
         context.version,
         context.client,
         &mut cache,
@@ -1156,28 +1114,21 @@ fn run_updates_command_with_background_settings<
 
 #[cfg(test)]
 fn check_updates<C: GitHubReleasesClient>(
-    command: UpdatesCommand,
+    channel: UpdateChannel,
     current: VersionInfo,
     client: &C,
 ) -> Result<UpdateCheckResult, UpdatesError> {
     let mut cache = UpdateCheckCache::default();
-    check_updates_with_cache(
-        command.check_channel(),
-        current,
-        client,
-        &mut cache,
-        current_unix_seconds(),
-    )
+    check_updates_with_cache(channel, current, client, &mut cache, current_unix_seconds())
 }
 
 fn check_updates_with_cache<C: GitHubReleasesClient>(
-    channel: Option<UpdateChannel>,
+    channel: UpdateChannel,
     current: VersionInfo,
     client: &C,
     cache: &mut UpdateCheckCache,
     now_unix_seconds: u64,
 ) -> Result<UpdateCheckResult, UpdatesError> {
-    let channel = channel.unwrap_or_else(|| UpdateChannel::default_for(current));
     let current_version =
         Version::parse(current.version()).map_err(|source| UpdatesError::InvalidLocalVersion {
             version: current.version().to_string(),
@@ -1325,24 +1276,23 @@ mod tests {
     use super::{
         atomic_write_file, check_updates, check_updates_with_cache,
         evaluate_update_notification_policy, parse_release_version, resolve_update_cache_path,
-        run_updates_command_with, run_updates_command_with_background_settings,
-        BackgroundUpdateChannel, BackgroundUpdateCheckPolicy, BackgroundUpdateSettings,
-        CachedReleaseInfo, CachedUpdateCheck, CachedUpdateNotification, DefaultUpdateCacheStore,
+        run_updates_command_with, run_updates_command_with_update_settings, CachedReleaseInfo,
+        CachedUpdateCheck, CachedUpdateNotification, DefaultUpdateCacheStore, EnvUpdateSettings,
         FileUpdateCacheStore, GitHubReleaseResponse, GitHubReleasesClient, ReleaseEndpoint,
-        ReleaseInfo, UpdateCachePathError, UpdateCachePathSources, UpdateCacheStore, UpdateChannel,
-        UpdateCheckCache, UpdateNotificationDecision, UpdateNotificationPolicyInput,
-        UpdateNotificationReason, UpdateNotificationSkipReason, UpdatesCommand,
-        UpdatesDeferredFailure, UpdatesError, UpdatesRunContext, UreqGitHubReleasesClient,
-        PRERELEASE_PAGE_SIZE,
+        ReleaseInfo, StaticUpdateSettings, UpdateCachePathError, UpdateCachePathSources,
+        UpdateCacheStore, UpdateChannel, UpdateCheckCache, UpdateNotificationDecision,
+        UpdateNotificationPolicyInput, UpdateNotificationReason, UpdateNotificationSkipReason,
+        UpdateSettings, UpdatesCommand, UpdatesDeferredFailure, UpdatesError, UpdatesRunContext,
+        UreqGitHubReleasesClient, PRERELEASE_PAGE_SIZE,
     };
     use crate::session_notifications::{
         UpdateNotificationError, UpdateNotificationHandoff, UpdateNotificationOutcome,
         UpdateNotificationRequest,
     };
-    use crate::settings::{ConfigEnvReader, SettingsStore};
+    use crate::settings::{ConfigEnvReader, SettingsError, SettingsStore};
     use crate::version::{ReleaseChannel, VersionInfo};
     use semver::Version;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::fs;
     use std::io::{self, Read, Write};
     use std::net::TcpListener;
@@ -1414,22 +1364,29 @@ mod tests {
     #[derive(Debug, Default)]
     struct MemoryUpdateCacheStore {
         cache: RefCell<UpdateCheckCache>,
+        load_count: Cell<usize>,
     }
 
     impl MemoryUpdateCacheStore {
         fn with_cache(cache: UpdateCheckCache) -> Self {
             Self {
                 cache: RefCell::new(cache),
+                load_count: Cell::new(0),
             }
         }
 
         fn cache(&self) -> UpdateCheckCache {
             self.cache.borrow().clone()
         }
+
+        fn load_count(&self) -> usize {
+            self.load_count.get()
+        }
     }
 
     impl UpdateCacheStore for MemoryUpdateCacheStore {
         fn load(&self) -> Result<UpdateCheckCache, UpdatesError> {
+            self.load_count.set(self.load_count.get() + 1);
             Ok(self.cache())
         }
 
@@ -1498,53 +1455,69 @@ mod tests {
         }
     }
 
-    #[derive(Debug, Clone, Copy)]
-    struct StaticBackgroundUpdateSettings {
-        policy: BackgroundUpdateCheckPolicy,
-    }
-
-    impl StaticBackgroundUpdateSettings {
-        fn enabled(channel: BackgroundUpdateChannel) -> Self {
-            Self {
-                policy: BackgroundUpdateCheckPolicy::Enabled { channel },
-            }
-        }
-
-        fn disabled() -> Self {
-            Self {
-                policy: BackgroundUpdateCheckPolicy::Disabled,
-            }
-        }
-    }
-
-    impl BackgroundUpdateSettings for StaticBackgroundUpdateSettings {
-        fn background_update_check_policy(
-            &self,
-        ) -> Result<BackgroundUpdateCheckPolicy, UpdatesError> {
-            Ok(self.policy)
-        }
-    }
-
-    fn updates_run_context<'a, C, N, S, B>(
+    fn updates_run_context<'a, C, N, S, U>(
         version: VersionInfo,
         client: &'a C,
         notifier: &'a N,
         cache_store: &'a S,
-        background_settings: &'a B,
+        update_settings: &'a U,
         now_unix_seconds: u64,
-    ) -> UpdatesRunContext<'a, C, N, S, B> {
+    ) -> UpdatesRunContext<'a, C, N, S, U> {
         UpdatesRunContext {
             version,
             client,
             notifier,
             cache_store,
-            background_settings,
+            update_settings,
             now_unix_seconds,
         }
     }
 
     fn version_info(version: &'static str, channel: ReleaseChannel) -> VersionInfo {
         VersionInfo::for_testing(version, channel, Some("test"))
+    }
+
+    fn stored_update_settings(automatic_checks: &str, channel: UpdateChannel) -> EnvUpdateSettings {
+        let config = format!(
+            "updates_auto_check={automatic_checks}\nupdates_channel={}\n",
+            channel.as_str()
+        );
+        EnvUpdateSettings {
+            store: SettingsStore::from_reader(ConfigEnvReader::parse("/tmp/config.env", &config)),
+        }
+    }
+
+    fn binary_identities() -> [VersionInfo; 3] {
+        [
+            version_info("1.1.0", ReleaseChannel::Stable),
+            version_info("1.1.0-beta.1", ReleaseChannel::Prerelease),
+            version_info("1.1.0", ReleaseChannel::Dev),
+        ]
+    }
+
+    fn channel_response(channel: UpdateChannel) -> String {
+        match channel {
+            UpdateChannel::Stable => stable_release("v1.1.1"),
+            UpdateChannel::Prerelease => format!(
+                "[{},{}]",
+                stable_release("v1.1.1"),
+                prerelease("v1.2.0-beta.1")
+            ),
+        }
+    }
+
+    fn channel_endpoint(channel: UpdateChannel) -> &'static str {
+        match channel {
+            UpdateChannel::Stable => "https://api.example.test/releases/latest",
+            UpdateChannel::Prerelease => "https://api.example.test/releases?per_page=20",
+        }
+    }
+
+    fn channel_latest_line(channel: UpdateChannel) -> &'static str {
+        match channel {
+            UpdateChannel::Stable => "latest: 1.1.1 (stable)",
+            UpdateChannel::Prerelease => "latest: 1.2.0-beta.1 (prerelease)",
+        }
     }
 
     fn stable_release(tag: &str) -> String {
@@ -1637,18 +1610,12 @@ mod tests {
         String::from_utf8(output.to_vec()).expect("utf8 output")
     }
 
-    fn check(channel: Option<UpdateChannel>) -> UpdatesCommand {
-        UpdatesCommand::Check {
-            channel,
-            notify: false,
-        }
+    fn check() -> UpdatesCommand {
+        UpdatesCommand::Check { notify: false }
     }
 
-    fn check_notify(channel: Option<UpdateChannel>) -> UpdatesCommand {
-        UpdatesCommand::Check {
-            channel,
-            notify: true,
-        }
+    fn check_notify() -> UpdatesCommand {
+        UpdatesCommand::Check { notify: true }
     }
 
     fn background_check() -> UpdatesCommand {
@@ -1979,7 +1946,7 @@ mod tests {
         );
 
         let result = check_updates_with_cache(
-            Some(UpdateChannel::Stable),
+            UpdateChannel::Stable,
             version_info("1.1.0", ReleaseChannel::Stable),
             &client,
             &mut cache,
@@ -2062,7 +2029,7 @@ mod tests {
         );
 
         let result = check_updates_with_cache(
-            Some(UpdateChannel::Stable),
+            UpdateChannel::Stable,
             version_info("1.1.0", ReleaseChannel::Stable),
             &client,
             &mut cache,
@@ -2107,7 +2074,7 @@ mod tests {
         );
 
         let result = check_updates_with_cache(
-            Some(UpdateChannel::Prerelease),
+            UpdateChannel::Prerelease,
             version_info("1.2.0-beta.1", ReleaseChannel::Prerelease),
             &client,
             &mut cache,
@@ -2134,7 +2101,7 @@ mod tests {
         let mut cache = UpdateCheckCache::default();
 
         let err = check_updates_with_cache(
-            Some(UpdateChannel::Stable),
+            UpdateChannel::Stable,
             version_info("1.1.0", ReleaseChannel::Stable),
             &client,
             &mut cache,
@@ -2165,7 +2132,7 @@ mod tests {
         let mut second_output = Vec::new();
 
         run_updates_command_with(
-            check(Some(UpdateChannel::Stable)),
+            check(),
             &mut first_output,
             version_info("1.1.0", ReleaseChannel::Stable),
             &client,
@@ -2175,7 +2142,7 @@ mod tests {
         )
         .expect("initial update check should succeed");
         run_updates_command_with(
-            check(Some(UpdateChannel::Stable)),
+            check(),
             &mut second_output,
             version_info("1.1.0", ReleaseChannel::Stable),
             &client,
@@ -2217,10 +2184,10 @@ mod tests {
         let client = MockGitHubReleasesClient::new_responses(vec![]);
         let notifier = RecordingNotifier::default();
         let cache_store = MemoryUpdateCacheStore::default();
-        let background_settings = StaticBackgroundUpdateSettings::disabled();
+        let update_settings = StaticUpdateSettings::disabled(UpdateChannel::Stable);
         let mut output = Vec::new();
 
-        run_updates_command_with_background_settings(
+        run_updates_command_with_update_settings(
             background_check(),
             &mut output,
             updates_run_context(
@@ -2228,7 +2195,7 @@ mod tests {
                 &client,
                 &notifier,
                 &cache_store,
-                &background_settings,
+                &update_settings,
                 TEST_NOW,
             ),
         )
@@ -2248,11 +2215,10 @@ mod tests {
         let client = MockGitHubReleasesClient::new(vec![Ok(stable_release("v1.1.1"))]);
         let notifier = RecordingNotifier::default();
         let cache_store = MemoryUpdateCacheStore::default();
-        let background_settings =
-            StaticBackgroundUpdateSettings::enabled(BackgroundUpdateChannel::Stable);
+        let update_settings = StaticUpdateSettings::enabled(UpdateChannel::Stable);
         let mut output = Vec::new();
 
-        run_updates_command_with_background_settings(
+        run_updates_command_with_update_settings(
             background_check(),
             &mut output,
             updates_run_context(
@@ -2260,7 +2226,7 @@ mod tests {
                 &client,
                 &notifier,
                 &cache_store,
-                &background_settings,
+                &update_settings,
                 TEST_NOW,
             ),
         )
@@ -2285,10 +2251,11 @@ mod tests {
             "updates_auto_check=disabled\nupdates_channel=bogus\n",
         ));
 
-        let policy = BackgroundUpdateCheckPolicy::from_settings(&store)
-            .expect("disabled background checks should not parse the channel setting");
+        let settings = EnvUpdateSettings { store };
 
-        assert_eq!(policy.check_command(), None);
+        assert!(!settings
+            .automatic_checks_enabled()
+            .expect("disabled background checks should not parse the channel setting"));
     }
 
     #[test]
@@ -2298,15 +2265,16 @@ mod tests {
             "updates_auto_check=enabled\n",
         ));
 
-        let policy = BackgroundUpdateCheckPolicy::from_settings(&store)
-            .expect("enabled background checks should use the settings default channel");
+        let settings = EnvUpdateSettings { store };
 
+        assert!(settings
+            .automatic_checks_enabled()
+            .expect("automatic check setting should resolve"));
         assert_eq!(
-            policy.check_command(),
-            Some(UpdatesCommand::Check {
-                channel: Some(UpdateChannel::Stable),
-                notify: true,
-            })
+            settings
+                .channel()
+                .expect("default update channel should resolve"),
+            UpdateChannel::Stable
         );
     }
 
@@ -2319,11 +2287,10 @@ mod tests {
         ))]);
         let notifier = RecordingNotifier::default();
         let cache_store = MemoryUpdateCacheStore::default();
-        let background_settings =
-            StaticBackgroundUpdateSettings::enabled(BackgroundUpdateChannel::Prerelease);
+        let update_settings = StaticUpdateSettings::enabled(UpdateChannel::Prerelease);
         let mut output = Vec::new();
 
-        run_updates_command_with_background_settings(
+        run_updates_command_with_update_settings(
             background_check(),
             &mut output,
             updates_run_context(
@@ -2331,7 +2298,7 @@ mod tests {
                 &client,
                 &notifier,
                 &cache_store,
-                &background_settings,
+                &update_settings,
                 TEST_NOW,
             ),
         )
@@ -2359,12 +2326,11 @@ mod tests {
         ]);
         let notifier = RecordingNotifier::default();
         let cache_store = MemoryUpdateCacheStore::default();
-        let background_settings =
-            StaticBackgroundUpdateSettings::enabled(BackgroundUpdateChannel::Stable);
+        let update_settings = StaticUpdateSettings::enabled(UpdateChannel::Stable);
         let mut first_output = Vec::new();
         let mut second_output = Vec::new();
 
-        run_updates_command_with_background_settings(
+        run_updates_command_with_update_settings(
             background_check(),
             &mut first_output,
             updates_run_context(
@@ -2372,12 +2338,12 @@ mod tests {
                 &client,
                 &notifier,
                 &cache_store,
-                &background_settings,
+                &update_settings,
                 TEST_NOW,
             ),
         )
         .expect("initial background update check should succeed");
-        run_updates_command_with_background_settings(
+        run_updates_command_with_update_settings(
             background_check(),
             &mut second_output,
             updates_run_context(
@@ -2385,7 +2351,7 @@ mod tests {
                 &client,
                 &notifier,
                 &cache_store,
-                &background_settings,
+                &update_settings,
                 TEST_NOW + 1,
             ),
         )
@@ -2406,7 +2372,7 @@ mod tests {
         let mut output = Vec::new();
 
         let err = run_updates_command_with(
-            check(Some(UpdateChannel::Stable)),
+            check(),
             &mut output,
             version_info("1.1.0", ReleaseChannel::Stable),
             &client,
@@ -2450,7 +2416,7 @@ mod tests {
         let mut output = Vec::new();
 
         let err = run_updates_command_with(
-            check(Some(UpdateChannel::Stable)),
+            check(),
             &mut output,
             version_info("1.1.0", ReleaseChannel::Stable),
             &client,
@@ -2502,7 +2468,7 @@ mod tests {
         let mut output = Vec::new();
 
         let err = run_updates_command_with(
-            check_notify(Some(UpdateChannel::Stable)),
+            check_notify(),
             &mut output,
             version_info("1.1.0", ReleaseChannel::Stable),
             &client,
@@ -2546,7 +2512,7 @@ mod tests {
         let mut output = Vec::new();
 
         let err = run_updates_command_with(
-            check_notify(Some(UpdateChannel::Stable)),
+            check_notify(),
             &mut output,
             version_info("1.1.0", ReleaseChannel::Stable),
             &client,
@@ -2600,7 +2566,7 @@ mod tests {
         let mut output = Vec::new();
 
         run_updates_command_with(
-            check_notify(Some(UpdateChannel::Stable)),
+            check_notify(),
             &mut output,
             version_info("1.1.0", ReleaseChannel::Stable),
             &client,
@@ -2647,7 +2613,7 @@ mod tests {
         let mut output = Vec::new();
 
         run_updates_command_with(
-            check_notify(Some(UpdateChannel::Stable)),
+            check_notify(),
             &mut output,
             version_info("1.1.0", ReleaseChannel::Stable),
             &client,
@@ -2663,72 +2629,248 @@ mod tests {
     }
 
     #[test]
-    fn updates_check_uses_stable_channel_for_stable_builds_by_default() {
+    fn manual_update_check_uses_saved_stable_channel_for_prerelease_build() {
         let client = MockGitHubReleasesClient::new(vec![Ok(stable_release("v1.1.1"))]);
+        let notifier = RecordingNotifier::default();
+        let cache_store = MemoryUpdateCacheStore::default();
+        let update_settings = StaticUpdateSettings::enabled(UpdateChannel::Stable);
+        let mut output = Vec::new();
 
-        let result = check_updates(
-            check(None),
-            version_info("1.1.0", ReleaseChannel::Stable),
-            &client,
+        run_updates_command_with_update_settings(
+            check(),
+            &mut output,
+            updates_run_context(
+                version_info("1.1.0-beta.1", ReleaseChannel::Prerelease),
+                &client,
+                &notifier,
+                &cache_store,
+                &update_settings,
+                TEST_NOW,
+            ),
         )
-        .expect("stable update check should succeed");
+        .expect("saved stable channel should drive the manual check");
 
-        assert!(result.update_available());
-        assert_eq!(
-            result.render(),
-            "status: update available\ncurrent: 1.1.0 (stable)\nlatest: 1.1.1 (stable)\nurl: https://github.test/releases/tag/v1.1.1\n"
-        );
+        assert!(rendered(&output).contains("latest: 1.1.1 (stable)"));
         assert_eq!(
             client.requests(),
             vec![(
                 "https://api.example.test/releases/latest".to_string(),
-                "lg-buddy/1.1.0".to_string()
-            )]
-        );
-    }
-
-    #[test]
-    fn updates_check_uses_prerelease_channel_for_prerelease_builds_by_default() {
-        let client = MockGitHubReleasesClient::new(vec![Ok(format!(
-            "[{},{}]",
-            stable_release("v1.1.0"),
-            prerelease("v1.2.0-beta.1")
-        ))]);
-
-        let result = check_updates(
-            check(None),
-            version_info("1.1.0-beta.1", ReleaseChannel::Prerelease),
-            &client,
-        )
-        .expect("prerelease update check should succeed");
-
-        assert!(result.update_available());
-        assert_eq!(result.latest.channel(), UpdateChannel::Prerelease);
-        assert_eq!(
-            client.requests(),
-            vec![(
-                "https://api.example.test/releases?per_page=20".to_string(),
                 "lg-buddy/1.1.0-beta.1".to_string()
             )]
         );
     }
 
     #[test]
-    fn updates_check_uses_stable_channel_for_dev_builds_by_default() {
-        let client = MockGitHubReleasesClient::new(vec![Ok(stable_release("v1.1.0"))]);
+    fn manual_update_check_uses_saved_prerelease_channel_when_auto_check_is_disabled() {
+        let client = MockGitHubReleasesClient::new(vec![Ok(format!(
+            "[{},{}]",
+            stable_release("v1.1.0"),
+            prerelease("v1.2.0-beta.1")
+        ))]);
+        let notifier = RecordingNotifier::default();
+        let cache_store = MemoryUpdateCacheStore::default();
+        let update_settings = StaticUpdateSettings::disabled(UpdateChannel::Prerelease);
+        let mut output = Vec::new();
 
-        let result = check_updates(
-            check(None),
-            version_info("1.1.0", ReleaseChannel::Dev),
-            &client,
+        run_updates_command_with_update_settings(
+            check(),
+            &mut output,
+            updates_run_context(
+                version_info("1.1.0", ReleaseChannel::Stable),
+                &client,
+                &notifier,
+                &cache_store,
+                &update_settings,
+                TEST_NOW,
+            ),
         )
-        .expect("dev update check should succeed");
+        .expect("manual check should ignore the automatic-check gate");
 
-        assert!(!result.update_available());
+        assert!(rendered(&output).contains("latest: 1.2.0-beta.1 (prerelease)"));
         assert_eq!(
-            result.render(),
-            "status: up to date\ncurrent: 1.1.0 (dev)\nlatest: 1.1.0 (stable)\nurl: https://github.test/releases/tag/v1.1.0\n"
+            client.requests(),
+            vec![(
+                "https://api.example.test/releases?per_page=20".to_string(),
+                "lg-buddy/1.1.0".to_string()
+            )]
         );
+    }
+
+    #[test]
+    fn saved_channel_drives_manual_checks_for_every_binary_identity() {
+        for saved_channel in [UpdateChannel::Stable, UpdateChannel::Prerelease] {
+            let update_settings = stored_update_settings("disabled", saved_channel);
+
+            for current in binary_identities() {
+                let current_version = current.version();
+                let current_channel = current.channel();
+                let client =
+                    MockGitHubReleasesClient::new(vec![Ok(channel_response(saved_channel))]);
+                let notifier = RecordingNotifier::default();
+                let cache_store = MemoryUpdateCacheStore::default();
+                let mut output = Vec::new();
+
+                run_updates_command_with_update_settings(
+                    check(),
+                    &mut output,
+                    updates_run_context(
+                        current,
+                        &client,
+                        &notifier,
+                        &cache_store,
+                        &update_settings,
+                        TEST_NOW,
+                    ),
+                )
+                .unwrap_or_else(|err| {
+                    panic!(
+                        "saved {} channel should drive a manual check for a {} binary: {err}",
+                        saved_channel.as_str(),
+                        current_channel.as_str()
+                    )
+                });
+
+                assert!(
+                    rendered(&output).contains(channel_latest_line(saved_channel)),
+                    "saved {} channel produced the wrong result for a {} binary",
+                    saved_channel.as_str(),
+                    current_channel.as_str()
+                );
+                assert_eq!(
+                    client.requests(),
+                    vec![(
+                        channel_endpoint(saved_channel).to_string(),
+                        format!("lg-buddy/{current_version}")
+                    )],
+                    "saved {} channel used the wrong endpoint for a {} binary",
+                    saved_channel.as_str(),
+                    current_channel.as_str()
+                );
+                assert!(notifier.notifications().is_empty());
+                assert_eq!(
+                    cache_store
+                        .cache()
+                        .entry(saved_channel)
+                        .expect("selected channel should have a cache entry")
+                        .latest
+                        .channel,
+                    saved_channel
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn saved_channel_drives_background_checks_for_every_binary_identity() {
+        for saved_channel in [UpdateChannel::Stable, UpdateChannel::Prerelease] {
+            let update_settings = stored_update_settings("enabled", saved_channel);
+
+            for current in binary_identities() {
+                let current_version = current.version();
+                let current_channel = current.channel();
+                let client =
+                    MockGitHubReleasesClient::new(vec![Ok(channel_response(saved_channel))]);
+                let notifier = RecordingNotifier::default();
+                let cache_store = MemoryUpdateCacheStore::default();
+                let mut output = Vec::new();
+
+                run_updates_command_with_update_settings(
+                    background_check(),
+                    &mut output,
+                    updates_run_context(
+                        current,
+                        &client,
+                        &notifier,
+                        &cache_store,
+                        &update_settings,
+                        TEST_NOW,
+                    ),
+                )
+                .unwrap_or_else(|err| {
+                    panic!(
+                        "saved {} channel should drive a background check for a {} binary: {err}",
+                        saved_channel.as_str(),
+                        current_channel.as_str()
+                    )
+                });
+
+                assert!(
+                    rendered(&output).contains(channel_latest_line(saved_channel)),
+                    "saved {} channel produced the wrong result for a {} binary",
+                    saved_channel.as_str(),
+                    current_channel.as_str()
+                );
+                assert!(rendered(&output).contains("notification: sent (new release)"));
+                assert_eq!(
+                    client.requests(),
+                    vec![(
+                        channel_endpoint(saved_channel).to_string(),
+                        format!("lg-buddy/{current_version}")
+                    )],
+                    "saved {} channel used the wrong endpoint for a {} binary",
+                    saved_channel.as_str(),
+                    current_channel.as_str()
+                );
+                let notifications = notifier.notifications();
+                assert_eq!(notifications.len(), 1);
+                let notification = notifications[0].to_dbus_fields();
+                assert_eq!(notification.0, saved_channel.as_str());
+                assert_eq!(notification.4, saved_channel.as_str());
+                assert_eq!(
+                    cache_store
+                        .cache()
+                        .entry(saved_channel)
+                        .expect("selected channel should have a cache entry")
+                        .last_notification
+                        .as_ref()
+                        .expect("background check should record its notification")
+                        .release
+                        .channel,
+                    saved_channel
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_saved_channel_fails_active_checks_before_github_or_cache_work() {
+        let store = SettingsStore::from_reader(ConfigEnvReader::parse(
+            "/tmp/config.env",
+            "updates_auto_check=enabled\nupdates_channel=bogus\n",
+        ));
+        let update_settings = EnvUpdateSettings { store };
+
+        for command in [check(), background_check()] {
+            let client = MockGitHubReleasesClient::new_responses(vec![]);
+            let notifier = RecordingNotifier::default();
+            let cache_store = MemoryUpdateCacheStore::default();
+            let mut output = Vec::new();
+
+            let err = run_updates_command_with_update_settings(
+                command,
+                &mut output,
+                updates_run_context(
+                    version_info("1.1.0", ReleaseChannel::Stable),
+                    &client,
+                    &notifier,
+                    &cache_store,
+                    &update_settings,
+                    TEST_NOW,
+                ),
+            )
+            .expect_err("an active check should reject an invalid saved channel");
+
+            assert!(matches!(
+                &err,
+                UpdatesError::Settings(SettingsError::InvalidValue { key, value, .. })
+                    if key == "updates.channel" && value == "bogus"
+            ));
+            assert!(client.requests_with_etags().is_empty());
+            assert!(notifier.notifications().is_empty());
+            assert_eq!(cache_store.load_count(), 0);
+            assert_eq!(cache_store.cache(), UpdateCheckCache::default());
+            assert!(rendered(&output).is_empty());
+        }
     }
 
     #[test]
@@ -2739,7 +2881,7 @@ mod tests {
         let mut output = Vec::new();
 
         run_updates_command_with(
-            check(None),
+            check(),
             &mut output,
             version_info("1.1.0", ReleaseChannel::Stable),
             &client,
@@ -2761,7 +2903,7 @@ mod tests {
         let mut output = Vec::new();
 
         run_updates_command_with(
-            check_notify(Some(UpdateChannel::Stable)),
+            check_notify(),
             &mut output,
             version_info("1.1.0", ReleaseChannel::Stable),
             &client,
@@ -2815,7 +2957,7 @@ mod tests {
         let mut second_output = Vec::new();
 
         run_updates_command_with(
-            check_notify(Some(UpdateChannel::Stable)),
+            check_notify(),
             &mut first_output,
             version_info("1.1.0", ReleaseChannel::Stable),
             &client,
@@ -2825,7 +2967,7 @@ mod tests {
         )
         .expect("initial notifying update check should succeed");
         run_updates_command_with(
-            check_notify(Some(UpdateChannel::Stable)),
+            check_notify(),
             &mut second_output,
             version_info("1.1.0", ReleaseChannel::Stable),
             &client,
@@ -2875,7 +3017,7 @@ mod tests {
         let mut second_output = Vec::new();
 
         run_updates_command_with(
-            check_notify(Some(UpdateChannel::Stable)),
+            check_notify(),
             &mut first_output,
             version_info("1.1.0", ReleaseChannel::Stable),
             &client,
@@ -2885,7 +3027,7 @@ mod tests {
         )
         .expect("initial notifying update check should succeed");
         run_updates_command_with(
-            check_notify(Some(UpdateChannel::Stable)),
+            check_notify(),
             &mut second_output,
             version_info("1.1.0", ReleaseChannel::Stable),
             &client,
@@ -2920,7 +3062,7 @@ mod tests {
         let mut output = Vec::new();
 
         run_updates_command_with(
-            check_notify(Some(UpdateChannel::Stable)),
+            check_notify(),
             &mut output,
             version_info("1.1.0", ReleaseChannel::Stable),
             &client,
@@ -2943,7 +3085,7 @@ mod tests {
         let mut output = Vec::new();
 
         let err = run_updates_command_with(
-            check_notify(Some(UpdateChannel::Stable)),
+            check_notify(),
             &mut output,
             version_info("1.1.0", ReleaseChannel::Stable),
             &client,
@@ -2988,7 +3130,7 @@ mod tests {
         let mut output = Vec::new();
 
         let err = run_updates_command_with(
-            check_notify(Some(UpdateChannel::Stable)),
+            check_notify(),
             &mut output,
             version_info("1.1.0", ReleaseChannel::Stable),
             &client,
@@ -3009,7 +3151,7 @@ mod tests {
             let client = MockGitHubReleasesClient::new(vec![Ok(stable_release(tag))]);
 
             let result = check_updates(
-                check(Some(UpdateChannel::Stable)),
+                UpdateChannel::Stable,
                 version_info("1.1.0", ReleaseChannel::Stable),
                 &client,
             )
@@ -3024,7 +3166,7 @@ mod tests {
         let client = MockGitHubReleasesClient::new(vec![Ok(stable_release("v1.2.0"))]);
 
         let result = check_updates(
-            check(Some(UpdateChannel::Stable)),
+            UpdateChannel::Stable,
             version_info("1.1.0", ReleaseChannel::Stable),
             &client,
         )
@@ -3053,7 +3195,7 @@ mod tests {
         ))]);
 
         let result = check_updates(
-            check(Some(UpdateChannel::Prerelease)),
+            UpdateChannel::Prerelease,
             version_info("1.2.0-beta.1", ReleaseChannel::Prerelease),
             &client,
         )
@@ -3078,7 +3220,7 @@ mod tests {
         ))]);
 
         let result = check_updates(
-            check(Some(UpdateChannel::Prerelease)),
+            UpdateChannel::Prerelease,
             version_info("1.2.0-beta.1", ReleaseChannel::Prerelease),
             &client,
         )
@@ -3098,7 +3240,7 @@ mod tests {
         let client = MockGitHubReleasesClient::new(vec![Ok(prerelease("v1.1.1-beta.1"))]);
 
         let err = check_updates(
-            check(Some(UpdateChannel::Stable)),
+            UpdateChannel::Stable,
             version_info("1.1.0", ReleaseChannel::Stable),
             &client,
         )
@@ -3121,7 +3263,7 @@ mod tests {
         })]);
 
         let err = check_updates(
-            check(Some(UpdateChannel::Stable)),
+            UpdateChannel::Stable,
             version_info("1.1.0", ReleaseChannel::Stable),
             &client,
         )
@@ -3138,7 +3280,7 @@ mod tests {
         let client = MockGitHubReleasesClient::new(vec![Ok("{".to_string())]);
 
         let err = check_updates(
-            check(Some(UpdateChannel::Stable)),
+            UpdateChannel::Stable,
             version_info("1.1.0", ReleaseChannel::Stable),
             &client,
         )
@@ -3160,7 +3302,7 @@ mod tests {
         )]);
 
         let err = check_updates(
-            check(Some(UpdateChannel::Stable)),
+            UpdateChannel::Stable,
             version_info("1.1.0", ReleaseChannel::Stable),
             &client,
         )
@@ -3184,7 +3326,7 @@ mod tests {
         ))]);
 
         let err = check_updates(
-            check(Some(UpdateChannel::Prerelease)),
+            UpdateChannel::Prerelease,
             version_info("1.1.0-beta.1", ReleaseChannel::Prerelease),
             &client,
         )
@@ -3203,7 +3345,7 @@ mod tests {
         let client = MockGitHubReleasesClient::new(vec![]);
 
         let err = check_updates(
-            check(Some(UpdateChannel::Stable)),
+            UpdateChannel::Stable,
             version_info("not-semver", ReleaseChannel::Dev),
             &client,
         )

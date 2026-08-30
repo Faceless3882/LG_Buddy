@@ -228,13 +228,15 @@ Check for updates manually:
 
 ```bash
 lg-buddy updates check
-lg-buddy updates check --channel prerelease
 lg-buddy updates check --notify
+lg-buddy settings set updates.channel prerelease
+lg-buddy updates check
 ```
 
-Stable builds check stable releases by default. Prerelease builds check both
-prerelease and stable releases. `--channel` overrides that choice for one
-command.
+The saved `updates.channel` setting controls every check, regardless of the
+installed binary's own release channel. `stable` checks stable releases only;
+`prerelease` considers both stable and prerelease releases and selects the
+highest semantic version.
 
 `--notify` sends a desktop notification through the running user service. When
 supported by the desktop, the notification includes actions to open the release

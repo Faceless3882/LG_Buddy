@@ -36,7 +36,7 @@ pub(super) const CHANNEL: SettingDefinition = SettingDefinition {
     mutability: SettingMutability::ReadWrite,
     operations: READ_WRITE_OPERATIONS,
     apply_strategy: ApplyStrategy::RuntimePolicyOnly,
-    description: "Release channel used by automatic background update checks.",
+    description: "Release channel used by all update operations.",
 };
 
 pub(super) fn apply_check_timer<C: ServiceController>(

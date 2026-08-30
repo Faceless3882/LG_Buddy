@@ -310,7 +310,7 @@ mod tests {
                 "screen.restore_policy | storage=screen_restore_policy | fallbacks=(none) | type=enum values=conservative,aggressive aliases=marker_only->conservative | default=conservative | mutability=read-write | ops=get,describe,set,unset | apply=restart-user-screen-service | description=Screen restore policy after LG Buddy blanks the configured screen.",
                 "system.sleep_wake_policy | storage=system_sleep_wake_policy | fallbacks=(none) | type=enum values=enabled,disabled aliases=(none) | default=enabled | mutability=read-write | ops=get,describe,set,unset | apply=runtime-policy-only | description=System sleep and wake policy for lifecycle hooks.",
                 "updates.auto_check | storage=updates_auto_check | fallbacks=(none) | type=enum values=enabled,disabled aliases=(none) | default=enabled | mutability=read-write | ops=get,describe,set,unset | apply=manage-update-check-timer | description=Automatic background update checks and update notifications.",
-                "updates.channel | storage=updates_channel | fallbacks=(none) | type=enum values=stable,prerelease aliases=(none) | default=stable | mutability=read-write | ops=get,describe,set,unset | apply=runtime-policy-only | description=Release channel used by automatic background update checks.",
+                "updates.channel | storage=updates_channel | fallbacks=(none) | type=enum values=stable,prerelease aliases=(none) | default=stable | mutability=read-write | ops=get,describe,set,unset | apply=runtime-policy-only | description=Release channel used by all update operations.",
             ]
         );
     }
@@ -566,7 +566,7 @@ updates.channel
   supported operations: get, describe, set, unset
   allowed values: stable, prerelease
   apply: runtime-policy-only
-  description: Release channel used by automatic background update checks.
+  description: Release channel used by all update operations.
 "
         );
     }
