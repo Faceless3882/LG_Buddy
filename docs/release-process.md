@@ -13,9 +13,12 @@ same-repository `dev` branch and whose base is `main` or `prerelease`.
 
 ## Promotion contract
 
-The promotion PR is the review and approval surface. Do not merge it with
-GitHub's merge, squash, or rebase buttons: those methods would create a commit
-different from the reviewed `dev` commit.
+The promotion PR is the review and approval surface. The release-channel
+ruleset blocks GitHub's merge, squash, and rebase buttons from updating the
+branch because those methods would create a commit different from the reviewed
+`dev` commit; only the promotion App may perform the final fast-forward.
+Repository-wide automatic head-branch deletion stays disabled so GitHub cannot
+remove the persistent `dev` branch when a promotion PR becomes merged.
 
 Required promotion checks prove that:
 
