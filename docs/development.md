@@ -47,7 +47,7 @@ cargo build --release -p lg-buddy
 Official release builds inject version identity into the binary:
 
 ```bash
-LG_BUDDY_RELEASE_VERSION=1.3.0 LG_BUDDY_BUILD_COMMIT="$(git rev-parse HEAD)" cargo build --release -p lg-buddy
+LG_BUDDY_RELEASE_VERSION=X.Y.Z LG_BUDDY_BUILD_COMMIT="$(git rev-parse HEAD)" cargo build --release -p lg-buddy
 ```
 
 Without those environment variables, `lg-buddy --version` reports the Cargo
@@ -85,6 +85,7 @@ cargo test -p lg-buddy --lib
 cargo test -p lg-buddy --test cucumber
 cargo clippy -p lg-buddy --all-targets --all-features -- -D warnings
 bash -n install.sh uninstall.sh configure.sh bin/LG_Buddy_Common scripts/build-release-bundle.sh scripts/test-release-bundle.sh scripts/publish-release-assets.sh
+python3 scripts/test_release_promotion.py
 ```
 
 Optional hardware smoke for gamepad activity:
@@ -136,7 +137,9 @@ Dry-run the GitHub release publish step with:
 GH_RELEASE_DRY_RUN=1 ./scripts/publish-release-assets.sh --dist-dir ./dist --tag v0.0.0-dev
 ```
 
-For the tagged GitHub release process, see [release-process.md](release-process.md).
+Official releases are created only through a reviewed `dev` promotion PR. For
+the branch contract and recovery process, see
+[release-process.md](release-process.md).
 
 ## Repository Layout
 
@@ -167,8 +170,10 @@ For the tagged GitHub release process, see [release-process.md](release-process.
 | `scripts/build-release-bundle.sh` | Release bundle builder |
 | `scripts/test-release-bundle.sh` | Release bundle smoke test |
 | `scripts/publish-release-assets.sh` | GitHub release publish helper |
+| `scripts/release_promotion.py` | Promotion version, ancestry, and tag validator |
 | `.github/workflows/ci.yml` | CI validation workflow |
-| `.github/workflows/release.yml` | Tagged GitHub release workflow |
+| `.github/workflows/promotion-check.yml` | Trusted promotion PR contract check |
+| `.github/workflows/release.yml` | Approved promotion build, publication, and ref finalizer |
 | `bin/LG_Buddy_Common` | Shared shell config helper used by setup scripts |
 | `systemd/` | Installed unit files and tmpfiles config, including the logind lifecycle service |
 | `docs/architecture-overview.md` | Runtime architecture |

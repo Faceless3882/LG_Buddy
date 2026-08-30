@@ -1,48 +1,85 @@
 # Release Process
 
-LG Buddy release automation is triggered by pushing a version tag that starts
-with `v` followed by a digit, such as `v1.0.0` or `v1.0.0-beta.1`.
+LG Buddy uses three persistent branches as source channels:
 
-## What the release workflow does
+- `main` points to the current stable release.
+- `prerelease` is equal to `main` or ahead of it and points to the current
+  prerelease when ahead.
+- `dev` is the ordinary integration branch and may contain unreleased work.
 
-1. Runs the release validation suite:
-   - `cargo test -p lg-buddy`
-   - `cargo clippy -p lg-buddy --all-targets --all-features -- -D warnings`
-   - `bash -n install.sh uninstall.sh configure.sh bin/LG_Buddy_Common scripts/build-release-bundle.sh scripts/test-release-bundle.sh scripts/publish-release-assets.sh`
-2. Builds a static Linux binary for `x86_64-unknown-linux-musl`.
-3. Packages a release bundle that contains:
-   - `lg-buddy`
-   - `install.sh`
-   - `configure.sh`
-   - `uninstall.sh`
-   - `bin/LG_Buddy_Common`
-   - `systemd/`
-   - `docs/`
-   - `README.md`
-   - `LICENSE`
-4. Smoke tests the generated release bundle by unpacking it, running a non-interactive install into a temporary root, checking both TV platform modes and the lifecycle service plus NetworkManager pre-down hook topology, and then uninstalling from that temporary install.
-5. Generates and verifies `sha256sums.txt` for the release archive.
-6. Publishes the release assets through `scripts/publish-release-assets.sh`.
+The intended ancestry is `main <= prerelease <= dev`. Ordinary changes merge
+into `dev`. An official release requires a promotion PR whose head is the exact
+same-repository `dev` branch and whose base is `main` or `prerelease`.
 
-`install.sh` is only an installer. It does not build the runtime.
+## Promotion contract
 
-The tagged commit should already have passed normal branch CI. Branch CI also
-runs the privileged root-ownership tests; the tag workflow does not repeat
-those two checks.
+The promotion PR is the review and approval surface. Do not merge it with
+GitHub's merge, squash, or rebase buttons: those methods would create a commit
+different from the reviewed `dev` commit.
+
+Required promotion checks prove that:
+
+- the PR is `dev -> main` or `dev -> prerelease`
+- `Cargo.toml` and `Cargo.lock` declare the same `lg-buddy` version
+- a stable target has a stable SemVer and a prerelease target has a prerelease
+  SemVer
+- the version advances both existing release-channel heads
+- the persistent branches have not diverged or moved since review
+- the derived `v<crate-version>` tag is absent or already points to the same
+  commit during an idempotent retry
+- normal CI and the release-bundle smoke test pass
+
+The tag, binary, archive, and GitHub release all use the Cargo package version.
+There is no separate version input.
 
 ## Creating a release
 
-1. Make sure the branch you want to release has passed CI.
-2. Create a tag such as `v1.3.0`.
-3. Push the tag.
-4. After the workflow publishes the release, verify the archive against
-   `sha256sums.txt` and replace the generated generic description with concise
-   release-specific notes.
+1. Prepare the exact release version in `Cargo.toml` and `Cargo.lock` on `dev`.
+2. Open a PR from `dev` to `prerelease` or `main`.
+3. Wait for `verify`, `bundle-smoke-test`, and `validate-promotion` to pass.
+4. After review, a repository administrator applies the `release:promote`
+   label.
+5. The serialized release workflow rebuilds and smoke-tests the exact reviewed
+   commit without write credentials.
+6. A separate finalization job obtains a short-lived token from the dedicated
+   repository-only GitHub App, publishes the immutable tag and release, verifies
+   the published checksums, and only then fast-forwards the channel branch.
 
-```bash
-git tag v1.3.0
-git push origin v1.3.0
-```
+Stable finalization advances `prerelease` before `main`, preserving
+`main <= prerelease` even if the second ref update needs to be retried.
+Prerelease finalization advances only `prerelease`; `dev` already points to the
+reviewed commit in both cases.
+
+Do not push version tags manually. Protected `v*` tags and release-channel
+branches permit bypass only to the dedicated promotion App. Failed finalization
+can be rerun safely, but an existing tag or asset is accepted only when it is
+byte-for-byte consistent with the same reviewed commit.
+
+## What the release workflow validates
+
+The workflow:
+
+1. Revalidates the live PR, refs, required checks, Cargo version, and tag state.
+2. Builds a static `x86_64-unknown-linux-musl` binary with exact version and
+   commit identity.
+3. Packages and installs the release bundle in an isolated smoke-test root.
+4. Verifies the built and installed binary's exact version, channel, and commit.
+5. Generates and verifies `sha256sums.txt`.
+6. Publishes the tag and GitHub release without replacing conflicting assets.
+7. Downloads the published assets and verifies their checksums independently.
+8. Fast-forwards the selected branch only after publication succeeds.
+
+`install.sh` is only an installer. It does not build the runtime.
+
+## Nix source selection
+
+Nix configurations may select `main`, `prerelease`, or `dev` as the upstream
+source according to the desired stability. The Nix lock file must continue to
+pin an exact commit: the branch selects the update stream, not an implicitly
+moving deployment.
+
+This source selection is separate from LG Buddy's runtime `updates.channel`
+setting, which controls GitHub release discovery for installed release bundles.
 
 ## Installing from a release bundle
 

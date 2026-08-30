@@ -3,12 +3,13 @@
 set -euo pipefail
 
 usage() {
-    echo "Usage: $0 [--dist-dir <dir>] [--tag <release-tag>]"
+    echo "Usage: $0 [--dist-dir <dir>] [--tag <release-tag>] [--commit <release-commit>]"
     exit 1
 }
 
 DIST_DIR="dist"
 TAG="${GITHUB_REF_NAME:-}"
+EXPECTED_COMMIT=""
 DRY_RUN="${GH_RELEASE_DRY_RUN:-0}"
 
 while [ "$#" -gt 0 ]; do
@@ -19,6 +20,10 @@ while [ "$#" -gt 0 ]; do
             ;;
         --tag)
             TAG="${2:-}"
+            shift 2
+            ;;
+        --commit)
+            EXPECTED_COMMIT="${2:-}"
             shift 2
             ;;
         *)
@@ -82,8 +87,49 @@ if [ "$DRY_RUN" = "1" ]; then
     exit 0
 fi
 
-if gh release view "$TAG" >/dev/null 2>&1; then
-    gh release upload "$TAG" "${ARCHIVES[@]}" "$CHECKSUM_FILE" --clobber
-else
-    gh release create "$TAG" "${ARCHIVES[@]}" "$CHECKSUM_FILE" --title "$TITLE" --notes "$NOTES" "${RELEASE_FLAGS[@]}"
+[ -n "$EXPECTED_COMMIT" ] || {
+    echo "Release commit must be provided via --commit."
+    exit 1
+}
+
+TAG_COMMIT="$(git rev-list -n 1 "$TAG" 2>/dev/null || true)"
+[ "$TAG_COMMIT" = "$EXPECTED_COMMIT" ] || {
+    echo "Release tag $TAG points to ${TAG_COMMIT:-nothing}, expected $EXPECTED_COMMIT."
+    exit 1
+}
+
+EXPECTED_PRERELEASE="false"
+if [ "${#RELEASE_FLAGS[@]}" -gt 0 ]; then
+    EXPECTED_PRERELEASE="true"
 fi
+
+if gh release view "$TAG" >/dev/null 2>&1; then
+    RELEASE_STATE="$(gh release view "$TAG" --json isDraft,isPrerelease)"
+    [ "$(printf '%s' "$RELEASE_STATE" | jq -r .isDraft)" = "false" ] || {
+        echo "Existing release $TAG is still a draft."
+        exit 1
+    }
+    [ "$(printf '%s' "$RELEASE_STATE" | jq -r .isPrerelease)" = "$EXPECTED_PRERELEASE" ] || {
+        echo "Existing release $TAG has the wrong prerelease classification."
+        exit 1
+    }
+else
+    gh release create "$TAG" --verify-tag --title "$TITLE" --notes "$NOTES" "${RELEASE_FLAGS[@]}"
+fi
+
+
+for asset in "${ARCHIVES[@]}" "$CHECKSUM_FILE"; do
+    asset_name="$(basename "$asset")"
+    if gh release view "$TAG" --json assets --jq '.assets[].name' | grep -F -x -q "$asset_name"; then
+        compare_dir="$(mktemp -d)"
+        gh release download "$TAG" --pattern "$asset_name" --dir "$compare_dir"
+        if ! cmp -s "$asset" "$compare_dir/$asset_name"; then
+            echo "Existing release asset differs from the candidate: $asset_name"
+            rm -rf "$compare_dir"
+            exit 1
+        fi
+        rm -rf "$compare_dir"
+    else
+        gh release upload "$TAG" "$asset"
+    fi
+done

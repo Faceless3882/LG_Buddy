@@ -1,47 +1,119 @@
-name: Release
+name: Release promotion
 
 on:
-  push:
-    tags:
-      - "v[0-9]*"
+  pull_request_target:
+    branches:
+      - main
+      - prerelease
+    types:
+      - labeled
 
 permissions:
-  contents: write
+  actions: read
+  checks: read
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: release-promotion
+  cancel-in-progress: false
 
 jobs:
-  verify:
+  authorize:
+    if: github.event.label.name == 'release:promote'
     runs-on: ubuntu-latest
+    outputs:
+      base_ref: ${{ steps.authorize.outputs.base_ref }}
+      base_sha: ${{ steps.authorize.outputs.base_sha }}
+      head_sha: ${{ steps.authorize.outputs.head_sha }}
+      pr_number: ${{ steps.authorize.outputs.pr_number }}
 
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
+      - name: Authorize promotion request
+        id: authorize
+        env:
+          ACTOR: ${{ github.actor }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          GH_TOKEN: ${{ github.token }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          IS_DRAFT: ${{ github.event.pull_request.draft }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          [ "$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$ACTOR/permission" --jq .permission)" = "admin" ] || {
+              echo "Only a repository administrator may request release promotion."
+              exit 1
+          }
+          [ "$HEAD_REPOSITORY" = "$GITHUB_REPOSITORY" ]
+          [ "$HEAD_REF" = "dev" ]
+          [ "$IS_DRAFT" = "false" ]
+          case "$BASE_REF" in
+              main|prerelease) ;;
+              *) exit 1 ;;
+          esac
+          gh pr checks "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --required
+          {
+              echo "base_ref=$BASE_REF"
+              echo "base_sha=$BASE_SHA"
+              echo "head_sha=$HEAD_SHA"
+              echo "pr_number=$PR_NUMBER"
+          } >> "$GITHUB_OUTPUT"
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+  validate:
+    runs-on: ubuntu-latest
+    needs: authorize
+    outputs:
+      channel: ${{ steps.contract.outputs.channel }}
+      head_sha: ${{ steps.contract.outputs.head_sha }}
+      main_sha: ${{ steps.contract.outputs.main_sha }}
+      prerelease_sha: ${{ steps.contract.outputs.prerelease_sha }}
+      tag: ${{ steps.contract.outputs.tag }}
+      version: ${{ steps.contract.outputs.version }}
+
+    steps:
+      - name: Check out trusted promotion validator
+        uses: actions/checkout@v4
         with:
-          components: clippy
+          ref: ${{ needs.authorize.outputs.base_sha }}
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.x"
 
-      - name: Run Rust test suite
-        run: cargo test -p lg-buddy
+      - name: Fetch channel refs and release tags
+        run: |
+          git fetch --force origin \
+              +refs/heads/main:refs/remotes/origin/main \
+              +refs/heads/prerelease:refs/remotes/origin/prerelease \
+              +refs/heads/dev:refs/remotes/origin/dev \
+              +refs/tags/*:refs/tags/*
 
-      - name: Run clippy
-        run: cargo clippy -p lg-buddy --all-targets --all-features -- -D warnings
-
-      - name: Validate shell scripts
-        run: bash -n install.sh uninstall.sh configure.sh bin/LG_Buddy_Common scripts/build-release-bundle.sh scripts/test-release-bundle.sh scripts/publish-release-assets.sh
+      - name: Validate promotion contract
+        id: contract
+        run: |
+          python3 scripts/release_promotion.py \
+              --target "${{ needs.authorize.outputs.base_ref }}" \
+              --head-ref "${{ needs.authorize.outputs.head_sha }}" \
+              --base-sha "${{ needs.authorize.outputs.base_sha }}" \
+              --github-output "$GITHUB_OUTPUT"
 
   build-release-bundle:
     runs-on: ubuntu-latest
-    needs: verify
+    needs:
+      - authorize
+      - validate
 
     steps:
-      - name: Check out repository
+      - name: Check out exact reviewed dev commit
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.head_sha }}
+          persist-credentials: false
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -56,34 +128,23 @@ jobs:
       - name: Install release prerequisites
         run: sudo apt-get update && sudo apt-get install -y musl-tools zenity
 
-      - name: Validate release tag
-        run: |
-          case "$GITHUB_REF_NAME" in
-              v[0-9]*) ;;
-              *)
-                  echo "Release tag must start with v followed by a digit, for example v1.0.0."
-                  exit 1
-                  ;;
-          esac
-
-          version="${GITHUB_REF_NAME#v}"
-          if [ -z "$version" ]; then
-              echo "Release tag must include a version after v."
-              exit 1
-          fi
-
-          echo "LG_BUDDY_RELEASE_VERSION=$version" >> "$GITHUB_ENV"
-
       - name: Build lg-buddy
         env:
-          LG_BUDDY_BUILD_COMMIT: ${{ github.sha }}
-        run: LG_BUDDY_RELEASE_VERSION="$LG_BUDDY_RELEASE_VERSION" cargo build --release -p lg-buddy --target x86_64-unknown-linux-musl
+          LG_BUDDY_BUILD_COMMIT: ${{ needs.validate.outputs.head_sha }}
+          LG_BUDDY_RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+        run: cargo build --release -p lg-buddy --target x86_64-unknown-linux-musl
 
       - name: Create release bundle
-        run: ./scripts/build-release-bundle.sh --target x86_64-unknown-linux-musl --version "$LG_BUDDY_RELEASE_VERSION" --output-dir dist
+        run: ./scripts/build-release-bundle.sh --target x86_64-unknown-linux-musl --version "${{ needs.validate.outputs.version }}" --output-dir dist
 
       - name: Smoke test release bundle
-        run: ./scripts/test-release-bundle.sh --skip-pip-install --archive "dist/lg-buddy-${LG_BUDDY_RELEASE_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+        run: |
+          ./scripts/test-release-bundle.sh \
+              --skip-pip-install \
+              --archive "dist/lg-buddy-${{ needs.validate.outputs.version }}-x86_64-unknown-linux-musl.tar.gz" \
+              --expected-version "${{ needs.validate.outputs.version }}" \
+              --expected-channel "${{ needs.validate.outputs.channel }}" \
+              --expected-commit "${{ needs.validate.outputs.head_sha }}"
 
       - name: Generate checksums
         run: |
@@ -98,12 +159,127 @@ jobs:
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: lg-buddy-release-bundle
+          name: lg-buddy-release-${{ needs.validate.outputs.tag }}
           path: |
             dist/*.tar.gz
             dist/sha256sums.txt
+          if-no-files-found: error
+          retention-days: 7
 
-      - name: Publish GitHub release assets
+  finalize:
+    runs-on: ubuntu-latest
+    environment: release-promotion
+    needs:
+      - authorize
+      - validate
+      - build-release-bundle
+
+    steps:
+      - name: Check out trusted finalizer
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.authorize.outputs.base_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Fetch and revalidate current refs
+        id: recheck
+        run: |
+          git fetch --force origin \
+              +refs/heads/main:refs/remotes/origin/main \
+              +refs/heads/prerelease:refs/remotes/origin/prerelease \
+              +refs/heads/dev:refs/remotes/origin/dev \
+              +refs/tags/*:refs/tags/*
+          python3 scripts/release_promotion.py \
+              --target "${{ needs.authorize.outputs.base_ref }}" \
+              --head-ref "${{ needs.authorize.outputs.head_sha }}" \
+              --base-sha "${{ needs.authorize.outputs.base_sha }}" \
+              --github-output "$GITHUB_OUTPUT"
+          [ "$(git rev-parse refs/remotes/origin/dev)" = "${{ needs.validate.outputs.head_sha }}" ]
+
+      - name: Revalidate required PR checks
         env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: ./scripts/publish-release-assets.sh --dist-dir dist
+          GH_TOKEN: ${{ github.token }}
+        run: gh pr checks "${{ needs.authorize.outputs.pr_number }}" --repo "$GITHUB_REPOSITORY" --required
+
+      - name: Create repository-scoped promotion token
+        id: promotion-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
+        with:
+          app-id: ${{ vars.RELEASE_PROMOTION_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PROMOTION_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: LG_Buddy
+          permission-contents: write
+
+      - name: Download verified release bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: lg-buddy-release-${{ needs.validate.outputs.tag }}
+          path: dist
+
+      - name: Verify downloaded checksums
+        run: cd dist && sha256sum -c sha256sums.txt
+
+      - name: Publish release and advance channel refs
+        env:
+          BASE_REF: ${{ needs.authorize.outputs.base_ref }}
+          EXPECTED_MAIN_SHA: ${{ needs.validate.outputs.main_sha }}
+          EXPECTED_PRERELEASE_SHA: ${{ needs.validate.outputs.prerelease_sha }}
+          GH_TOKEN: ${{ steps.promotion-token.outputs.token }}
+          HEAD_SHA: ${{ needs.validate.outputs.head_sha }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          remote_tag_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq .object.sha 2>/dev/null || true)"
+          if [ -z "$remote_tag_sha" ]; then
+              gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+                  -f ref="refs/tags/$RELEASE_TAG" \
+                  -f sha="$HEAD_SHA" >/dev/null
+          elif [ "$remote_tag_sha" != "$HEAD_SHA" ]; then
+              echo "Tag $RELEASE_TAG points to $remote_tag_sha, expected $HEAD_SHA."
+              exit 1
+          fi
+
+          if ! git rev-parse --verify "refs/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+              git tag "$RELEASE_TAG" "$HEAD_SHA"
+          fi
+          ./scripts/publish-release-assets.sh \
+              --dist-dir dist \
+              --tag "$RELEASE_TAG" \
+              --commit "$HEAD_SHA"
+
+          verify_dir="$(mktemp -d)"
+          gh release download "$RELEASE_TAG" --dir "$verify_dir"
+          (cd "$verify_dir" && sha256sum -c sha256sums.txt)
+
+          update_ref() {
+              local ref_name="$1"
+              local expected_sha="$2"
+              local current_sha=""
+
+              current_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$ref_name" --jq .object.sha)"
+              if [ "$current_sha" = "$HEAD_SHA" ]; then
+                  return
+              fi
+              [ "$current_sha" = "$expected_sha" ] || {
+                  echo "$ref_name moved from $expected_sha to $current_sha."
+                  exit 1
+              }
+              gh api --method PATCH "repos/$GITHUB_REPOSITORY/git/refs/heads/$ref_name" \
+                  -f sha="$HEAD_SHA" \
+                  -F force=false >/dev/null
+          }
+
+          if [ "$BASE_REF" = "main" ]; then
+              update_ref prerelease "$EXPECTED_PRERELEASE_SHA"
+              update_ref main "$EXPECTED_MAIN_SHA"
+          else
+              update_ref prerelease "$EXPECTED_PRERELEASE_SHA"
+          fi
+
+          [ "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$BASE_REF" --jq .object.sha)" = "$HEAD_SHA" ]

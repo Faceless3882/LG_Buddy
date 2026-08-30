@@ -4,6 +4,7 @@ dbus_log.txt
 
 # Python virtual environment
 .venv/
+__pycache__/
 
 # Security - sensitive files
 .env
