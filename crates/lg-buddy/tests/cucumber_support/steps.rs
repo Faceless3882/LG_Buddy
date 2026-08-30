@@ -128,6 +128,21 @@ fn tv_backlight(world: &mut LgBuddyWorld, value: u8) {
     world.tv_mut().set_backlight(u64::from(value));
 }
 
+#[given(regex = r#"the TV volume is (\d+)"#)]
+fn tv_volume(world: &mut LgBuddyWorld, value: u8) {
+    world.set_tv_volume(value);
+}
+
+#[given("the TV volume is unknown")]
+fn tv_volume_is_unknown(world: &mut LgBuddyWorld) {
+    world.set_tv_volume_unknown();
+}
+
+#[given(regex = r#"the TV is (muted|unmuted)"#)]
+fn tv_mute_state(world: &mut LgBuddyWorld, state: String) {
+    world.set_tv_muted(state == "muted");
+}
+
 #[given(regex = r#"the brightness dialog returns (\d+)"#)]
 fn brightness_dialog_returns(world: &mut LgBuddyWorld, value: u8) {
     world.install_brightness_ui_stub(Some(value));
@@ -474,6 +489,16 @@ fn tv_input_is(world: &mut LgBuddyWorld, input: String) {
 #[then(regex = r#"the TV brightness is (\d+)"#)]
 fn tv_brightness_is(world: &mut LgBuddyWorld, value: u8) {
     world.assert_tv_brightness(value);
+}
+
+#[then(regex = r#"the TV volume is (\d+)"#)]
+fn tv_volume_is(world: &mut LgBuddyWorld, value: u8) {
+    world.assert_tv_volume(value);
+}
+
+#[then(regex = r#"the TV is (muted|unmuted)"#)]
+fn tv_mute_state_is(world: &mut LgBuddyWorld, state: String) {
+    world.assert_tv_muted(state == "muted");
 }
 
 #[then("the TV is powered off")]

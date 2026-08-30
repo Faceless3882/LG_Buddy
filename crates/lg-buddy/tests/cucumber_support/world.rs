@@ -645,6 +645,34 @@ exit 1\n",
         }
     }
 
+    pub fn set_tv_volume(&self, volume: u8) {
+        self.tv().set_volume(i16::from(volume));
+    }
+
+    pub fn set_tv_volume_unknown(&self) {
+        self.tv().set_volume(-1);
+    }
+
+    pub fn set_tv_muted(&self, muted: bool) {
+        self.tv().set_muted(muted);
+    }
+
+    pub fn assert_tv_volume(&self, expected: u8) {
+        if let Some(tv) = &self.webos_tv {
+            assert_eq!(tv.snapshot().volume, i16::from(expected));
+        } else {
+            assert_eq!(self.tv().state_snapshot().volume, i16::from(expected));
+        }
+    }
+
+    pub fn assert_tv_muted(&self, expected: bool) {
+        if let Some(tv) = &self.webos_tv {
+            assert_eq!(tv.snapshot().muted, expected);
+        } else {
+            assert_eq!(self.tv().state_snapshot().muted, expected);
+        }
+    }
+
     pub fn assert_tv_powered_on(&self, expected: bool) {
         if let Some(tv) = &self.webos_tv {
             assert_eq!(tv.snapshot().power_on, expected);

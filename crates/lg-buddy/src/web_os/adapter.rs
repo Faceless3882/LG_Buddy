@@ -1,11 +1,14 @@
 use super::{
-    WebOsAuthenticatedClientError, WebOsBacklightBrightness, WebOsBacklightBrightnessError,
-    WebOsClient, WebOsClientError, WebOsControlError, WebOsEndpoint, WebOsForegroundAppError,
-    WebOsPowerState, WebOsPowerStateError, WebOsScreenControlError,
-    WebOsSetBacklightBrightnessError,
+    WebOsAudioStatusError, WebOsAudioVolume, WebOsAuthenticatedClientError,
+    WebOsBacklightBrightness, WebOsBacklightBrightnessError, WebOsClient, WebOsClientError,
+    WebOsControlError, WebOsEndpoint, WebOsForegroundAppError, WebOsPowerState,
+    WebOsPowerStateError, WebOsScreenControlError, WebOsSetBacklightBrightnessError,
 };
 use crate::platform_access_token::{PlatformAccessTokenAcquisitionError, PlatformAccessTokenStore};
-use crate::tv::{CurrentInput, OledBrightness, TvClient, TvError, TvErrorKind, TvOperation};
+use crate::tv::{
+    AudioStatus, CurrentInput, CurrentVolume, OledBrightness, TvClient, TvError, TvErrorKind,
+    TvOperation, VolumeLevel,
+};
 use std::fmt;
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
@@ -276,6 +279,27 @@ impl TvClient for WebOsTvClient {
         })
     }
 
+    fn audio_status(&self) -> Result<AudioStatus, TvError> {
+        self.with_session(TvOperation::ReadAudioStatus, |client| {
+            let status = client.audio_status().map_err(audio_status_failure)?;
+            let volume = match status.volume() {
+                WebOsAudioVolume::Known(value) => {
+                    let volume = VolumeLevel::new(value).map_err(|error| {
+                        WebOsAdapterFailure::new(
+                            TvErrorKind::InvalidResponse,
+                            format!("native webOS returned invalid volume: {error}"),
+                            false,
+                        )
+                    })?;
+                    CurrentVolume::Level(volume)
+                }
+                WebOsAudioVolume::Unknown => CurrentVolume::Unknown,
+            };
+
+            Ok(AudioStatus::new(volume, status.is_muted()))
+        })
+    }
+
     fn set_input(&self, input: crate::config::HdmiInput) -> Result<(), TvError> {
         let input_id = super::WebOsInputId::new(input.as_str()).map_err(|error| {
             TvError::new(
@@ -303,6 +327,32 @@ impl TvClient for WebOsTvClient {
             client
                 .set_backlight_brightness(webos_brightness)
                 .map_err(set_backlight_brightness_failure)
+        })
+    }
+
+    fn set_volume(&self, volume: VolumeLevel) -> Result<(), TvError> {
+        self.with_session(TvOperation::SetVolume, |client| {
+            client
+                .set_volume(volume.as_percent())
+                .map_err(control_failure)
+        })
+    }
+
+    fn volume_up(&self) -> Result<(), TvError> {
+        self.with_session(TvOperation::VolumeUp, |client| {
+            client.volume_up().map_err(control_failure)
+        })
+    }
+
+    fn volume_down(&self) -> Result<(), TvError> {
+        self.with_session(TvOperation::VolumeDown, |client| {
+            client.volume_down().map_err(control_failure)
+        })
+    }
+
+    fn set_muted(&self, muted: bool) -> Result<(), TvError> {
+        self.with_session(TvOperation::SetMuted, |client| {
+            client.set_muted(muted).map_err(control_failure)
         })
     }
 
@@ -500,6 +550,26 @@ fn power_state_failure(error: WebOsPowerStateError) -> WebOsAdapterFailure {
     }
 }
 
+fn audio_status_failure(error: WebOsAudioStatusError) -> WebOsAdapterFailure {
+    let detail = error.to_string();
+    match error {
+        WebOsAudioStatusError::Request { source } => client_failure_with_detail(source, detail),
+        WebOsAudioStatusError::RequestRejected { .. } => {
+            WebOsAdapterFailure::new(TvErrorKind::Rejected, detail, false)
+        }
+        WebOsAudioStatusError::MissingPayload
+        | WebOsAudioStatusError::InvalidPayload
+        | WebOsAudioStatusError::MissingReturnValue
+        | WebOsAudioStatusError::InvalidReturnValue
+        | WebOsAudioStatusError::MissingVolume
+        | WebOsAudioStatusError::InvalidVolume { .. }
+        | WebOsAudioStatusError::MissingMute
+        | WebOsAudioStatusError::InvalidMute => {
+            WebOsAdapterFailure::new(TvErrorKind::InvalidResponse, detail, false)
+        }
+    }
+}
+
 fn control_failure(error: WebOsControlError) -> WebOsAdapterFailure {
     let detail = error.to_string();
     match error {
@@ -599,7 +669,10 @@ impl fmt::Debug for WebOsTvClient {
 mod tests {
     use super::{WebOsPairingPolicy, WebOsTvClient};
     use crate::config::HdmiInput;
-    use crate::tv::{CurrentInput, OledBrightness, SelectedTvClient, TvClient, TvErrorKind};
+    use crate::tv::{
+        CurrentInput, CurrentVolume, OledBrightness, SelectedTvClient, TvClient, TvErrorKind,
+        VolumeLevel,
+    };
     use crate::web_os::test_support::{
         TestAccessTokenStore, WebOsTestInput, WebOsTestScenario, WebOsTestServer, WebOsTestVersion,
     };
@@ -763,6 +836,18 @@ mod tests {
                 .as_percent(),
             42
         );
+        let status = client.audio_status().expect("read audio status");
+        assert_eq!(status.volume(), CurrentVolume::Level(volume(20)));
+        assert!(!status.is_muted());
+        client.set_muted(true).expect("mute audio");
+        client.set_volume(volume(19)).expect("set volume");
+        let status = client.audio_status().expect("read updated audio status");
+        assert_eq!(status.volume(), CurrentVolume::Level(volume(19)));
+        assert!(status.is_muted());
+        client.set_muted(false).expect("unmute audio");
+        client.volume_up().expect("increase volume");
+        client.volume_down().expect("decrease volume");
+        assert_eq!(server.snapshot().volume, 19);
         client.blank_screen().expect("blank screen");
         assert_eq!(server.snapshot().power_state, WebOsPowerState::ScreenOff);
         client.unblank_screen().expect("unblank screen");
@@ -893,5 +978,9 @@ mod tests {
 
     fn brightness(value: u8) -> OledBrightness {
         OledBrightness::new(value).expect("valid test brightness")
+    }
+
+    fn volume(value: u8) -> VolumeLevel {
+        VolumeLevel::new(value).expect("valid test volume")
     }
 }

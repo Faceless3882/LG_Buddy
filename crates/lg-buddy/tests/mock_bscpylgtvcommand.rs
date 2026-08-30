@@ -1,7 +1,10 @@
 mod support;
 
 use lg_buddy::config::HdmiInput;
-use lg_buddy::tv::{BscpylgtvCommandClient, CurrentInput, OledBrightness, TvClient, TvErrorKind};
+use lg_buddy::tv::{
+    BscpylgtvCommandClient, CurrentInput, CurrentVolume, OledBrightness, TvClient, TvErrorKind,
+    VolumeLevel,
+};
 use std::net::Ipv4Addr;
 use support::MockBscpylgtv;
 
@@ -88,6 +91,60 @@ fn mock_get_picture_settings_includes_backlight() {
         .expect("mock get_oled_brightness should succeed");
 
     assert_eq!(brightness.as_percent(), 62);
+}
+
+#[test]
+fn mock_get_audio_status_matches_real_shape_and_defaults() {
+    let mock = MockBscpylgtv::new("mock-get-audio-status");
+    let client = mock_client(&mock);
+
+    let status = client
+        .audio_status()
+        .expect("mock get_audio_status should succeed");
+
+    assert_eq!(status.volume(), CurrentVolume::Level(volume(20)));
+    assert!(!status.is_muted());
+    assert_eq!(mock.state_snapshot().volume, 20);
+    assert!(!mock.state_snapshot().muted);
+    assert_eq!(mock.calls()[0].command, "get_audio_status");
+    assert!(mock.calls()[0].args.is_empty());
+}
+
+#[test]
+fn mock_audio_controls_update_state_and_record_arguments() {
+    let mock = MockBscpylgtv::new("mock-audio-controls");
+    let client = mock_client(&mock);
+
+    client
+        .set_volume(volume(42))
+        .expect("mock set_volume should succeed");
+    client.volume_up().expect("mock volume_up should succeed");
+    client
+        .volume_down()
+        .expect("mock volume_down should succeed");
+    client
+        .set_muted(true)
+        .expect("mock set_mute true should succeed");
+    client
+        .set_muted(false)
+        .expect("mock set_mute false should succeed");
+
+    let state = mock.state_snapshot();
+    assert_eq!(state.volume, 42);
+    assert!(!state.muted);
+    assert_eq!(
+        mock.calls()
+            .into_iter()
+            .map(|call| (call.command, call.args))
+            .collect::<Vec<_>>(),
+        vec![
+            ("set_volume".to_string(), vec!["42".to_string()]),
+            ("volume_up".to_string(), Vec::<String>::new()),
+            ("volume_down".to_string(), Vec::<String>::new()),
+            ("set_mute".to_string(), vec!["true".to_string()]),
+            ("set_mute".to_string(), vec!["false".to_string()]),
+        ]
+    );
 }
 
 #[test]
@@ -179,4 +236,8 @@ fn ip(value: &str) -> Ipv4Addr {
 
 fn brightness(value: u8) -> OledBrightness {
     OledBrightness::new(value).expect("test brightness should be valid")
+}
+
+fn volume(value: u8) -> VolumeLevel {
+    VolumeLevel::new(value).expect("test volume should be valid")
 }

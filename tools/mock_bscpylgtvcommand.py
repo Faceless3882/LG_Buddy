@@ -24,6 +24,8 @@ DEFAULT_STATE = {
     "screen_on": True,
     "input": "HDMI_3",
     "backlight": 50,
+    "volume": 20,
+    "muted": False,
     "plan": {},
     "calls": [],
 }
@@ -198,6 +200,18 @@ def apply_success_defaults(state: dict[str, object], command: str, command_args:
     if command == "set_input" and len(command_args) == 1:
         state["input"] = command_args[0]
         state["screen_on"] = True
+    elif command == "set_volume" and len(command_args) == 1:
+        try:
+            state["volume"] = int(command_args[0])
+        except ValueError:
+            pass
+    elif command == "volume_up":
+        state["volume"] = min(100, int(state["volume"]) + 1)
+    elif command == "volume_down":
+        state["volume"] = max(0, int(state["volume"]) - 1)
+    elif command == "set_mute" and len(command_args) == 1:
+        if command_args[0].lower() in {"true", "false"}:
+            state["muted"] = command_args[0].lower() == "true"
 
 
 def execute_planned_step(
@@ -275,6 +289,20 @@ def main() -> int:
         save_state(state_path, state)
         return 0
 
+    if command == "get_audio_status":
+        if not state["power_on"]:
+            save_state(state_path, state)
+            return powered_off_error()
+        print(
+            {
+                "returnValue": True,
+                "volume": int(state["volume"]),
+                "mute": bool(state["muted"]),
+            }
+        )
+        save_state(state_path, state)
+        return 0
+
     if command == "set_input":
         if not state["power_on"]:
             save_state(state_path, state)
@@ -315,6 +343,54 @@ def main() -> int:
             return 2
 
         state["backlight"] = backlight
+        save_state(state_path, state)
+        return success()
+
+    if command == "set_volume":
+        if not state["power_on"]:
+            save_state(state_path, state)
+            return powered_off_error()
+        if len(args.command_args) != 1:
+            print("set_volume requires one volume argument", file=sys.stderr)
+            save_state(state_path, state)
+            return 2
+        try:
+            volume = int(args.command_args[0])
+        except ValueError:
+            print("set_volume requires an integer volume", file=sys.stderr)
+            save_state(state_path, state)
+            return 2
+        if not 0 <= volume <= 100:
+            print("set_volume requires a volume from 0 to 100", file=sys.stderr)
+            save_state(state_path, state)
+            return 2
+        state["volume"] = volume
+        save_state(state_path, state)
+        return success()
+
+    if command in {"volume_up", "volume_down"}:
+        if not state["power_on"]:
+            save_state(state_path, state)
+            return powered_off_error()
+        if command == "volume_up":
+            state["volume"] = min(100, int(state["volume"]) + 1)
+        else:
+            state["volume"] = max(0, int(state["volume"]) - 1)
+        save_state(state_path, state)
+        return success()
+
+    if command == "set_mute":
+        if not state["power_on"]:
+            save_state(state_path, state)
+            return powered_off_error()
+        if len(args.command_args) != 1 or args.command_args[0].lower() not in {
+            "true",
+            "false",
+        }:
+            print("set_mute requires true or false", file=sys.stderr)
+            save_state(state_path, state)
+            return 2
+        state["muted"] = args.command_args[0].lower() == "true"
         save_state(state_path, state)
         return success()
 

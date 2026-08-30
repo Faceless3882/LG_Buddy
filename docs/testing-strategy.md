@@ -210,7 +210,8 @@ write. These are two service-invocation paths over one websocket transport, not
 two production routes. Authentication history and pairing prompts are recorded
 for assertions. The scenarios cover opt-in and credential outcomes plus
 representative brightness, screen, input, and power operations; detailed
-transport faults remain in the native client tests.
+transport faults remain in the native client tests. Volume and mute scenarios
+exercise the same native audio endpoints characterized against local hardware.
 The process-level fixture binds `127.0.0.1:3001`, matching the production TV
 endpoint, so that port must be free while the serial Cucumber suite runs.
 

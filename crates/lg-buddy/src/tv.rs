@@ -22,6 +22,8 @@ use crate::wol::{WakeOnLanError, WakeOnLanSender};
 pub const DEFAULT_BSCPYLGTV_COMMAND_PATH: &str = "/usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand";
 pub const OLED_BRIGHTNESS_MIN: u8 = 0;
 pub const OLED_BRIGHTNESS_MAX: u8 = 100;
+pub const VOLUME_MIN: u8 = 0;
+pub const VOLUME_MAX: u8 = 100;
 const DEFAULT_WEBOS_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const DEFAULT_WEBOS_RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
 const DEFAULT_WEBOS_UNATTENDED_RESPONSE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -57,6 +59,11 @@ pub enum TvOperation {
     SetInput,
     ReadOledBrightness,
     SetOledBrightness,
+    ReadAudioStatus,
+    SetVolume,
+    VolumeUp,
+    VolumeDown,
+    SetMuted,
     PowerOff,
     BlankScreen,
     UnblankScreen,
@@ -69,6 +76,11 @@ impl TvOperation {
             Self::SetInput => "set input",
             Self::ReadOledBrightness => "read OLED brightness",
             Self::SetOledBrightness => "set OLED brightness",
+            Self::ReadAudioStatus => "read audio status",
+            Self::SetVolume => "set volume",
+            Self::VolumeUp => "increase volume",
+            Self::VolumeDown => "decrease volume",
+            Self::SetMuted => "set mute",
             Self::PowerOff => "power off",
             Self::BlankScreen => "blank screen",
             Self::UnblankScreen => "unblank screen",
@@ -212,11 +224,108 @@ impl fmt::Display for OledBrightness {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VolumeLevelParseError {
+    value: String,
+}
+
+impl VolumeLevelParseError {
+    fn new(value: impl Into<String>) -> Self {
+        Self {
+            value: value.into(),
+        }
+    }
+}
+
+impl fmt::Display for VolumeLevelParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "invalid volume `{}`; expected an integer from {} to {}",
+            self.value, VOLUME_MIN, VOLUME_MAX
+        )
+    }
+}
+
+impl Error for VolumeLevelParseError {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VolumeLevel(u8);
+
+impl VolumeLevel {
+    pub fn new(value: u8) -> Result<Self, VolumeLevelParseError> {
+        if value <= VOLUME_MAX {
+            Ok(Self(value))
+        } else {
+            Err(VolumeLevelParseError::new(value.to_string()))
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self, VolumeLevelParseError> {
+        match value.parse::<i64>() {
+            Ok(parsed) if parsed >= i64::from(VOLUME_MIN) && parsed <= i64::from(VOLUME_MAX) => {
+                Ok(Self(parsed as u8))
+            }
+            _ => Err(VolumeLevelParseError::new(value)),
+        }
+    }
+
+    pub fn as_percent(self) -> u8 {
+        self.0
+    }
+}
+
+impl fmt::Display for VolumeLevel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CurrentVolume {
+    Level(VolumeLevel),
+    Unknown,
+}
+
+impl fmt::Display for CurrentVolume {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Level(volume) => write!(f, "{volume}"),
+            Self::Unknown => write!(f, "unknown"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AudioStatus {
+    volume: CurrentVolume,
+    muted: bool,
+}
+
+impl AudioStatus {
+    pub(crate) fn new(volume: CurrentVolume, muted: bool) -> Self {
+        Self { volume, muted }
+    }
+
+    pub fn volume(self) -> CurrentVolume {
+        self.volume
+    }
+
+    pub fn is_muted(self) -> bool {
+        self.muted
+    }
+}
+
 pub trait TvClient {
     fn current_input(&self) -> Result<CurrentInput, TvError>;
     fn oled_brightness(&self) -> Result<OledBrightness, TvError>;
+    fn audio_status(&self) -> Result<AudioStatus, TvError>;
     fn set_input(&self, input: HdmiInput) -> Result<(), TvError>;
     fn set_oled_brightness(&self, brightness: OledBrightness) -> Result<(), TvError>;
+    fn set_volume(&self, volume: VolumeLevel) -> Result<(), TvError>;
+    fn volume_up(&self) -> Result<(), TvError>;
+    fn volume_down(&self) -> Result<(), TvError>;
+    fn set_muted(&self, muted: bool) -> Result<(), TvError>;
     fn power_off(&self) -> Result<(), TvError>;
     fn blank_screen(&self) -> Result<(), TvError>;
     fn unblank_screen(&self) -> Result<(), TvError>;
@@ -291,6 +400,13 @@ impl TvClient for SelectedTvClient {
         }
     }
 
+    fn audio_status(&self) -> Result<AudioStatus, TvError> {
+        match self {
+            Self::Bscpylgtv(client) => client.audio_status(),
+            Self::WebOs(client) => client.audio_status(),
+        }
+    }
+
     fn set_input(&self, input: HdmiInput) -> Result<(), TvError> {
         match self {
             Self::Bscpylgtv(client) => client.set_input(input),
@@ -302,6 +418,34 @@ impl TvClient for SelectedTvClient {
         match self {
             Self::Bscpylgtv(client) => client.set_oled_brightness(brightness),
             Self::WebOs(client) => client.set_oled_brightness(brightness),
+        }
+    }
+
+    fn set_volume(&self, volume: VolumeLevel) -> Result<(), TvError> {
+        match self {
+            Self::Bscpylgtv(client) => client.set_volume(volume),
+            Self::WebOs(client) => client.set_volume(volume),
+        }
+    }
+
+    fn volume_up(&self) -> Result<(), TvError> {
+        match self {
+            Self::Bscpylgtv(client) => client.volume_up(),
+            Self::WebOs(client) => client.volume_up(),
+        }
+    }
+
+    fn volume_down(&self) -> Result<(), TvError> {
+        match self {
+            Self::Bscpylgtv(client) => client.volume_down(),
+            Self::WebOs(client) => client.volume_down(),
+        }
+    }
+
+    fn set_muted(&self, muted: bool) -> Result<(), TvError> {
+        match self {
+            Self::Bscpylgtv(client) => client.set_muted(muted),
+            Self::WebOs(client) => client.set_muted(muted),
         }
     }
 
@@ -440,6 +584,12 @@ impl<'a, C: TvClient> TvDevice<'a, C> {
         }
     }
 
+    pub fn audio(&self) -> TvAudio<'a, C> {
+        TvAudio {
+            client: self.client,
+        }
+    }
+
     pub fn power(&self) -> TvPower<'a, C> {
         TvPower {
             client: self.client,
@@ -481,6 +631,33 @@ impl<'a, C: TvClient> TvScreen<'a, C> {
 #[derive(Debug, Clone, Copy)]
 pub struct TvPicture<'a, C> {
     client: &'a C,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct TvAudio<'a, C> {
+    client: &'a C,
+}
+
+impl<'a, C: TvClient> TvAudio<'a, C> {
+    pub fn status(&self) -> Result<AudioStatus, TvError> {
+        self.client.audio_status()
+    }
+
+    pub fn set_volume(&self, volume: VolumeLevel) -> Result<(), TvError> {
+        self.client.set_volume(volume)
+    }
+
+    pub fn volume_up(&self) -> Result<(), TvError> {
+        self.client.volume_up()
+    }
+
+    pub fn volume_down(&self) -> Result<(), TvError> {
+        self.client.volume_down()
+    }
+
+    pub fn set_muted(&self, muted: bool) -> Result<(), TvError> {
+        self.client.set_muted(muted)
+    }
 }
 
 impl<'a, C: TvClient> TvPicture<'a, C> {
@@ -1020,6 +1197,21 @@ impl<L: BscpylgtvCommandLauncher> TvClient for BscpylgtvCommandClient<L> {
         })
     }
 
+    fn audio_status(&self) -> Result<AudioStatus, TvError> {
+        let output = self.run_command(TvOperation::ReadAudioStatus, "get_audio_status", &[])?;
+        parse_audio_status(output.stdout()).ok_or_else(|| {
+            TvError::new(
+                TvOperation::ReadAudioStatus,
+                TvErrorKind::InvalidResponse,
+                invalid_command_output_detail(
+                    "get_audio_status",
+                    &output,
+                    "expected volume and mute values in stdout",
+                ),
+            )
+        })
+    }
+
     fn set_input(&self, input: HdmiInput) -> Result<(), TvError> {
         self.run_command(TvOperation::SetInput, "set_input", &[input.as_str()])?;
         self.verify_visible_after_ack(TvOperation::SetInput)
@@ -1033,6 +1225,28 @@ impl<L: BscpylgtvCommandLauncher> TvClient for BscpylgtvCommandClient<L> {
             &["picture", backlight.as_str()],
         )
         .map(|_| ())
+    }
+
+    fn set_volume(&self, volume: VolumeLevel) -> Result<(), TvError> {
+        let volume = volume.to_string();
+        self.run_command(TvOperation::SetVolume, "set_volume", &[volume.as_str()])
+            .map(|_| ())
+    }
+
+    fn volume_up(&self) -> Result<(), TvError> {
+        self.run_command(TvOperation::VolumeUp, "volume_up", &[])
+            .map(|_| ())
+    }
+
+    fn volume_down(&self) -> Result<(), TvError> {
+        self.run_command(TvOperation::VolumeDown, "volume_down", &[])
+            .map(|_| ())
+    }
+
+    fn set_muted(&self, muted: bool) -> Result<(), TvError> {
+        let muted = muted.to_string();
+        self.run_command(TvOperation::SetMuted, "set_mute", &[muted.as_str()])
+            .map(|_| ())
     }
 
     fn power_off(&self) -> Result<(), TvError> {
@@ -1107,6 +1321,49 @@ fn parse_backlight(output: &str) -> Option<OledBrightness> {
     None
 }
 
+fn parse_audio_status(output: &str) -> Option<AudioStatus> {
+    let raw_volume = parse_dict_integer(output, "volume")?;
+    let volume = match raw_volume {
+        -1 => CurrentVolume::Unknown,
+        value if value >= i64::from(VOLUME_MIN) && value <= i64::from(VOLUME_MAX) => {
+            CurrentVolume::Level(VolumeLevel::new(value as u8).ok()?)
+        }
+        _ => return None,
+    };
+    let muted = parse_dict_bool(output, "mute")?;
+
+    Some(AudioStatus::new(volume, muted))
+}
+
+fn parse_dict_value<'a>(output: &'a str, key: &str) -> Option<&'a str> {
+    let single_quoted = format!("'{key}'");
+    let double_quoted = format!("\"{key}\"");
+    let key_offset = output
+        .find(&single_quoted)
+        .map(|offset| (offset, single_quoted.len()))
+        .or_else(|| {
+            output
+                .find(&double_quoted)
+                .map(|offset| (offset, double_quoted.len()))
+        })?;
+    let suffix = &output[key_offset.0 + key_offset.1..];
+    let value = suffix.trim_start().strip_prefix(':')?.trim_start();
+    let end = value.find([',', '}', '\n']).unwrap_or(value.len());
+    Some(value[..end].trim().trim_matches(['\'', '"']))
+}
+
+fn parse_dict_integer(output: &str, key: &str) -> Option<i64> {
+    parse_dict_value(output, key)?.parse().ok()
+}
+
+fn parse_dict_bool(output: &str, key: &str) -> Option<bool> {
+    match parse_dict_value(output, key)? {
+        "True" | "true" => Some(true),
+        "False" | "false" => Some(false),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     mod support {
@@ -1116,8 +1373,9 @@ mod tests {
     use super::{
         build_tv_client, build_user_scoped_launch_plan, current_euid, BscpylgtvCommandClient,
         BscpylgtvCommandLauncher, BscpylgtvInvocation, BscpylgtvLaunchResult, CommandOutput,
-        CurrentInput, OledBrightness, SelectedTvClient, TvClient, TvClientBuildOptions, TvDevice,
-        TvErrorKind, TvOperation, UserScopedBscpylgtvCommandLauncher, UserScopedLaunchPlan,
+        CurrentInput, CurrentVolume, OledBrightness, SelectedTvClient, TvClient,
+        TvClientBuildOptions, TvDevice, TvErrorKind, TvOperation,
+        UserScopedBscpylgtvCommandLauncher, UserScopedLaunchPlan, VolumeLevel,
         DEFAULT_BSCPYLGTV_COMMAND_PATH,
     };
     use crate::auth::{BscpylgtvAuthContext, SystemUser};
@@ -1152,6 +1410,28 @@ mod tests {
         }
 
         assert!(OledBrightness::new(101).is_err());
+    }
+
+    #[test]
+    fn volume_level_accepts_boundaries_and_rejects_other_values() {
+        assert_eq!(VolumeLevel::parse("0").unwrap().as_percent(), 0);
+        assert_eq!(VolumeLevel::parse("100").unwrap().as_percent(), 100);
+
+        for value in ["-1", "101", "abc", "50.5"] {
+            let err = VolumeLevel::parse(value).expect_err("invalid volume should fail");
+            assert!(err
+                .to_string()
+                .contains("expected an integer from 0 to 100"));
+        }
+    }
+
+    #[test]
+    fn audio_status_parser_preserves_unknown_volume_and_mute() {
+        let status = super::parse_audio_status("{'returnValue': True, 'volume': -1, 'mute': True}")
+            .expect("observed unknown-volume response should parse");
+
+        assert_eq!(status.volume(), CurrentVolume::Unknown);
+        assert!(status.is_muted());
     }
 
     #[test]

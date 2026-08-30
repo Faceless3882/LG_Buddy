@@ -67,6 +67,7 @@ pub enum RuntimeEventKind {
     ScreenBlankRequested,
     ScreenRestoreRequested,
     BrightnessRequested,
+    VolumeRequested,
 }
 
 impl RuntimeEventKind {
@@ -98,6 +99,7 @@ impl RuntimeEventKind {
                 })
             }
             Command::Brightness(_) => Some(Self::BrightnessRequested),
+            Command::Volume(_) => Some(Self::VolumeRequested),
             Command::Screen(ScreenCommand::Off) => Some(Self::ScreenBlankRequested),
             Command::Screen(ScreenCommand::On) => Some(Self::ScreenRestoreRequested),
             Command::ScreenOff => Some(Self::ScreenBlankRequested),
@@ -185,6 +187,13 @@ mod tests {
             Some(RuntimeEvent::new(
                 EventSource::CliApi,
                 RuntimeEventKind::BrightnessRequested
+            ))
+        );
+        assert_eq!(
+            RuntimeEvent::from_command(Command::Volume(crate::VolumeCommand::Get)),
+            Some(RuntimeEvent::new(
+                EventSource::CliApi,
+                RuntimeEventKind::VolumeRequested
             ))
         );
     }
