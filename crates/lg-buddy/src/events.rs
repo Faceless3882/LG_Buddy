@@ -236,7 +236,6 @@ mod tests {
         );
         assert_eq!(
             RuntimeEvent::from_command(Command::Updates(crate::updates::UpdatesCommand::Check {
-                channel: None,
                 notify: false,
             })),
             None

@@ -160,10 +160,10 @@ choice.
 - disabling automatic checks disables/stops the user timer instead of merely
   suppressing notifications after doing the work
 
-`updates_channel` keeps scheduled update checks configurable without changing
-manual diagnostics:
+`updates_channel` is the single release-channel preference for update
+operations:
 
-- `stable` is the default scheduled-check channel
-- `prerelease` is an explicit opt-in scheduled-check channel
-- manual `lg-buddy updates check --channel ...` still overrides channel for
-  that invocation only
+- `stable` is the default for manual and background checks
+- `prerelease` explicitly opts all checks into considering both prerelease and
+  stable releases
+- the installed binary's own release channel does not override this preference

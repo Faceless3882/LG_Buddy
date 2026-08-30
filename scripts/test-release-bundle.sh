@@ -51,6 +51,8 @@ assert_cli_surface() {
     local binary="$1"
     local help_output=""
     local no_args_output=""
+    local removed_channel_output=""
+    local removed_channel_status=0
 
     help_output="$("$binary" --help)"
     no_args_output="$("$binary")"
@@ -72,7 +74,23 @@ assert_cli_surface() {
     printf '%s\n' "$help_output" | grep -F -q "screen on"
     printf '%s\n' "$help_output" | grep -q "settings list"
     printf '%s\n' "$help_output" | grep -q "settings set <KEY> <VALUE>"
-    printf '%s\n' "$help_output" | grep -F -q "updates check [--channel stable|prerelease] [--notify]"
+    printf '%s\n' "$help_output" | grep -F -q "updates check [--notify]"
+    if printf '%s\n' "$help_output" | grep -F -q -- "--channel"; then
+        echo "Removed updates --channel option appeared in public help: $binary"
+        exit 1
+    fi
+
+    if removed_channel_output="$("$binary" updates check --channel stable 2>&1)"; then
+        echo "Removed updates --channel option was unexpectedly accepted: $binary"
+        exit 1
+    else
+        removed_channel_status=$?
+    fi
+    if [ "$removed_channel_status" -ne 2 ]; then
+        echo "Removed updates --channel option returned status $removed_channel_status instead of 2: $binary"
+        exit 1
+    fi
+    printf '%s\n' "$removed_channel_output" | grep -F -q 'unexpected arguments for `updates check`: --channel stable'
 
     for hidden in startup shutdown screen-off screen-on "updates background-check"; do
         if printf '%s\n' "$help_output" | grep -F -q "$hidden"; then

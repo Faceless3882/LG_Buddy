@@ -367,10 +367,7 @@ impl ParseError {
                 | SettingsParseError::UnknownSubcommand(_) => SettingsHelpTopic::Root,
             }),
             Self::Updates(error) => HelpTopic::Updates(match error {
-                UpdatesParseError::MissingChannelValue
-                | UpdatesParseError::DuplicateChannel
-                | UpdatesParseError::DuplicateNotify
-                | UpdatesParseError::UnknownChannel(_) => UpdatesHelpTopic::Check,
+                UpdatesParseError::DuplicateNotify => UpdatesHelpTopic::Check,
                 UpdatesParseError::UnexpectedArguments { subcommand, .. } => {
                     UpdatesHelpTopic::from_subcommand(subcommand).unwrap_or(UpdatesHelpTopic::Root)
                 }
@@ -481,7 +478,7 @@ Settings:
   settings unset <KEY>
 
 Updates:
-  updates check [--channel stable|prerelease] [--notify]
+  updates check [--notify]
 "
     )
 }
@@ -626,7 +623,7 @@ pub fn updates_usage(program: &str, topic: UpdatesHelpTopic) -> String {
 LG Buddy update checks
 
 Usage:
-  {program} updates check [--channel stable|prerelease] [--notify]
+  {program} updates check [--notify]
   {program} updates --help
 
 Commands:
@@ -638,11 +635,9 @@ Commands:
 LG Buddy update check
 
 Usage:
-  {program} updates check [--channel stable|prerelease] [--notify]
+  {program} updates check [--notify]
 
 Options:
-  --channel stable|prerelease
-                  Override the release channel for this check
   --notify        Request a desktop notification when an update is available
 "
         ),
@@ -1176,7 +1171,7 @@ mod tests {
     };
     use crate::settings::{SettingsCommand, SettingsParseError};
     use crate::tv::{OledBrightness, VolumeLevel};
-    use crate::updates::{UpdateChannel, UpdatesCommand, UpdatesParseError};
+    use crate::updates::{UpdatesCommand, UpdatesParseError};
     use crate::{notifications::NotificationError, RunError};
     use std::error::Error;
     use std::io;
@@ -1541,55 +1536,13 @@ mod tests {
         assert_eq!(
             parse_args(["updates", "check"]),
             Ok(ParseOutcome::Command(Command::Updates(
-                UpdatesCommand::Check {
-                    channel: None,
-                    notify: false,
-                }
-            )))
-        );
-        assert_eq!(
-            parse_args(["updates", "check", "--channel", "stable"]),
-            Ok(ParseOutcome::Command(Command::Updates(
-                UpdatesCommand::Check {
-                    channel: Some(UpdateChannel::Stable),
-                    notify: false,
-                }
-            )))
-        );
-        assert_eq!(
-            parse_args(["updates", "check", "--channel", "prerelease"]),
-            Ok(ParseOutcome::Command(Command::Updates(
-                UpdatesCommand::Check {
-                    channel: Some(UpdateChannel::Prerelease),
-                    notify: false,
-                }
+                UpdatesCommand::Check { notify: false }
             )))
         );
         assert_eq!(
             parse_args(["updates", "check", "--notify"]),
             Ok(ParseOutcome::Command(Command::Updates(
-                UpdatesCommand::Check {
-                    channel: None,
-                    notify: true,
-                }
-            )))
-        );
-        assert_eq!(
-            parse_args(["updates", "check", "--notify", "--channel", "stable"]),
-            Ok(ParseOutcome::Command(Command::Updates(
-                UpdatesCommand::Check {
-                    channel: Some(UpdateChannel::Stable),
-                    notify: true,
-                }
-            )))
-        );
-        assert_eq!(
-            parse_args(["updates", "check", "--channel", "prerelease", "--notify"]),
-            Ok(ParseOutcome::Command(Command::Updates(
-                UpdatesCommand::Check {
-                    channel: Some(UpdateChannel::Prerelease),
-                    notify: true,
-                }
+                UpdatesCommand::Check { notify: true }
             )))
         );
         assert_eq!(
@@ -1831,17 +1784,23 @@ mod tests {
         let error = parse_args(["updates", "check", "--channel"]).unwrap_err();
         assert_eq!(
             error,
-            ParseError::Updates(UpdatesParseError::MissingChannelValue)
+            ParseError::Updates(UpdatesParseError::UnexpectedArguments {
+                subcommand: "check",
+                arguments: vec!["--channel".to_string()]
+            })
         );
         assert_eq!(
             error.help_topic(),
             HelpTopic::Updates(UpdatesHelpTopic::Check)
         );
         assert_eq!(
-            parse_args(["updates", "check", "--channel", "nightly"]),
-            Err(ParseError::Updates(UpdatesParseError::UnknownChannel(
-                "nightly".to_string()
-            )))
+            parse_args(["updates", "check", "--channel", "stable"]),
+            Err(ParseError::Updates(
+                UpdatesParseError::UnexpectedArguments {
+                    subcommand: "check",
+                    arguments: vec!["--channel".to_string(), "stable".to_string()]
+                }
+            ))
         );
         assert_eq!(
             parse_args(["updates", "check", "extra"]),
@@ -1980,11 +1939,12 @@ mod tests {
     #[test]
     fn updates_usage_is_scoped_and_hides_the_timer_entrypoint() {
         let root = updates_usage("lg-buddy", UpdatesHelpTopic::Root);
-        assert!(root.contains("lg-buddy updates check [--channel stable|prerelease] [--notify]"));
+        assert!(root.contains("lg-buddy updates check [--notify]"));
+        assert!(!root.contains("--channel"));
         assert!(!root.contains("background-check"));
 
         let check = updates_usage("lg-buddy", UpdatesHelpTopic::Check);
-        assert!(check.contains("--channel stable|prerelease"));
+        assert!(!check.contains("--channel"));
         assert!(check.contains("--notify"));
         assert!(!check.contains("background-check"));
     }
@@ -2004,7 +1964,7 @@ mod tests {
             "settings get <KEY>",
             "settings set <KEY> <VALUE>",
             "settings unset <KEY>",
-            "updates check [--channel stable|prerelease] [--notify]",
+            "updates check [--notify]",
         ] {
             assert!(help.contains(command), "missing `{command}` from help");
         }
