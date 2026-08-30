@@ -11,6 +11,7 @@ LG Buddy can:
 - blank and restore the panel on supported desktop idle backends
 - keep the panel awake when supported gamepads are active
 - adjust OLED pixel brightness from a desktop dialog or the command line
+- control TV volume and mute from the command line
 - manage settings and check for updates from the command line
 
 GNOME is not required. Official release bundles include a prebuilt `lg-buddy`
@@ -23,7 +24,7 @@ binary, so normal installation does not require a Rust toolchain.
 | TV control at boot, shutdown, sleep, and wake | ✅ | ✅ | ✅ | ✅ |
 | Idle blank and activity restore | ✅ | ✅ | ✅ | ❌ |
 | Gamepad activity keeps the panel awake | ✅ | ✅ | ❌ | ❌ |
-| Brightness, settings, and update commands | ✅ | ✅ | ✅ | ✅ |
+| Brightness, volume, settings, and update commands | ✅ | ✅ | ✅ | ✅ |
 | Brightness desktop dialog | ✅ | ✅ | ✅ | ✅ |
 
 The default `auto` backend uses GNOME when compatible, then falls back to
@@ -110,6 +111,10 @@ lg-buddy screen on
 lg-buddy brightness
 lg-buddy brightness get
 lg-buddy brightness set 65
+lg-buddy volume
+lg-buddy volume 20
+lg-buddy volume up
+lg-buddy volume mute
 lg-buddy settings list
 lg-buddy settings describe screen.backend
 lg-buddy updates check

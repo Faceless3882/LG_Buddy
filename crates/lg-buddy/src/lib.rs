@@ -33,7 +33,7 @@ use crate::backend::{
 };
 use crate::commands::{
     run_brightness, run_nm_pre_down, run_screen_off, run_screen_on, run_shutdown, run_sleep,
-    run_sleep_pre,
+    run_sleep_pre, run_volume,
 };
 use crate::config::{ConfigError, ConfigPathError};
 use crate::dev::run_dev_command;
@@ -41,7 +41,10 @@ use crate::notifications::NotificationError;
 use crate::session::runner::{run_lifecycle_monitor, run_monitor};
 use crate::settings::{run_settings_command, SettingsCommand, SettingsError, SettingsParseError};
 use crate::state::StateDirError;
-use crate::tv::{OledBrightness, OledBrightnessParseError, TvClientBuildError};
+use crate::tv::{
+    OledBrightness, OledBrightnessParseError, TvClientBuildError, VolumeLevel,
+    VolumeLevelParseError,
+};
 use crate::updates::{run_updates_command, UpdatesCommand, UpdatesError, UpdatesParseError};
 use std::fmt;
 use std::io::{self, Write};
@@ -55,6 +58,7 @@ pub enum Command {
     Sleep,
     NetworkManagerPreDown,
     Brightness(BrightnessCommand),
+    Volume(VolumeCommand),
     Screen(ScreenCommand),
     ScreenOff,
     ScreenOn,
@@ -71,6 +75,22 @@ pub enum BrightnessCommand {
     Prompt,
     Get,
     Set(OledBrightness),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VolumeCommand {
+    Get,
+    Set(VolumeLevel),
+    Up,
+    Down,
+    Mute(MuteCommand),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MuteCommand {
+    Toggle,
+    On,
+    Off,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,6 +147,7 @@ impl UpdatesHelpTopic {
 pub enum HelpTopic {
     Global,
     Brightness,
+    Volume,
     Power,
     Screen,
     Settings(SettingsHelpTopic),
@@ -177,6 +198,9 @@ pub enum ParseError {
     UnknownBrightnessCommand(String),
     MissingBrightnessValue,
     InvalidBrightnessValue(OledBrightnessParseError),
+    UnknownVolumeCommand(String),
+    UnknownMuteCommand(String),
+    InvalidVolumeValue(VolumeLevelParseError),
     Dev(DevParseError),
     Settings(SettingsParseError),
     Updates(UpdatesParseError),
@@ -220,6 +244,13 @@ impl fmt::Display for ParseError {
                 write!(f, "missing brightness value for `brightness set`")
             }
             Self::InvalidBrightnessValue(err) => write!(f, "{err}"),
+            Self::UnknownVolumeCommand(command) => {
+                write!(f, "unknown volume command `{command}`")
+            }
+            Self::UnknownMuteCommand(command) => {
+                write!(f, "unknown mute command `{command}`; expected `volume mute`, `volume mute on`, or `volume mute off`")
+            }
+            Self::InvalidVolumeValue(err) => write!(f, "{err}"),
             Self::Dev(err) => write!(f, "{err}"),
             Self::Settings(err) => write!(f, "{err}"),
             Self::Updates(err) => write!(f, "{err}"),
@@ -308,6 +339,13 @@ impl ParseError {
                 command: Command::Brightness(_),
                 ..
             } => HelpTopic::Brightness,
+            Self::UnknownVolumeCommand(_)
+            | Self::UnknownMuteCommand(_)
+            | Self::InvalidVolumeValue(_) => HelpTopic::Volume,
+            Self::UnexpectedArguments {
+                command: Command::Volume(_),
+                ..
+            } => HelpTopic::Volume,
             Self::MissingPowerCommand | Self::UnknownPowerCommand(_) => HelpTopic::Power,
             Self::UnexpectedArguments {
                 command: Command::Power(_),
@@ -367,6 +405,7 @@ impl Command {
             Self::Sleep => "sleep",
             Self::NetworkManagerPreDown => "nm-pre-down",
             Self::Brightness(_) => "brightness",
+            Self::Volume(_) => "volume",
             Self::Screen(_) => "screen",
             Self::ScreenOff => "screen-off",
             Self::ScreenOn => "screen-on",
@@ -388,6 +427,7 @@ impl Command {
             Self::Sleep => "TODO: implemented via command handler",
             Self::NetworkManagerPreDown => "TODO: implemented via command handler",
             Self::Brightness(_) => "TODO: implemented via command handler",
+            Self::Volume(_) => "TODO: implemented via command handler",
             Self::Screen(_) => "TODO: implemented via command handler",
             Self::ScreenOff => "TODO: implemented via command handler",
             Self::ScreenOn => "TODO: implemented via command handler",
@@ -417,6 +457,13 @@ Commands:
   brightness get  Print the current TV OLED brightness
   brightness set <0-100>
                   Set the TV OLED brightness
+  volume          Print the current TV volume or mute state
+  volume <0-100>  Set the TV volume and unmute it
+  volume up       Increase the TV volume and unmute it
+  volume down     Decrease the TV volume and unmute it
+  volume mute     Toggle TV mute
+  volume mute on  Mute the TV
+  volume mute off Unmute the TV
   power on        Start or restore the TV output
   power off       Power off the TV when LG Buddy owns the active input
   screen off      Blank the configured TV output if active
@@ -470,6 +517,32 @@ Usage:
 Commands:
   get             Print the current TV OLED brightness
   set <0-100>     Set the TV OLED brightness
+"
+    )
+}
+
+pub fn volume_usage(program: &str) -> String {
+    format!(
+        "\
+LG Buddy TV volume control
+
+Usage:
+  {program} volume
+  {program} volume <0-100>
+  {program} volume up
+  {program} volume down
+  {program} volume mute
+  {program} volume mute on
+  {program} volume mute off
+  {program} volume --help
+
+Commands:
+  <0-100>         Set the TV volume and unmute it
+  up              Increase the TV volume and unmute it
+  down            Decrease the TV volume and unmute it
+  mute            Toggle TV mute
+  mute on         Mute the TV
+  mute off        Unmute the TV
 "
     )
 }
@@ -580,6 +653,7 @@ pub fn help(program: &str, topic: HelpTopic) -> String {
     match topic {
         HelpTopic::Global => usage(program),
         HelpTopic::Brightness => brightness_usage(program),
+        HelpTopic::Volume => volume_usage(program),
         HelpTopic::Power => power_usage(program),
         HelpTopic::Screen => screen_usage(program),
         HelpTopic::Settings(topic) => settings_usage(program, topic),
@@ -637,6 +711,7 @@ where
                 .map_err(ParseError::Dev);
         }
         "brightness" => return parse_brightness_command(args),
+        "volume" => return parse_volume_command(args),
         "power" => return parse_power_command(args),
         "screen" => return parse_screen_command(args),
         "shutdown" => Command::Shutdown,
@@ -672,6 +747,7 @@ pub fn run_command<W: Write>(command: Command, writer: &mut W) -> Result<(), Run
         Command::Sleep => run_sleep(writer),
         Command::NetworkManagerPreDown => run_nm_pre_down(writer),
         Command::Brightness(command) => run_brightness(writer, command),
+        Command::Volume(command) => run_volume(writer, command),
         Command::DetectBackend => run_detect_backend(writer),
         Command::Screen(ScreenCommand::Off) => run_screen_off(writer),
         Command::Screen(ScreenCommand::On) => run_screen_on(writer),
@@ -710,6 +786,19 @@ where
                 Ok(ParseOutcome::Help(HelpTopic::Brightness))
             } else {
                 Err(ParseError::UnknownBrightnessCommand(remaining.join(" ")))
+            }
+        }
+        "volume" => {
+            let valid_topic = remaining.is_empty()
+                || (remaining.len() == 1
+                    && matches!(remaining[0].as_str(), "up" | "down" | "mute"))
+                || (remaining.len() == 2
+                    && remaining[0] == "mute"
+                    && matches!(remaining[1].as_str(), "on" | "off"));
+            if valid_topic {
+                Ok(ParseOutcome::Help(HelpTopic::Volume))
+            } else {
+                Err(ParseError::UnknownVolumeCommand(remaining.join(" ")))
             }
         }
         "power" => {
@@ -992,6 +1081,83 @@ where
     }
 }
 
+fn parse_volume_command<I, S>(args: I) -> Result<ParseOutcome, ParseError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut args = args.into_iter();
+    let Some(subcommand) = args.next() else {
+        return Ok(ParseOutcome::Command(Command::Volume(VolumeCommand::Get)));
+    };
+
+    if matches!(subcommand.as_ref(), "-h" | "--help") {
+        return Ok(ParseOutcome::Help(HelpTopic::Volume));
+    }
+
+    let command = match subcommand.as_ref() {
+        "up" => VolumeCommand::Up,
+        "down" => VolumeCommand::Down,
+        "mute" => return parse_mute_command(args),
+        value => {
+            VolumeCommand::Set(VolumeLevel::parse(value).map_err(ParseError::InvalidVolumeValue)?)
+        }
+    };
+    let arguments = args
+        .map(|argument| argument.as_ref().to_string())
+        .collect::<Vec<_>>();
+
+    if arguments.is_empty() {
+        Ok(ParseOutcome::Command(Command::Volume(command)))
+    } else if arguments.len() == 1 && matches!(arguments[0].as_str(), "-h" | "--help") {
+        Ok(ParseOutcome::Help(HelpTopic::Volume))
+    } else {
+        Err(ParseError::UnexpectedArguments {
+            command: Command::Volume(command),
+            arguments,
+        })
+    }
+}
+
+fn parse_mute_command<I, S>(args: I) -> Result<ParseOutcome, ParseError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut args = args.into_iter();
+    let Some(subcommand) = args.next() else {
+        return Ok(ParseOutcome::Command(Command::Volume(VolumeCommand::Mute(
+            MuteCommand::Toggle,
+        ))));
+    };
+
+    if matches!(subcommand.as_ref(), "-h" | "--help") {
+        return Ok(ParseOutcome::Help(HelpTopic::Volume));
+    }
+
+    let mute = match subcommand.as_ref() {
+        "on" => MuteCommand::On,
+        "off" => MuteCommand::Off,
+        other => return Err(ParseError::UnknownMuteCommand(other.to_string())),
+    };
+    let arguments = args
+        .map(|argument| argument.as_ref().to_string())
+        .collect::<Vec<_>>();
+
+    if arguments.is_empty() {
+        Ok(ParseOutcome::Command(Command::Volume(VolumeCommand::Mute(
+            mute,
+        ))))
+    } else if arguments.len() == 1 && matches!(arguments[0].as_str(), "-h" | "--help") {
+        Ok(ParseOutcome::Help(HelpTopic::Volume))
+    } else {
+        Err(ParseError::UnexpectedArguments {
+            command: Command::Volume(VolumeCommand::Mute(mute)),
+            arguments,
+        })
+    }
+}
+
 fn run_detect_backend<W: Write>(writer: &mut W) -> Result<(), RunError> {
     let configured = configured_backend_from_env_or_config().map_err(RunError::BackendSelection)?;
     let backend = detect_backend_from_system(configured).map_err(RunError::BackendDetection)?;
@@ -1004,12 +1170,12 @@ fn run_detect_backend<W: Write>(writer: &mut W) -> Result<(), RunError> {
 mod tests {
     use super::{
         brightness_usage, parse_args, power_usage, screen_usage, settings_usage, updates_usage,
-        usage, BrightnessCommand, Command, DevCommand, DevParseError, HelpTopic, ParseError,
-        ParseOutcome, PowerCommand, ScreenCommand, SettingsHelpTopic, StartupMode,
-        UpdatesHelpTopic, WebOsControlProbeCommand,
+        usage, volume_usage, BrightnessCommand, Command, DevCommand, DevParseError, HelpTopic,
+        MuteCommand, ParseError, ParseOutcome, PowerCommand, ScreenCommand, SettingsHelpTopic,
+        StartupMode, UpdatesHelpTopic, VolumeCommand, WebOsControlProbeCommand,
     };
     use crate::settings::{SettingsCommand, SettingsParseError};
-    use crate::tv::OledBrightness;
+    use crate::tv::{OledBrightness, VolumeLevel};
     use crate::updates::{UpdateChannel, UpdatesCommand, UpdatesParseError};
     use crate::{notifications::NotificationError, RunError};
     use std::error::Error;
@@ -1056,6 +1222,34 @@ mod tests {
         assert_eq!(
             parse_args(["brightness", "set", "--help"]),
             Ok(ParseOutcome::Help(HelpTopic::Brightness))
+        );
+        assert_eq!(
+            parse_args(["help", "volume"]),
+            Ok(ParseOutcome::Help(HelpTopic::Volume))
+        );
+        assert_eq!(
+            parse_args(["help", "volume", "mute"]),
+            Ok(ParseOutcome::Help(HelpTopic::Volume))
+        );
+        assert_eq!(
+            parse_args(["help", "volume", "mute", "on"]),
+            Ok(ParseOutcome::Help(HelpTopic::Volume))
+        );
+        assert_eq!(
+            parse_args(["help", "volume", "set"]),
+            Err(ParseError::UnknownVolumeCommand("set".to_string()))
+        );
+        assert_eq!(
+            parse_args(["volume", "--help"]),
+            Ok(ParseOutcome::Help(HelpTopic::Volume))
+        );
+        assert_eq!(
+            parse_args(["volume", "up", "--help"]),
+            Ok(ParseOutcome::Help(HelpTopic::Volume))
+        );
+        assert_eq!(
+            parse_args(["volume", "mute", "on", "--help"]),
+            Ok(ParseOutcome::Help(HelpTopic::Volume))
         );
         assert_eq!(
             parse_args(["help", "power"]),
@@ -1192,6 +1386,54 @@ mod tests {
             Ok(ParseOutcome::Command(Command::Brightness(
                 BrightnessCommand::Set(brightness(65))
             )))
+        );
+        assert_eq!(
+            parse_args(["volume"]),
+            Ok(ParseOutcome::Command(Command::Volume(VolumeCommand::Get)))
+        );
+        assert_eq!(
+            parse_args(["volume", "65"]),
+            Ok(ParseOutcome::Command(Command::Volume(VolumeCommand::Set(
+                volume(65),
+            ))))
+        );
+        assert_eq!(
+            parse_args(["volume", "0"]),
+            Ok(ParseOutcome::Command(Command::Volume(VolumeCommand::Set(
+                volume(0),
+            ))))
+        );
+        assert_eq!(
+            parse_args(["volume", "100"]),
+            Ok(ParseOutcome::Command(Command::Volume(VolumeCommand::Set(
+                volume(100),
+            ))))
+        );
+        assert_eq!(
+            parse_args(["volume", "up"]),
+            Ok(ParseOutcome::Command(Command::Volume(VolumeCommand::Up)))
+        );
+        assert_eq!(
+            parse_args(["volume", "down"]),
+            Ok(ParseOutcome::Command(Command::Volume(VolumeCommand::Down)))
+        );
+        assert_eq!(
+            parse_args(["volume", "mute"]),
+            Ok(ParseOutcome::Command(Command::Volume(VolumeCommand::Mute(
+                MuteCommand::Toggle,
+            ))))
+        );
+        assert_eq!(
+            parse_args(["volume", "mute", "on"]),
+            Ok(ParseOutcome::Command(Command::Volume(VolumeCommand::Mute(
+                MuteCommand::On,
+            ))))
+        );
+        assert_eq!(
+            parse_args(["volume", "mute", "off"]),
+            Ok(ParseOutcome::Command(Command::Volume(VolumeCommand::Mute(
+                MuteCommand::Off,
+            ))))
         );
         assert_eq!(
             parse_args(["screen-off"]),
@@ -1455,6 +1697,49 @@ mod tests {
     }
 
     #[test]
+    fn invalid_volume_command_is_rejected_with_volume_help() {
+        let error = parse_args(["volume", "101"]).unwrap_err();
+        assert!(matches!(&error, ParseError::InvalidVolumeValue(_)));
+        assert_eq!(error.help_topic(), HelpTopic::Volume);
+        assert!(matches!(
+            parse_args(["volume", "abc"]),
+            Err(ParseError::InvalidVolumeValue(_))
+        ));
+        assert_eq!(
+            parse_args(["volume", "set", "65"]),
+            Err(ParseError::InvalidVolumeValue(
+                VolumeLevel::parse("set").unwrap_err()
+            ))
+        );
+        assert_eq!(
+            parse_args(["volume", "mute", "toggle"]),
+            Err(ParseError::UnknownMuteCommand("toggle".to_string()))
+        );
+        let error = parse_args(["volume", "up", "extra"]).unwrap_err();
+        assert_eq!(
+            error,
+            ParseError::UnexpectedArguments {
+                command: Command::Volume(VolumeCommand::Up),
+                arguments: vec!["extra".to_string()],
+            }
+        );
+        assert_eq!(error.help_topic(), HelpTopic::Volume);
+        let error = parse_args(["volume", "mute", "on", "extra"]).unwrap_err();
+        assert_eq!(
+            error,
+            ParseError::UnexpectedArguments {
+                command: Command::Volume(VolumeCommand::Mute(MuteCommand::On)),
+                arguments: vec!["extra".to_string()],
+            }
+        );
+        assert_eq!(error.help_topic(), HelpTopic::Volume);
+        assert_eq!(
+            ParseError::UnknownVolumeCommand("set".to_string()).help_topic(),
+            HelpTopic::Volume
+        );
+    }
+
+    #[test]
     fn invalid_dev_command_is_rejected() {
         assert_eq!(
             parse_args(["dev"]),
@@ -1590,6 +1875,13 @@ mod tests {
             "brightness",
             "brightness get",
             "brightness set <0-100>",
+            "volume",
+            "volume <0-100>",
+            "volume up",
+            "volume down",
+            "volume mute",
+            "volume mute on",
+            "volume mute off",
             "power on",
             "power off",
             "screen off",
@@ -1643,6 +1935,24 @@ mod tests {
         assert!(help.contains("lg-buddy brightness\n"));
         assert!(help.contains("lg-buddy brightness get"));
         assert!(help.contains("lg-buddy brightness set <0-100>"));
+    }
+
+    #[test]
+    fn volume_usage_mentions_public_commands() {
+        let help = volume_usage("lg-buddy");
+
+        for command in [
+            "lg-buddy volume\n",
+            "lg-buddy volume <0-100>",
+            "lg-buddy volume up",
+            "lg-buddy volume down",
+            "lg-buddy volume mute",
+            "lg-buddy volume mute on",
+            "lg-buddy volume mute off",
+        ] {
+            assert!(help.contains(command), "missing `{command}` from help");
+        }
+        assert!(!help.contains("volume set"));
     }
 
     #[test]
@@ -1722,5 +2032,9 @@ mod tests {
 
     fn brightness(value: u8) -> OledBrightness {
         OledBrightness::new(value).expect("test brightness should be valid")
+    }
+
+    fn volume(value: u8) -> VolumeLevel {
+        VolumeLevel::new(value).expect("test volume should be valid")
     }
 }

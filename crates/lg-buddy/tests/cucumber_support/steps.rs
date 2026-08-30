@@ -93,6 +93,11 @@ fn native_webos_tv_has_ambiguous_restore(world: &mut LgBuddyWorld) {
     world.make_native_restore_ambiguous();
 }
 
+#[given("the native webOS TV rejects mute changes")]
+fn native_webos_tv_rejects_mute_changes(world: &mut LgBuddyWorld) {
+    world.reject_native_set_mute();
+}
+
 #[given(regex = r#"mock system logind reports PreparingForSleep=(true|false)"#)]
 fn mock_system_logind_preparing_for_sleep(world: &mut LgBuddyWorld, value: String) {
     world.configure_system_logind(value == "true");
@@ -126,6 +131,21 @@ fn tv_on_input(world: &mut LgBuddyWorld, input: String) {
 #[given(regex = r#"the TV backlight is (\d+)"#)]
 fn tv_backlight(world: &mut LgBuddyWorld, value: u8) {
     world.tv_mut().set_backlight(u64::from(value));
+}
+
+#[given(regex = r#"the TV volume is (\d+)"#)]
+fn tv_volume(world: &mut LgBuddyWorld, value: u8) {
+    world.set_tv_volume(value);
+}
+
+#[given("the TV volume is unknown")]
+fn tv_volume_is_unknown(world: &mut LgBuddyWorld) {
+    world.set_tv_volume_unknown();
+}
+
+#[given(regex = r#"the TV is (muted|unmuted)"#)]
+fn tv_mute_state(world: &mut LgBuddyWorld, state: String) {
+    world.set_tv_muted(state == "muted");
 }
 
 #[given(regex = r#"the brightness dialog returns (\d+)"#)]
@@ -474,6 +494,16 @@ fn tv_input_is(world: &mut LgBuddyWorld, input: String) {
 #[then(regex = r#"the TV brightness is (\d+)"#)]
 fn tv_brightness_is(world: &mut LgBuddyWorld, value: u8) {
     world.assert_tv_brightness(value);
+}
+
+#[then(regex = r#"the TV volume is (\d+)"#)]
+fn tv_volume_is(world: &mut LgBuddyWorld, value: u8) {
+    world.assert_tv_volume(value);
+}
+
+#[then(regex = r#"the TV is (muted|unmuted)"#)]
+fn tv_mute_state_is(world: &mut LgBuddyWorld, state: String) {
+    world.assert_tv_muted(state == "muted");
 }
 
 #[then("the TV is powered off")]

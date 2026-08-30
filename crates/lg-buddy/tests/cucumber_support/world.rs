@@ -256,6 +256,10 @@ exit 1\n",
             .interrupt_restore_and_ack_input_without_unblanking();
     }
 
+    pub fn reject_native_set_mute(&self) {
+        self.webos_tv().reject_set_mute();
+    }
+
     pub fn configure_system_logind(&mut self, preparing_for_sleep: bool) {
         let logind = MockSystemLogind::new("cucumber-system-logind");
         logind.reset();
@@ -642,6 +646,46 @@ exit 1\n",
             assert_eq!(tv.snapshot().backlight, expected);
         } else {
             assert_eq!(self.tv().state_snapshot().backlight, expected);
+        }
+    }
+
+    pub fn set_tv_volume(&self, volume: u8) {
+        if let Some(tv) = &self.webos_tv {
+            tv.set_volume(i16::from(volume));
+        } else {
+            self.tv().set_volume(i16::from(volume));
+        }
+    }
+
+    pub fn set_tv_volume_unknown(&self) {
+        if let Some(tv) = &self.webos_tv {
+            tv.set_volume(-1);
+        } else {
+            self.tv().set_volume(-1);
+        }
+    }
+
+    pub fn set_tv_muted(&self, muted: bool) {
+        if let Some(tv) = &self.webos_tv {
+            tv.set_muted(muted);
+        } else {
+            self.tv().set_muted(muted);
+        }
+    }
+
+    pub fn assert_tv_volume(&self, expected: u8) {
+        if let Some(tv) = &self.webos_tv {
+            assert_eq!(tv.snapshot().volume, i16::from(expected));
+        } else {
+            assert_eq!(self.tv().state_snapshot().volume, i16::from(expected));
+        }
+    }
+
+    pub fn assert_tv_muted(&self, expected: bool) {
+        if let Some(tv) = &self.webos_tv {
+            assert_eq!(tv.snapshot().muted, expected);
+        } else {
+            assert_eq!(self.tv().state_snapshot().muted, expected);
         }
     }
 

@@ -47,6 +47,13 @@ const TURN_ON_SCREEN_URI: &str = "ssap://com.webos.service.tvpower/power/turnOnS
 const TURN_OFF_SCREEN_LEGACY_URI: &str = "ssap://com.webos.service.tv.power/turnOffScreen";
 const TURN_ON_SCREEN_LEGACY_URI: &str = "ssap://com.webos.service.tv.power/turnOnScreen";
 const POWER_OFF_URI: &str = "ssap://system/turnOff";
+const GET_AUDIO_STATUS_URI: &str = "ssap://audio/getStatus";
+const GET_AUDIO_VOLUME_URI: &str = "ssap://audio/getVolume";
+const GET_SOUND_OUTPUT_URI: &str = "ssap://com.webos.service.apiadapter/audio/getSoundOutput";
+const SET_AUDIO_VOLUME_URI: &str = "ssap://audio/setVolume";
+const AUDIO_VOLUME_UP_URI: &str = "ssap://audio/volumeUp";
+const AUDIO_VOLUME_DOWN_URI: &str = "ssap://audio/volumeDown";
+const SET_AUDIO_MUTE_URI: &str = "ssap://audio/setMute";
 
 static TEST_DIR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static WRITE_SETTINGS_SIGNED_ENVELOPE: OnceLock<Value> = OnceLock::new();
@@ -66,6 +73,7 @@ pub(in crate::web_os) enum WebOsTestScenario {
     RegistrationTimeout,
     RegistrationMissingClientKey,
     PowerStatePermissionDenied,
+    SetAudioMuteRejected,
     BacklightWriteAcknowledgedWithoutChange,
     CloseAfterFirstInputWrite,
     StallFirstRequest,
@@ -122,6 +130,8 @@ pub(in crate::web_os) struct WebOsTestTvSnapshot {
     pub(in crate::web_os) power_state: WebOsPowerState,
     pub(in crate::web_os) input: WebOsTestInput,
     pub(in crate::web_os) backlight: Value,
+    pub(in crate::web_os) volume: i16,
+    pub(in crate::web_os) muted: bool,
     pub(in crate::web_os) connection_count: u64,
     pub(in crate::web_os) pairing_prompt_count: u64,
     pub(in crate::web_os) registration_tokens: Vec<Option<String>>,
@@ -132,6 +142,8 @@ struct WebOsTestTv {
     power_state: WebOsPowerState,
     input: WebOsTestInput,
     backlight: Value,
+    volume: i16,
+    muted: bool,
     pending_luna_backlight: Option<(u64, bool)>,
 }
 
@@ -148,6 +160,8 @@ impl WebOsTestTv {
             power_state,
             input,
             backlight: input.backlight(),
+            volume: 20,
+            muted: false,
             pending_luna_backlight: None,
         }
     }
@@ -214,6 +228,101 @@ impl WebOsTestTv {
                         "returnValue": true,
                         "settings": {"backlight": self.backlight},
                         "subscribed": false,
+                    }),
+                )
+            }
+            GET_AUDIO_STATUS_URI => {
+                if !permissions.top_level.contains("CONTROL_AUDIO") {
+                    return webos_error(request_id, "401 insufficient permissions", json!({}));
+                }
+                assert_eq!(payload, &json!({}));
+                assert_eq!(self.power_state, WebOsPowerState::Active);
+                response(request_id, self.audio_status_payload())
+            }
+            GET_AUDIO_VOLUME_URI => {
+                if !permissions.top_level.contains("CONTROL_AUDIO") {
+                    return webos_error(request_id, "401 insufficient permissions", json!({}));
+                }
+                assert_eq!(payload, &json!({}));
+                assert_eq!(self.power_state, WebOsPowerState::Active);
+                response(request_id, self.audio_volume_payload())
+            }
+            GET_SOUND_OUTPUT_URI => {
+                if !permissions.top_level.contains("CONTROL_AUDIO") {
+                    return webos_error(request_id, "401 insufficient permissions", json!({}));
+                }
+                assert_eq!(payload, &json!({}));
+                assert_eq!(self.power_state, WebOsPowerState::Active);
+                response(
+                    request_id,
+                    json!({"returnValue": true, "soundOutput": "headphone"}),
+                )
+            }
+            SET_AUDIO_VOLUME_URI => {
+                if !permissions.top_level.contains("CONTROL_AUDIO") {
+                    return webos_error(request_id, "401 insufficient permissions", json!({}));
+                }
+                assert_eq!(self.power_state, WebOsPowerState::Active);
+                let volume = payload["volume"].as_i64().expect("set-volume value");
+                assert!(
+                    (0..=100).contains(&volume),
+                    "volume must be between 0 and 100"
+                );
+                assert_eq!(payload, &json!({"volume": volume}));
+                self.volume = volume as i16;
+                response(
+                    request_id,
+                    json!({"returnValue": true, "soundOutput": "", "volume": volume}),
+                )
+            }
+            AUDIO_VOLUME_UP_URI => {
+                if !permissions.top_level.contains("CONTROL_AUDIO") {
+                    return webos_error(request_id, "401 insufficient permissions", json!({}));
+                }
+                assert_eq!(payload, &json!({}));
+                assert_eq!(self.power_state, WebOsPowerState::Active);
+                assert!((0..=100).contains(&self.volume));
+                self.volume = (self.volume + 1).min(100);
+                response(
+                    request_id,
+                    json!({
+                        "returnValue": true,
+                        "soundOutput": "",
+                        "volume": self.volume,
+                    }),
+                )
+            }
+            AUDIO_VOLUME_DOWN_URI => {
+                if !permissions.top_level.contains("CONTROL_AUDIO") {
+                    return webos_error(request_id, "401 insufficient permissions", json!({}));
+                }
+                assert_eq!(payload, &json!({}));
+                assert_eq!(self.power_state, WebOsPowerState::Active);
+                assert!((0..=100).contains(&self.volume));
+                self.volume = (self.volume - 1).max(0);
+                response(
+                    request_id,
+                    json!({
+                        "returnValue": true,
+                        "soundOutput": "",
+                        "volume": self.volume,
+                    }),
+                )
+            }
+            SET_AUDIO_MUTE_URI => {
+                if !permissions.top_level.contains("CONTROL_AUDIO") {
+                    return webos_error(request_id, "401 insufficient permissions", json!({}));
+                }
+                assert_eq!(self.power_state, WebOsPowerState::Active);
+                let muted = payload["mute"].as_bool().expect("set-mute value");
+                assert_eq!(payload, &json!({"mute": muted}));
+                self.muted = muted;
+                response(
+                    request_id,
+                    json!({
+                        "muteStatus": muted,
+                        "returnValue": true,
+                        "soundOutput": "headphone",
                     }),
                 )
             }
@@ -381,6 +490,50 @@ impl WebOsTestTv {
             }
             other => panic!("no real-TV observation exists for webOS URI `{other}`"),
         }
+    }
+
+    fn audio_status_payload(&self) -> Value {
+        json!({
+            "callerId": "com.webos.service.apiadapter",
+            "mute": self.muted,
+            "returnValue": true,
+            "volume": self.volume,
+            "volumeStatus": {
+                "activeStatus": true,
+                "adjustVolume": true,
+                "externalDeviceControl": false,
+                "maxVolume": 100,
+                "mode": "normal",
+                "muteStatus": self.muted,
+                "ossActivate": false,
+                "soundOutput": "headphone",
+                "volume": self.volume,
+                "volumeLimitable": true,
+                "volumeLimiter": "none",
+                "volumeSyncable": true,
+            },
+        })
+    }
+
+    fn audio_volume_payload(&self) -> Value {
+        json!({
+            "callerId": "secondscreen.client",
+            "returnValue": true,
+            "volumeStatus": {
+                "activeStatus": true,
+                "adjustVolume": true,
+                "externalDeviceControl": false,
+                "maxVolume": 100,
+                "mode": "normal",
+                "muteStatus": self.muted,
+                "ossActivate": false,
+                "soundOutput": "headphone",
+                "volume": self.volume,
+                "volumeLimitable": true,
+                "volumeLimiter": "none",
+                "volumeSyncable": true,
+            },
+        })
     }
 }
 
@@ -584,6 +737,25 @@ impl WebOsTestServer {
     }
 
     #[allow(dead_code)]
+    pub(in crate::web_os) fn set_volume(&self, volume: i16) {
+        assert!(volume == -1 || (0..=100).contains(&volume));
+        self.runtime
+            .lock()
+            .expect("webOS test server state")
+            .tv
+            .volume = volume;
+    }
+
+    #[allow(dead_code)]
+    pub(in crate::web_os) fn set_muted(&self, muted: bool) {
+        self.runtime
+            .lock()
+            .expect("webOS test server state")
+            .tv
+            .muted = muted;
+    }
+
+    #[allow(dead_code)]
     pub(in crate::web_os) fn assert_healthy(&self) {
         assert!(
             !self.handle.as_ref().is_some_and(JoinHandle::is_finished),
@@ -597,6 +769,8 @@ impl WebOsTestServer {
             power_state: runtime.tv.power_state.clone(),
             input: runtime.tv.input,
             backlight: runtime.tv.backlight.clone(),
+            volume: runtime.tv.volume,
+            muted: runtime.tv.muted,
             connection_count: runtime.connection_count,
             pairing_prompt_count: runtime.pairing_prompt_count,
             registration_tokens: runtime.registration_tokens.clone(),
@@ -716,6 +890,7 @@ fn serve_connection<S>(
             WebOsTestScenario::StatefulTv
             | WebOsTestScenario::StoredTokenPairingPrompt
             | WebOsTestScenario::PowerStatePermissionDenied
+            | WebOsTestScenario::SetAudioMuteRejected
             | WebOsTestScenario::BacklightWriteAcknowledgedWithoutChange
             | WebOsTestScenario::CloseAfterFirstInputWrite
             | WebOsTestScenario::StallFirstRequest
@@ -729,6 +904,17 @@ fn serve_connection<S>(
                         Some(webos_error_without_payload(
                             request["id"].as_str().expect("webOS request ID"),
                             "-401 not permitted",
+                        ))
+                    } else if scenario == WebOsTestScenario::SetAudioMuteRejected
+                        && request["uri"] == SET_AUDIO_MUTE_URI
+                    {
+                        Some(response(
+                            request["id"].as_str().expect("webOS request ID"),
+                            json!({
+                                "returnValue": false,
+                                "errorCode": "-102",
+                                "errorText": "mute rejected",
+                            }),
                         ))
                     } else if scenario == WebOsTestScenario::CloseAfterFirstInputWrite
                         && request["uri"] == SET_INPUT_URI
@@ -848,6 +1034,7 @@ where
     match scenario {
         WebOsTestScenario::StatefulTv
         | WebOsTestScenario::PowerStatePermissionDenied
+        | WebOsTestScenario::SetAudioMuteRejected
         | WebOsTestScenario::BacklightWriteAcknowledgedWithoutChange
         | WebOsTestScenario::CloseAfterFirstInputWrite
         | WebOsTestScenario::StallFirstRequest
@@ -983,6 +1170,7 @@ where
         | WebOsTestScenario::RegistrationTimeout
         | WebOsTestScenario::RegistrationMissingClientKey
         | WebOsTestScenario::PowerStatePermissionDenied
+        | WebOsTestScenario::SetAudioMuteRejected
         | WebOsTestScenario::BacklightWriteAcknowledgedWithoutChange
         | WebOsTestScenario::CloseAfterFirstInputWrite
         | WebOsTestScenario::StallFirstRequest
@@ -1195,7 +1383,9 @@ impl Drop for TestAccessTokenStore {
 mod tests {
     use super::{
         write_settings_signed_envelope, WebOsTestInput, WebOsTestScenario, WebOsTestServer,
-        WebOsTestVersion, CLOSE_ALERT_URI, CREATE_ALERT_URI, GET_SYSTEM_SETTINGS_URI,
+        WebOsTestVersion, AUDIO_VOLUME_DOWN_URI, AUDIO_VOLUME_UP_URI, CLOSE_ALERT_URI,
+        CREATE_ALERT_URI, GET_AUDIO_STATUS_URI, GET_AUDIO_VOLUME_URI, GET_SOUND_OUTPUT_URI,
+        GET_SYSTEM_SETTINGS_URI, SET_AUDIO_MUTE_URI, SET_AUDIO_VOLUME_URI,
         SET_SYSTEM_SETTINGS_LUNA_URI, SET_SYSTEM_SETTINGS_URI, TEST_ALERT_ID_CLOSE,
         TEST_ALERT_ID_RESPONSE,
     };
@@ -1656,6 +1846,179 @@ mod tests {
             json!({"method": "setSystemSettings", "returnValue": true})
         );
         assert_eq!(read_backlight(&mut socket, "request_1"), json!(100));
+
+        drop(socket);
+        server.finish();
+    }
+
+    // Real-TV wire observation:
+    // tmp/webos-control-characterization/observations-46.md
+    // tmp/webos-control-characterization/captures/20260829T183755Z-audio-status.jsonl
+    // tmp/webos-control-characterization/captures/20260829T183805Z-audio-status.jsonl
+    // CONTROL_AUDIO is required for each observed audio endpoint.
+    #[test]
+    fn audio_endpoints_require_control_audio_and_preserve_observed_shapes() {
+        let server =
+            WebOsTestServer::active(WebOsTestVersion::WebOs24Version92261, WebOsTestInput::Hdmi3);
+        let mut without_audio = connect_registered(&server, &["READ_POWER_STATE"], None);
+
+        for (request_id, uri, payload) in [
+            ("request_0", GET_AUDIO_STATUS_URI, json!({})),
+            ("request_1", GET_AUDIO_VOLUME_URI, json!({})),
+            ("request_2", GET_SOUND_OUTPUT_URI, json!({})),
+            ("request_3", SET_AUDIO_VOLUME_URI, json!({"volume": 19})),
+            ("request_4", AUDIO_VOLUME_UP_URI, json!({})),
+            ("request_5", AUDIO_VOLUME_DOWN_URI, json!({})),
+            ("request_6", SET_AUDIO_MUTE_URI, json!({"mute": true})),
+        ] {
+            assert_eq!(
+                exchange(&mut without_audio, request_id, uri, payload),
+                json!({
+                    "id": request_id,
+                    "type": "error",
+                    "error": "401 insufficient permissions",
+                    "payload": {},
+                })
+            );
+        }
+        drop(without_audio);
+
+        let mut socket = connect_registered(&server, &["CONTROL_AUDIO"], None);
+        assert_eq!(
+            exchange(&mut socket, "request_0", GET_AUDIO_STATUS_URI, json!({})),
+            json!({
+                "id": "request_0",
+                "type": "response",
+                "payload": {
+                    "callerId": "com.webos.service.apiadapter",
+                    "mute": false,
+                    "returnValue": true,
+                    "volume": 20,
+                    "volumeStatus": {
+                        "activeStatus": true,
+                        "adjustVolume": true,
+                        "externalDeviceControl": false,
+                        "maxVolume": 100,
+                        "mode": "normal",
+                        "muteStatus": false,
+                        "ossActivate": false,
+                        "soundOutput": "headphone",
+                        "volume": 20,
+                        "volumeLimitable": true,
+                        "volumeLimiter": "none",
+                        "volumeSyncable": true,
+                    },
+                },
+            })
+        );
+        assert_eq!(
+            exchange(&mut socket, "request_1", GET_AUDIO_VOLUME_URI, json!({})),
+            json!({
+                "id": "request_1",
+                "type": "response",
+                "payload": {
+                    "callerId": "secondscreen.client",
+                    "returnValue": true,
+                    "volumeStatus": {
+                        "activeStatus": true,
+                        "adjustVolume": true,
+                        "externalDeviceControl": false,
+                        "maxVolume": 100,
+                        "mode": "normal",
+                        "muteStatus": false,
+                        "ossActivate": false,
+                        "soundOutput": "headphone",
+                        "volume": 20,
+                        "volumeLimitable": true,
+                        "volumeLimiter": "none",
+                        "volumeSyncable": true,
+                    },
+                },
+            })
+        );
+        assert_eq!(
+            exchange(&mut socket, "request_2", GET_SOUND_OUTPUT_URI, json!({})),
+            json!({
+                "id": "request_2",
+                "type": "response",
+                "payload": {"returnValue": true, "soundOutput": "headphone"},
+            })
+        );
+
+        drop(socket);
+        server.finish();
+    }
+
+    // Real-TV wire observation:
+    // tmp/webos-control-characterization/observations-46.md
+    // tmp/webos-control-characterization/captures/20260829T183819Z-audio-controls.jsonl
+    #[test]
+    fn audio_controls_mutate_only_the_addressed_state() {
+        let server =
+            WebOsTestServer::active(WebOsTestVersion::WebOs24Version92261, WebOsTestInput::Hdmi3);
+        let mut socket = connect_registered(&server, &["CONTROL_AUDIO"], None);
+
+        assert_eq!(
+            exchange(&mut socket, "request_0", AUDIO_VOLUME_DOWN_URI, json!({})),
+            json!({
+                "id": "request_0",
+                "type": "response",
+                "payload": {"returnValue": true, "soundOutput": "", "volume": 19},
+            })
+        );
+        assert_eq!(server.snapshot().volume, 19);
+        assert!(!server.snapshot().muted);
+        assert_eq!(
+            exchange(&mut socket, "request_1", AUDIO_VOLUME_UP_URI, json!({})),
+            json!({
+                "id": "request_1",
+                "type": "response",
+                "payload": {"returnValue": true, "soundOutput": "", "volume": 20},
+            })
+        );
+        assert_eq!(
+            exchange(
+                &mut socket,
+                "request_2",
+                SET_AUDIO_VOLUME_URI,
+                json!({"volume": 19}),
+            ),
+            json!({
+                "id": "request_2",
+                "type": "response",
+                "payload": {"returnValue": true, "soundOutput": "", "volume": 19},
+            })
+        );
+        assert_eq!(
+            exchange(
+                &mut socket,
+                "request_3",
+                SET_AUDIO_MUTE_URI,
+                json!({"mute": true}),
+            ),
+            json!({
+                "id": "request_3",
+                "type": "response",
+                "payload": {"muteStatus": true, "returnValue": true, "soundOutput": "headphone"},
+            })
+        );
+        assert!(server.snapshot().muted);
+        exchange(
+            &mut socket,
+            "request_4",
+            SET_AUDIO_VOLUME_URI,
+            json!({"volume": 20}),
+        );
+        let snapshot = server.snapshot();
+        assert_eq!(snapshot.volume, 20);
+        assert!(snapshot.muted);
+        exchange(
+            &mut socket,
+            "request_5",
+            SET_AUDIO_MUTE_URI,
+            json!({"mute": false}),
+        );
+        assert!(!server.snapshot().muted);
 
         drop(socket);
         server.finish();

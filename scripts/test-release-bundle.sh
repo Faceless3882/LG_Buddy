@@ -60,6 +60,12 @@ assert_cli_surface() {
     fi
 
     printf '%s\n' "$help_output" | grep -q "lg-buddy"
+    printf '%s\n' "$help_output" | grep -F -q "volume <0-100>"
+    printf '%s\n' "$help_output" | grep -F -q "volume up"
+    printf '%s\n' "$help_output" | grep -F -q "volume down"
+    printf '%s\n' "$help_output" | grep -F -q "volume mute"
+    printf '%s\n' "$help_output" | grep -F -q "volume mute on"
+    printf '%s\n' "$help_output" | grep -F -q "volume mute off"
     printf '%s\n' "$help_output" | grep -F -q "power on"
     printf '%s\n' "$help_output" | grep -F -q "power off"
     printf '%s\n' "$help_output" | grep -F -q "screen off"
@@ -77,6 +83,9 @@ assert_cli_surface() {
 
     "$binary" power on --help | grep -F -q "power on"
     "$binary" power off --help | grep -F -q "power off"
+    "$binary" volume --help | grep -F -q "volume <0-100>"
+    "$binary" volume up --help | grep -F -q "volume up"
+    "$binary" volume mute on --help | grep -F -q "volume mute on"
     "$binary" screen off --help | grep -F -q "screen off"
     "$binary" screen on --help | grep -F -q "screen on"
 

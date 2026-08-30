@@ -1,6 +1,7 @@
 //! Native LG webOS protocol support.
 
 mod adapter;
+mod audio;
 mod client;
 mod control;
 mod input;
@@ -16,6 +17,7 @@ mod tls;
 
 pub(crate) use adapter::WebOsPairingPolicy;
 pub use adapter::WebOsTvClient;
+pub use audio::{WebOsAudioStatus, WebOsAudioStatusError, WebOsAudioVolume};
 pub(crate) use client::WebOsClientRegistration;
 pub use client::{
     WebOsAuthenticatedClientError, WebOsAuthenticationEvent, WebOsClient, WebOsClientError,

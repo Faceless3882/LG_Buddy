@@ -21,6 +21,10 @@ lg-buddy screen on
 lg-buddy brightness
 lg-buddy brightness get
 lg-buddy brightness set 65
+lg-buddy volume
+lg-buddy volume 20
+lg-buddy volume up
+lg-buddy volume mute
 lg-buddy settings list
 lg-buddy settings describe screen.backend
 lg-buddy updates check
@@ -37,6 +41,10 @@ syntax.
 - `screen on` restores the output according to the configured restore policy.
 - `brightness` opens the desktop brightness dialog. `brightness get` and
   `brightness set <0-100>` read or change OLED brightness directly.
+- `volume` prints the current level, `mute` when muted, or `unknown` when the TV
+  does not expose a numeric level. `volume <0-100>`, `volume up`, and `volume
+  down` change the volume and unmute the TV. `volume mute [on|off]` toggles or
+  explicitly sets mute.
 - `--version` reports the installed version and, for official builds, release
   metadata.
 

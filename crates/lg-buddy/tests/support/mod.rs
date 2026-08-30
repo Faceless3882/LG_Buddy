@@ -37,6 +37,8 @@ impl MockBscpylgtv {
             "screen_on": true,
             "input": "HDMI_3",
             "backlight": 50,
+            "volume": 20,
+            "muted": false,
             "plan": {},
             "calls": [],
         }));
@@ -73,6 +75,14 @@ impl MockBscpylgtv {
 
     pub fn set_backlight(&self, value: u64) {
         self.patch_state(json!({ "backlight": value }));
+    }
+
+    pub fn set_volume(&self, value: i16) {
+        self.patch_state(json!({ "volume": value }));
+    }
+
+    pub fn set_muted(&self, value: bool) {
+        self.patch_state(json!({ "muted": value }));
     }
 
     pub fn queue_success(&self, command: &str, stdout: &str) {
@@ -171,6 +181,14 @@ impl MockBscpylgtv {
                 .get("backlight")
                 .and_then(Value::as_u64)
                 .expect("mock state backlight integer") as u8,
+            volume: state
+                .get("volume")
+                .and_then(Value::as_i64)
+                .expect("mock state volume integer") as i16,
+            muted: state
+                .get("muted")
+                .and_then(Value::as_bool)
+                .expect("mock state muted bool"),
         }
     }
 
@@ -1356,6 +1374,8 @@ pub struct MockStateSnapshot {
     pub screen_on: bool,
     pub input: String,
     pub backlight: u8,
+    pub volume: i16,
+    pub muted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

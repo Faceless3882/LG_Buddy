@@ -85,6 +85,14 @@ responds. Controls mutate server state, and later reads expose that state. This
 lets tests verify an operation through an independent observation instead of
 only accepting its immediate acknowledgement.
 
+Audio characterization models the observed `CONTROL_AUDIO` permission and the
+native `ssap://audio/getStatus`, `audio/setVolume`, `audio/volumeUp`,
+`audio/volumeDown`, and `audio/setMute` operations. The protocol fixture changes
+only the state addressed by each request; the CLI sends an explicit unmute after
+numeric volume changes. A reported volume of `-1` is represented as an unknown
+value rather than rejected as malformed. Local hardware validation used the
+TV's headphone output; ARC/eARC volume behavior remains unvalidated.
+
 Tests select a firmware profile plus semantic scenarios such as registration
 rejection, response timeout, malformed frame, or permission denial. They cannot
 author raw server frames. Successful responses, rejected operations, accepted

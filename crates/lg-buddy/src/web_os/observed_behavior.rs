@@ -1,6 +1,6 @@
 use super::test_support::{WebOsTestInput, WebOsTestScenario, WebOsTestServer, WebOsTestVersion};
 use super::{
-    WebOsAuthenticatedClientError, WebOsBacklightBrightness, WebOsClientError,
+    WebOsAudioVolume, WebOsAuthenticatedClientError, WebOsBacklightBrightness, WebOsClientError,
     WebOsClientRegistrationError, WebOsControlError, WebOsInputId, WebOsPowerState,
     WebOsScreenControlError, WebOsSetBacklightBrightnessError,
 };
@@ -9,6 +9,66 @@ use serde_json::json;
 
 const TURN_OFF_SCREEN_LEGACY_URI: &str = "ssap://com.webos.service.tv.power/turnOffScreen";
 const TURN_ON_SCREEN_LEGACY_URI: &str = "ssap://com.webos.service.tv.power/turnOnScreen";
+
+// Real-TV wire observation:
+// tmp/webos-control-characterization/observations-46.md
+// tmp/webos-control-characterization/captures/20260829T183755Z-audio-status.jsonl
+// tmp/webos-control-characterization/captures/20260829T183805Z-audio-status.jsonl
+// tmp/webos-control-characterization/captures/20260829T183819Z-audio-controls.jsonl
+// tmp/webos-control-characterization/captures/20260829T183837Z-audio-status.jsonl
+#[test]
+fn audio_status_and_controls_match_observed_tv_behavior() {
+    let server =
+        WebOsTestServer::active(WebOsTestVersion::WebOs24Version92261, WebOsTestInput::Hdmi3);
+    let mut client = server
+        .connect_authenticated()
+        .expect("connect to observed webOS TV");
+
+    let status = client.audio_status().expect("read initial audio status");
+    assert_eq!(status.volume(), WebOsAudioVolume::Known(20));
+    assert!(!status.is_muted());
+
+    client.volume_down().expect("decrease volume");
+    let status = client.audio_status().expect("read decreased audio status");
+    assert_eq!(status.volume(), WebOsAudioVolume::Known(19));
+    assert!(!status.is_muted());
+
+    client.volume_up().expect("increase volume");
+    assert_eq!(
+        client
+            .audio_status()
+            .expect("read restored step audio status")
+            .volume(),
+        WebOsAudioVolume::Known(20)
+    );
+
+    client.set_volume(19).expect("set absolute volume");
+    assert_eq!(
+        client
+            .audio_status()
+            .expect("read absolute volume")
+            .volume(),
+        WebOsAudioVolume::Known(19)
+    );
+
+    client.set_muted(true).expect("set mute");
+    let status = client.audio_status().expect("read muted audio status");
+    assert_eq!(status.volume(), WebOsAudioVolume::Known(19));
+    assert!(status.is_muted());
+
+    client.set_volume(20).expect("restore volume");
+    client.set_muted(false).expect("restore mute");
+    let status = client.audio_status().expect("read final audio status");
+    assert_eq!(status.volume(), WebOsAudioVolume::Known(20));
+    assert!(!status.is_muted());
+
+    let snapshot = server.snapshot();
+    assert_eq!(snapshot.volume, 20);
+    assert!(!snapshot.muted);
+
+    drop(client);
+    server.finish();
+}
 
 // Real-TV wire observations:
 // https://github.com/Staphylococcus/LG_Buddy/issues/50#issuecomment-5102465348

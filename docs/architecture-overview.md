@@ -107,7 +107,7 @@ flowchart LR
     end
 
     subgraph TTY["TTY / CLI"]
-        TERMINAL["terminal commands<br/>settings / brightness / updates / manual actions"]
+        TERMINAL["terminal commands<br/>settings / brightness / volume / updates / manual actions"]
     end
 
     subgraph Frontend["Frontend"]
@@ -268,10 +268,12 @@ The intended split is:
   - profile-bound `bscpylgtvcommand` adapter
   - configured selection between the compatibility and native adapters
   - adapter-neutral errors and selected-client construction
-  - typed facade for input, screen, power, and brightness operations
+  - typed facade for input, screen, power, brightness, and audio operations
 - `web_os/adapter.rs`
   - profile-bound native webOS adapter
   - lazy authenticated session ownership, serialization, reuse, and invalidation
+- `web_os/audio.rs`
+  - typed native SSAP volume and mute requests and responses
 - `wol.rs`
   - native Wake-on-LAN packet generation and UDP send
 - `backend.rs`
@@ -367,6 +369,11 @@ The intended public user-action surface is:
 - `brightness`
 - `brightness get`
 - `brightness set <0-100>`
+- `volume`
+- `volume <0-100>`
+- `volume up`
+- `volume down`
+- `volume mute [on|off]`
 - `screen off`
 - `screen on`
 - `settings list`
@@ -414,6 +421,9 @@ The `brightness get` and `brightness set` commands use the TV picture
 abstraction in `tv.rs` for typed OLED brightness validation and live TV
 read/write operations. The interactive brightness dialog delegates its TV
 operations back through those CLI commands.
+The `volume` family uses the TV audio abstraction for typed volume and mute
+operations. Setting or stepping volume explicitly unmutes after the volume
+operation; mute toggle reads the current state before writing its inverse.
 
 This keeps CLI parsing separate from operational behavior.
 
@@ -559,6 +569,11 @@ The current contract covers:
 - `set_input`
 - `oled_brightness`
 - `set_oled_brightness`
+- `audio_status`
+- `set_volume`
+- `volume_up`
+- `volume_down`
+- `set_muted`
 - `power_off`
 - `blank_screen`
 - `unblank_screen`
@@ -573,6 +588,10 @@ The current contract covers:
 - `tv.power().wake(...)`
 - `tv.picture().oled_brightness()`
 - `tv.picture().set_oled_brightness(...)`
+- `tv.audio().status()`
+- `tv.audio().set_volume(...)`
+- `tv.audio().volume_up()` / `tv.audio().volume_down()`
+- `tv.audio().set_muted(...)`
 
 Successful effectful operations return no transport-specific output. Failures
 are normalized into typed TV errors. Policy may react to adapter-neutral
@@ -810,6 +829,7 @@ The Rust runtime currently owns:
 - screen off
 - screen on
 - brightness control
+- volume and mute control
 - `monitor` command with GNOME, native Wayland, and `swayidle` paths
 
 The shell layer still owns:

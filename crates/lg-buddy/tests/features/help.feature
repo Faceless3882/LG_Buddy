@@ -6,6 +6,12 @@ Feature: Public CLI help
     Then the command succeeds
     And stdout contains "brightness get"
     And stdout contains "brightness set <0-100>"
+    And stdout contains "volume <0-100>"
+    And stdout contains "volume up"
+    And stdout contains "volume down"
+    And stdout contains "volume mute"
+    And stdout contains "volume mute on"
+    And stdout contains "volume mute off"
     And stdout contains "power on"
     And stdout contains "power off"
     And stdout contains "screen off"
@@ -32,3 +38,14 @@ Feature: Public CLI help
     And stdout does not contain "updates background-check"
     And stdout does not contain "  dev "
     And stdout does not contain "webos-auth-probe"
+
+  Scenario: Volume help is available at the scoped command level
+    When I run the command "volume --help"
+    Then the command succeeds
+    And stdout contains "volume <0-100>"
+    And stdout contains "volume up"
+    And stdout contains "volume down"
+    And stdout contains "volume mute"
+    And stdout contains "volume mute on"
+    And stdout contains "volume mute off"
+    And stdout does not contain "volume set"

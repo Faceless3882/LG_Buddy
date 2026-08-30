@@ -285,7 +285,8 @@ impl LifecycleEvent {
             | RuntimeEventKind::UserActivityObserved
             | RuntimeEventKind::ScreenBlankRequested
             | RuntimeEventKind::ScreenRestoreRequested
-            | RuntimeEventKind::BrightnessRequested => None,
+            | RuntimeEventKind::BrightnessRequested
+            | RuntimeEventKind::VolumeRequested => None,
         }
     }
 }

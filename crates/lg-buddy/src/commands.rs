@@ -14,9 +14,12 @@ use crate::notifications::{FreedesktopNotifier, Notification, NotificationError,
 use crate::state::{
     ScreenOwnershipMarker, StateScope, SystemSleepAttemptState, SystemSleepCycleState,
 };
-use crate::tv::{build_tv_client, OledBrightness, TvClient, TvClientBuildOptions, TvDevice};
+use crate::tv::{
+    build_tv_client, AudioStatus, OledBrightness, TvClient, TvClientBuildOptions, TvDevice,
+    VolumeLevel,
+};
 use crate::wol::UdpWakeOnLanSender;
-use crate::{BrightnessCommand, RunError, StartupMode};
+use crate::{BrightnessCommand, MuteCommand, RunError, StartupMode, VolumeCommand};
 
 const SYSTEM_PRE_SLEEP_TV_COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
 trait ReachabilityChecker {
@@ -363,6 +366,19 @@ pub fn run_brightness<W: Write>(
     }
 }
 
+pub fn run_volume<W: Write>(writer: &mut W, command: VolumeCommand) -> Result<(), RunError> {
+    let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
+    let config = load_config(&config_path).map_err(RunError::Config)?;
+    let tv_client = build_tv_client(
+        &config_path,
+        config.tv_ip,
+        config.tv_platform,
+        TvClientBuildOptions::production(),
+    )?;
+
+    run_volume_command_with(writer, &config, command, &tv_client)
+}
+
 pub fn run_startup<W: Write>(writer: &mut W, mode: StartupMode) -> Result<(), RunError> {
     let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
     let config = load_config(&config_path).map_err(RunError::Config)?;
@@ -531,6 +547,98 @@ fn run_brightness_command_with<W: Write, C: TvClient>(
             Ok(())
         }
     }
+}
+
+fn run_volume_command_with<W: Write, C: TvClient>(
+    writer: &mut W,
+    config: &Config,
+    command: VolumeCommand,
+    tv_client: &C,
+) -> Result<(), RunError> {
+    match command {
+        VolumeCommand::Get => {
+            let status = read_audio_status(config, tv_client)?;
+            if status.is_muted() {
+                writeln!(writer, "mute")?;
+            } else {
+                writeln!(writer, "{}", status.volume())?;
+            }
+        }
+        VolumeCommand::Set(volume) => {
+            set_volume_and_unmute(config, tv_client, volume)?;
+            writeln!(writer, "LG Buddy Volume: Set volume to {volume}.")?;
+        }
+        VolumeCommand::Up => {
+            change_volume_and_unmute(config, tv_client, VolumeChange::Up)?;
+            writeln!(writer, "LG Buddy Volume: Increased volume.")?;
+        }
+        VolumeCommand::Down => {
+            change_volume_and_unmute(config, tv_client, VolumeChange::Down)?;
+            writeln!(writer, "LG Buddy Volume: Decreased volume.")?;
+        }
+        VolumeCommand::Mute(command) => {
+            let muted = match command {
+                MuteCommand::Toggle => !read_audio_status(config, tv_client)?.is_muted(),
+                MuteCommand::On => true,
+                MuteCommand::Off => false,
+            };
+            set_muted(config, tv_client, muted)?;
+            let state = if muted { "Muted" } else { "Unmuted" };
+            writeln!(writer, "LG Buddy Volume: {state}.")?;
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VolumeChange {
+    Up,
+    Down,
+}
+
+fn read_audio_status<C: TvClient>(config: &Config, tv_client: &C) -> Result<AudioStatus, RunError> {
+    TvDevice::new(tv_client, config.tv_ip)
+        .audio()
+        .status()
+        .map_err(|err| RunError::Policy(format!("failed to read volume: {err}")))
+}
+
+fn set_volume_and_unmute<C: TvClient>(
+    config: &Config,
+    tv_client: &C,
+    volume: VolumeLevel,
+) -> Result<(), RunError> {
+    let audio = TvDevice::new(tv_client, config.tv_ip).audio();
+    audio
+        .set_volume(volume)
+        .map_err(|err| RunError::Policy(format!("failed to set volume: {err}")))?;
+    audio
+        .set_muted(false)
+        .map_err(|err| RunError::Policy(format!("volume was changed, but unmuting failed: {err}")))
+}
+
+fn change_volume_and_unmute<C: TvClient>(
+    config: &Config,
+    tv_client: &C,
+    change: VolumeChange,
+) -> Result<(), RunError> {
+    let audio = TvDevice::new(tv_client, config.tv_ip).audio();
+    let result = match change {
+        VolumeChange::Up => audio.volume_up(),
+        VolumeChange::Down => audio.volume_down(),
+    };
+    result.map_err(|err| RunError::Policy(format!("failed to change volume: {err}")))?;
+    audio
+        .set_muted(false)
+        .map_err(|err| RunError::Policy(format!("volume was changed, but unmuting failed: {err}")))
+}
+
+fn set_muted<C: TvClient>(config: &Config, tv_client: &C, muted: bool) -> Result<(), RunError> {
+    TvDevice::new(tv_client, config.tv_ip)
+        .audio()
+        .set_muted(muted)
+        .map_err(|err| RunError::Policy(format!("failed to set mute: {err}")))
 }
 
 fn run_brightness_prompt_with<

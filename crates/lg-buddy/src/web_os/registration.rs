@@ -372,7 +372,8 @@ mod tests {
                 "READ_SETTINGS",
                 "WRITE_NOTIFICATION_ALERT",
                 "WRITE_NOTIFICATION_TOAST",
-                "WRITE_SETTINGS"
+                "WRITE_SETTINGS",
+                "CONTROL_AUDIO"
             ])
         );
         assert!(manifest.get("signed").is_none());
