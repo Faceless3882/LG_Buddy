@@ -306,6 +306,25 @@ formats, archive layout, and binary version/channel/commit mismatches. The
 bundle smoke test then exercises the same validator against the generated and
 installed release binary.
 
+The upgrade-preflight module uses injected process, service-manager,
+filesystem, and ownership facts around a real temporary-root installation
+fixture. Its focused suite covers a passing mutable FHS layout plus symlinked,
+mounted, incompletely or wrongly owned, untrusted-writable, read-only,
+hard-linked, legacy, conflicting-drop-in, malformed-candidate, and
+unavailable-service-manager refusals. Table-driven cases exercise every path
+policy's permission contract and every declared candidate input. Candidate
+containment cases reject untrusted and non-sticky shared-writable ancestors
+while preserving root-owned sticky temporary directories; recursive repair
+coverage also refuses nested mount points below the virtualenv root. Run it with:
+
+```bash
+cargo test -p lg-buddy upgrade_preflight::tests --lib
+```
+
+The initial and candidate checks are deliberately non-mutating. Orchestration
+tests for their consumers must separately prove that a refusal prevents release
+client, confirmation, sudo, and installer effects.
+
 ## Current Practical Gaps
 
 The most important remaining gaps are:

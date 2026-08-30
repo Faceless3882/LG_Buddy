@@ -74,7 +74,9 @@ jobs:
         run: cargo build --release -p lg-buddy --target x86_64-unknown-linux-musl
 
       - name: Create release bundle
-        run: ./scripts/build-release-bundle.sh --target x86_64-unknown-linux-musl --version 0.0.0-ci.smoke --output-dir dist
+        run: |
+          umask 0002
+          ./scripts/build-release-bundle.sh --target x86_64-unknown-linux-musl --version 0.0.0-ci.smoke --output-dir dist
 
       - name: Smoke test release bundle
         run: |

@@ -16,6 +16,18 @@ assert_file() {
     fi
 }
 
+assert_mode() {
+    local path="$1"
+    local expected="$2"
+    local actual=""
+
+    actual="$(stat -c '%a' "$path")"
+    if [ "$actual" != "$expected" ]; then
+        echo "Expected mode $expected for $path, got $actual"
+        exit 1
+    fi
+}
+
 assert_executable() {
     local path="$1"
 
@@ -287,6 +299,7 @@ assert_file "$BUNDLE_DIR/LG_Buddy_Brightness.desktop"
 assert_file "$BUNDLE_DIR/README.md"
 assert_file "$BUNDLE_DIR/LICENSE"
 assert_file "$BUNDLE_DIR/release-manifest.json"
+assert_mode "$BUNDLE_DIR/release-manifest.json" 644
 assert_file "$BUNDLE_DIR/docs/architecture-overview.md"
 assert_file "$BUNDLE_DIR/docs/runtime-event-handler-map.md"
 assert_file "$BUNDLE_DIR/docs/user-guide.md"

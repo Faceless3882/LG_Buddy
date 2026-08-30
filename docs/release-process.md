@@ -96,6 +96,24 @@ compares it with both the bundled and installed binary. Publishing validates
 the manifest directly from each archive without extracting or executing archive
 content.
 
+## Upgrade compatibility preflight
+
+Release-bundle replacement is guarded by observed capability rather than a
+distribution allowlist or provenance receipt. The initial runtime preflight
+checks the installed mutable FHS topology, config discovery, ownership, path
+types and mount boundaries, trusted system containment, integration override
+state, and system/user service-manager availability before an updater performs
+release or privilege-related effects. A verified candidate's binary performs a
+second pass for its own installer requirements and trusted external ancestor
+chain before privileged mutation.
+The checker assigns each target an installer-operation policy so replacement,
+directory mutation, recursive repair, exact drop-in, and candidate-input
+requirements cannot silently lose their operation-specific safeguards.
+
+This is intentionally a conservative and evolving refusal boundary. It does
+not migrate legacy layouts, declare broad host support, or guarantee that a
+later privileged operation cannot fail.
+
 ## Nix source selection
 
 Nix configurations may select `main`, `prerelease`, or `dev` as the upstream

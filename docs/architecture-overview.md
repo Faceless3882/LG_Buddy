@@ -263,6 +263,12 @@ The intended split is:
   - runtime directory resolution
   - system/session state separation
   - ownership marker management
+- `upgrade_preflight.rs`
+  - observes whether the current release-bundle installation can be replaced
+    safely
+  - returns structured, actionable refusals without downloading or mutating
+    anything
+  - provides separate installed-runtime and verified-candidate entrypoints
 - `tv.rs`
   - TV transport abstraction
   - profile-bound `bscpylgtvcommand` adapter
@@ -427,6 +433,42 @@ operations. Setting or stepping volume explicitly unmutes after the volume
 operation; mute toggle reads the current state before writing its inverse.
 
 This keeps CLI parsing separate from operational behavior.
+
+## Host Upgrade Safety Boundary
+
+`upgrade_preflight.rs` checks observable host and installation state. It does
+not infer upgrade support from the distribution name, a build flag, an install
+receipt, or where the binary originally came from.
+
+The initial preflight expects the running binary to be the mutable
+`/usr/bin/lg-buddy` installation. It checks the conventional release-bundle
+filesystem topology, ordinary file and directory types, ownership, writable
+mounts, config-pointer discovery, readable configuration state, user and system
+integrations, systemd manager availability, and the absence of legacy layouts
+that would require migration. Each path is tied to the future upgrade
+operation that consumes it: file replacement, executable replacement,
+directory mutation, recursive virtualenv repair, or exact drop-in replacement.
+Those policies carry their ownership, permission, link, mount, and containment
+invariants. Symlinks, mounted or multiply linked replacement targets, nested
+mounts below a recursively cleared virtualenv, untrusted writable system paths,
+unexpected systemd drop-ins, read-only mutation targets, and special files in
+owned config state are refused.
+
+After a bundle has been verified, its candidate binary can run the second
+preflight. That pass rechecks the installed state, proves it is executing the
+candidate from the supplied bundle root, and checks the candidate manifest,
+installer, runtime, desktop entry, and systemd assets before any privileged
+mutation. Candidate inputs must be owner-usable and not writable by another
+user. The external ancestor chain must remain root- or user-owned and cannot be
+shared-writable unless sticky-directory semantics protect its trusted child.
+Configuration and pairing scripts are deliberately excluded because the
+non-interactive upgrade mode preserves existing configuration and credentials
+without invoking them.
+
+These checks are a conservative, evolving safety boundary, not an exhaustive
+host-support declaration or a promise that no later privileged operation can
+fail. New observable checks can be added as real installations expose unsafe
+conditions; callers only consume the structured compatibility result.
 
 ## Core Control Flows
 
