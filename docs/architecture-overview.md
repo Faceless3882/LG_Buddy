@@ -445,14 +445,13 @@ The initial preflight expects the running binary to be the mutable
 filesystem topology, ordinary file and directory types, ownership, writable
 mounts, config-pointer discovery, readable configuration state, user and system
 integrations, systemd manager availability, and the absence of legacy layouts
-that would require migration. Each path is tied to the future upgrade
+that would require migration. Each path is tied to the upgrade
 operation that consumes it: file replacement, executable replacement,
-directory mutation, recursive virtualenv repair, or exact drop-in replacement.
-Those policies carry their ownership, permission, link, mount, and containment
-invariants. Symlinks, mounted or multiply linked replacement targets, nested
-mounts below a recursively cleared virtualenv, untrusted writable system paths,
-unexpected systemd drop-ins, read-only mutation targets, and special files in
-owned config state are refused.
+directory mutation, read-only input, or exact drop-in replacement. Those
+policies carry their ownership, permission, link, mount, and containment
+invariants. Symlinks, mounted or multiply linked replacement targets,
+untrusted writable system paths, unexpected systemd drop-ins, read-only
+mutation targets, and special files in owned config state are refused.
 
 After a bundle has been verified, its candidate binary can run the second
 preflight. That pass rechecks the installed state, proves it is executing the
@@ -464,6 +463,13 @@ shared-writable unless sticky-directory semantics protect its trusted child.
 Configuration and pairing scripts are deliberately excluded because the
 non-interactive upgrade mode preserves existing configuration and credentials
 without invoking them.
+
+The installer then reads the existing platform choice and checks the legacy
+Python environment without mutating either. Native installations and healthy
+compatibility environments preserve that directory unchanged. Only an
+unhealthy compatibility environment triggers a second candidate preflight for
+recursive repair; that conditional pass also refuses unsafe virtualenv roots
+and nested mounts before the directory is cleared.
 
 These checks are a conservative, evolving safety boundary, not an exhaustive
 host-support declaration or a promise that no later privileged operation can

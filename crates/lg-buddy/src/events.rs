@@ -109,7 +109,8 @@ impl RuntimeEventKind {
             | Command::DetectBackend
             | Command::Dev(_)
             | Command::Settings(_)
-            | Command::Updates(_) => None,
+            | Command::Updates(_)
+            | Command::UpgradePreflight { .. } => None,
         }
     }
 }

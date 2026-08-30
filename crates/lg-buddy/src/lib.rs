@@ -47,8 +47,10 @@ use crate::tv::{
     VolumeLevelParseError,
 };
 use crate::updates::{run_updates_command, UpdatesCommand, UpdatesError, UpdatesParseError};
+use crate::upgrade_preflight::CompatibilityReport;
 use std::fmt;
 use std::io::{self, Write};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -69,6 +71,10 @@ pub enum Command {
     Dev(DevCommand),
     Settings(SettingsCommand),
     Updates(UpdatesCommand),
+    UpgradePreflight {
+        candidate_root: PathBuf,
+        repair_python: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -205,6 +211,7 @@ pub enum ParseError {
     Dev(DevParseError),
     Settings(SettingsParseError),
     Updates(UpdatesParseError),
+    MissingUpgradePreflightRoot,
     UnexpectedArguments {
         command: Command,
         arguments: Vec<String>,
@@ -255,6 +262,9 @@ impl fmt::Display for ParseError {
             Self::Dev(err) => write!(f, "{err}"),
             Self::Settings(err) => write!(f, "{err}"),
             Self::Updates(err) => write!(f, "{err}"),
+            Self::MissingUpgradePreflightRoot => {
+                write!(f, "missing candidate root for `upgrade-preflight`")
+            }
             Self::UnexpectedArguments { command, arguments } => {
                 write!(
                     f,
@@ -280,6 +290,7 @@ pub enum RunError {
     Dev(DevError),
     Settings(SettingsError),
     Updates(UpdatesError),
+    UpgradePreflight(CompatibilityReport),
     NotificationAfterPrimary {
         primary: Box<RunError>,
         notification: NotificationError,
@@ -300,6 +311,7 @@ impl fmt::Display for RunError {
             Self::Dev(err) => write!(f, "{err}"),
             Self::Settings(err) => write!(f, "{err}"),
             Self::Updates(err) => write!(f, "{err}"),
+            Self::UpgradePreflight(report) => write!(f, "{report}"),
             Self::NotificationAfterPrimary {
                 primary,
                 notification,
@@ -325,6 +337,7 @@ impl std::error::Error for RunError {
             Self::Dev(err) => Some(err),
             Self::Settings(err) => Some(err),
             Self::Updates(err) => Some(err),
+            Self::UpgradePreflight(_) => None,
             Self::NotificationAfterPrimary { primary, .. } => Some(primary.as_ref()),
         }
     }
@@ -413,6 +426,7 @@ impl Command {
             Self::Dev(command) => command.as_str(),
             Self::Settings(_) => "settings",
             Self::Updates(_) => "updates",
+            Self::UpgradePreflight { .. } => "upgrade-preflight",
         }
     }
 
@@ -435,6 +449,7 @@ impl Command {
             Self::Dev(_) => "TODO: implemented via temporary dev command handler",
             Self::Settings(_) => "TODO: implemented via command handler",
             Self::Updates(_) => "TODO: implemented via command handler",
+            Self::UpgradePreflight { .. } => "TODO: implemented via command handler",
         }
     }
 }
@@ -701,6 +716,33 @@ where
         }
         "settings" => return parse_settings_command(args),
         "updates" => return parse_updates_command(args),
+        "upgrade-preflight" => {
+            let candidate_root = PathBuf::from(
+                args.next()
+                    .ok_or(ParseError::MissingUpgradePreflightRoot)?
+                    .as_ref(),
+            );
+            let mut repair_python = false;
+            let mut unexpected = Vec::new();
+            for argument in args {
+                if argument.as_ref() == "--repair-python" && !repair_python {
+                    repair_python = true;
+                } else {
+                    unexpected.push(argument.as_ref().to_string());
+                }
+            }
+            let command = Command::UpgradePreflight {
+                candidate_root,
+                repair_python,
+            };
+            if !unexpected.is_empty() {
+                return Err(ParseError::UnexpectedArguments {
+                    command,
+                    arguments: unexpected,
+                });
+            }
+            return Ok(ParseOutcome::Command(command));
+        }
         "dev" => {
             return DevCommand::parse(args)
                 .map(|command| ParseOutcome::Command(Command::Dev(command)))
@@ -757,6 +799,19 @@ pub fn run_command<W: Write>(command: Command, writer: &mut W) -> Result<(), Run
         }
         Command::Updates(command) => {
             run_updates_command(command, writer).map_err(RunError::Updates)
+        }
+        Command::UpgradePreflight {
+            candidate_root,
+            repair_python,
+        } => {
+            let report =
+                crate::upgrade_preflight::candidate_host_preflight(&candidate_root, repair_python);
+            if report.compatible() {
+                write!(writer, "{report}")?;
+                Ok(())
+            } else {
+                Err(RunError::UpgradePreflight(report))
+            }
         }
     }
 }
@@ -1176,6 +1231,7 @@ mod tests {
     use crate::{notifications::NotificationError, RunError};
     use std::error::Error;
     use std::io;
+    use std::path::PathBuf;
 
     #[test]
     fn no_args_prints_help() {
@@ -1552,6 +1608,24 @@ mod tests {
                 UpdatesCommand::BackgroundCheck
             )))
         );
+        assert_eq!(
+            parse_args(["upgrade-preflight", "/tmp/lg-buddy-candidate"]),
+            Ok(ParseOutcome::Command(Command::UpgradePreflight {
+                candidate_root: PathBuf::from("/tmp/lg-buddy-candidate"),
+                repair_python: false,
+            }))
+        );
+        assert_eq!(
+            parse_args([
+                "upgrade-preflight",
+                "/tmp/lg-buddy-candidate",
+                "--repair-python"
+            ]),
+            Ok(ParseOutcome::Command(Command::UpgradePreflight {
+                candidate_root: PathBuf::from("/tmp/lg-buddy-candidate"),
+                repair_python: true,
+            }))
+        );
     }
 
     #[test]
@@ -1828,6 +1902,39 @@ mod tests {
     }
 
     #[test]
+    fn invalid_upgrade_preflight_command_is_rejected() {
+        assert_eq!(
+            parse_args(["upgrade-preflight"]),
+            Err(ParseError::MissingUpgradePreflightRoot)
+        );
+        assert_eq!(
+            parse_args(["upgrade-preflight", "/tmp/candidate", "extra"]),
+            Err(ParseError::UnexpectedArguments {
+                command: Command::UpgradePreflight {
+                    candidate_root: PathBuf::from("/tmp/candidate"),
+                    repair_python: false,
+                },
+                arguments: vec!["extra".to_string()],
+            })
+        );
+        assert_eq!(
+            parse_args([
+                "upgrade-preflight",
+                "/tmp/candidate",
+                "--repair-python",
+                "--repair-python"
+            ]),
+            Err(ParseError::UnexpectedArguments {
+                command: Command::UpgradePreflight {
+                    candidate_root: PathBuf::from("/tmp/candidate"),
+                    repair_python: true,
+                },
+                arguments: vec!["--repair-python".to_string()],
+            })
+        );
+    }
+
+    #[test]
     fn global_usage_only_mentions_public_commands() {
         let help = usage("lg-buddy");
 
@@ -1868,6 +1975,7 @@ mod tests {
             "screen-on",
             "detect-backend",
             "updates background-check",
+            "upgrade-preflight",
             "webos-auth-probe",
             "webos-read-probe",
         ] {

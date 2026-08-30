@@ -12,12 +12,19 @@ SKIP_SYSTEMD_ACTIONS="${LG_BUDDY_SKIP_SYSTEMD_ACTIONS:-0}"
 SKIP_PIP_INSTALL="${LG_BUDDY_SKIP_PIP_INSTALL:-0}"
 DEFAULT_RUNTIME_BINARY="$SCRIPT_DIR/lg-buddy"
 RUNTIME_BINARY="$DEFAULT_RUNTIME_BINARY"
+RUNTIME_BINARY_OVERRIDDEN=0
+UPGRADE_MODE=0
+MUTATION_STARTED=0
+UPGRADE_COMPLETED=0
 
 usage() {
     cat <<EOF
-Usage: $0 [--runtime-binary /path/to/lg-buddy]
+Usage: $0 [--upgrade] [--runtime-binary /path/to/lg-buddy]
 
 Install LG Buddy from an existing runtime binary.
+
+Options:
+  --upgrade         Upgrade an existing compatible release-bundle installation
 
 Defaults:
   --runtime-binary defaults to ./lg-buddy next to install.sh
@@ -30,7 +37,13 @@ while [ "$#" -gt 0 ]; do
         --runtime-binary)
             RUNTIME_BINARY="${2:-}"
             [ -n "$RUNTIME_BINARY" ] || usage
+            RUNTIME_BINARY_OVERRIDDEN=1
             shift 2
+            ;;
+        --upgrade)
+            [ "$UPGRADE_MODE" -eq 0 ] || usage
+            UPGRADE_MODE=1
+            shift
             ;;
         -h|--help)
             usage
@@ -41,19 +54,34 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
+if [ "$UPGRADE_MODE" -eq 1 ] && [ "$RUNTIME_BINARY_OVERRIDDEN" -eq 1 ]; then
+    echo "Error: --upgrade uses the verified lg-buddy binary from this release bundle."
+    exit 1
+fi
+
+if [ -n "$INSTALL_ROOT" ]; then
+    case "$INSTALL_ROOT" in
+        /*) ;;
+        *)
+            echo "Error: LG_BUDDY_INSTALL_ROOT must be an absolute path."
+            exit 1
+            ;;
+    esac
+fi
+
 if [ "$(id -u)" -eq 0 ]; then
     echo "Error: Do not run this script with sudo. It will prompt for sudo when needed."
     exit 1
 fi
 
-echo "Starting LG Buddy Installation"
+if [ "$UPGRADE_MODE" -eq 1 ]; then
+    echo "Starting LG Buddy Upgrade"
+else
+    echo "Starting LG Buddy Installation"
+fi
 if [ -n "$INSTALL_ROOT" ]; then
     echo "Install root override: $INSTALL_ROOT"
 fi
-
-# 1. CHECK PREREQUISITES
-echo ""
-echo "Checking prerequisites..."
 
 MISSING_PKGS=()
 SCREEN_MONITOR_AVAILABLE=0
@@ -129,7 +157,8 @@ check_python3_venv() {
     local tmp_venv_dir=""
     tmp_venv_dir="$(mktemp -d)" || return 1
 
-    if python3 -m venv "$tmp_venv_dir" >/dev/null 2>&1; then
+    if python3 -m venv "$tmp_venv_dir" >/dev/null 2>&1 &&
+        "$tmp_venv_dir/bin/pip" --version >/dev/null 2>&1; then
         rm -rf "$tmp_venv_dir"
         return 0
     fi
@@ -137,10 +166,6 @@ check_python3_venv() {
     rm -rf "$tmp_venv_dir"
     return 1
 }
-
-check_dep "python3-venv" "python3-venv" "check_python3_venv"
-check_dep "python3-pip" "python3-pip" "/usr/bin/python3 -m pip --version"
-check_dep "zenity" "zenity" "command -v zenity"
 
 write_config_override() {
     local override_file="$1"
@@ -214,28 +239,15 @@ resolve_runtime_binary() {
     echo "Using lg-buddy runtime binary: $RUNTIME_BINARY"
 }
 
-cleanup() {
-    if [ -n "$SYSTEM_CONFIG_OVERRIDE_TMP" ]; then
-        rm -f "$SYSTEM_CONFIG_OVERRIDE_TMP"
+install_missing_prerequisites() {
+    if [ ${#MISSING_PKGS[@]} -eq 0 ]; then
+        echo "All prerequisites satisfied."
+        return
     fi
 
-    if [ -n "$CONFIG_POINTER_TMP" ]; then
-        rm -f "$CONFIG_POINTER_TMP"
-    fi
-
-    if [ -n "$NM_HOOK_TMP" ]; then
-        rm -f "$NM_HOOK_TMP"
-    fi
-
-}
-
-trap cleanup EXIT
-
-if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
     echo ""
     echo "Missing: ${MISSING_PKGS[*]}"
 
-    # Detect package manager
     if command -v apt &>/dev/null; then
         PM="apt"
         INSTALL_CMD=(apt install -y)
@@ -268,14 +280,120 @@ if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
         echo "Please install the missing packages manually and re-run install.sh."
         exit 1
     fi
-else
-    echo "All prerequisites satisfied."
-fi
+}
 
-# 2. RESOLVE RUST RUNTIME
+check_fresh_install_prerequisites() {
+    echo ""
+    echo "Checking prerequisites..."
+    MISSING_PKGS=()
+    check_dep "python3-venv" "python3-venv" "check_python3_venv"
+    check_dep "zenity" "zenity" "command -v zenity"
+    install_missing_prerequisites
+}
+
+require_python_repair_prerequisites() {
+    echo "Checking Python compatibility-platform repair prerequisites..."
+    MISSING_PKGS=()
+    check_dep "python3-venv" "python3-venv" "check_python3_venv"
+    if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
+        echo "Upgrade requires Python environment repair, but these prerequisites are missing: ${MISSING_PKGS[*]}"
+        echo "Install them manually and rerun the upgrade. No installation files were changed."
+        exit 1
+    fi
+}
+
+python_environment_healthy() {
+    local python_version=""
+    local site_packages=""
+
+    python_version="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')" || return 1
+    site_packages="$VENV_DIR/lib/python$python_version/site-packages"
+
+    [ -f "$VENV_DIR/pyvenv.cfg" ] &&
+        [ -x "$VENV_DIR/bin/python" ] &&
+        [ -x "$VENV_DIR/bin/pip" ] &&
+        [ -x "$VENV_DIR/bin/bscpylgtvcommand" ] &&
+        { [ -d "$site_packages/bscpylgtv" ] || [ -f "$site_packages/bscpylgtv.py" ]; }
+}
+
+load_upgrade_configuration() {
+    CONFIG_FILE="$(sed -n '/[^[:space:]]/{p;q;}' "$CONFIG_POINTER_PATH")"
+    [ -n "$CONFIG_FILE" ] || {
+        echo "Installed config pointer is empty: $CONFIG_POINTER_PATH"
+        exit 1
+    }
+
+    TV_PLATFORM="$(LG_BUDDY_CONFIG="$CONFIG_FILE" "$RUNTIME_BINARY" settings get tv.platform)"
+    SCREEN_IDLE_BLANK="$(LG_BUDDY_CONFIG="$CONFIG_FILE" "$RUNTIME_BINARY" settings get screen.idle_blank)"
+    SCREEN_MONITOR_CONFIGURED_BACKEND="$(LG_BUDDY_CONFIG="$CONFIG_FILE" "$RUNTIME_BINARY" settings get screen.backend)"
+    SYSTEM_SLEEP_WAKE_POLICY="$(LG_BUDDY_CONFIG="$CONFIG_FILE" "$RUNTIME_BINARY" settings get system.sleep_wake_policy)"
+    UPDATE_AUTO_CHECK="$(LG_BUDDY_CONFIG="$CONFIG_FILE" "$RUNTIME_BINARY" settings get updates.auto_check)"
+    UPDATE_CHANNEL="$(LG_BUDDY_CONFIG="$CONFIG_FILE" "$RUNTIME_BINARY" settings get updates.channel)"
+    CANDIDATE_VERSION_OUTPUT="$("$RUNTIME_BINARY" --version)"
+
+    echo "Using existing configuration file at $CONFIG_FILE"
+    echo "Preserving update channel: $UPDATE_CHANNEL"
+}
+
+prepare_installation_files() {
+    if [ "$UPGRADE_MODE" -eq 0 ]; then
+        CONFIG_POINTER_TMP="$(mktemp)"
+        write_config_pointer "$CONFIG_POINTER_TMP" "$CONFIG_FILE"
+    fi
+    SYSTEM_CONFIG_OVERRIDE_TMP="$(mktemp)"
+    write_config_override "$SYSTEM_CONFIG_OVERRIDE_TMP" "$CONFIG_FILE"
+    NM_HOOK_TMP="$(mktemp)"
+    write_nm_pre_down_hook "$NM_HOOK_TMP"
+}
+
+cleanup() {
+    local status=$?
+
+    if [ -n "$SYSTEM_CONFIG_OVERRIDE_TMP" ]; then
+        rm -f "$SYSTEM_CONFIG_OVERRIDE_TMP"
+    fi
+
+    if [ -n "$CONFIG_POINTER_TMP" ]; then
+        rm -f "$CONFIG_POINTER_TMP"
+    fi
+
+    if [ -n "$NM_HOOK_TMP" ]; then
+        rm -f "$NM_HOOK_TMP"
+    fi
+
+    if [ "$status" -ne 0 ] && [ "$UPGRADE_MODE" -eq 1 ] && [ "$MUTATION_STARTED" -eq 1 ] && [ "$UPGRADE_COMPLETED" -eq 0 ]; then
+        echo "LG Buddy upgrade did not complete after installation changes began." >&2
+        echo "The installation may be partial; rerun this verified bundle with --upgrade after correcting the reported failure." >&2
+    fi
+
+    trap - EXIT
+    exit "$status"
+}
+
+trap cleanup EXIT
+
 resolve_runtime_binary
+REPAIR_PYTHON_ENVIRONMENT=0
 
-# 3. CONFIGURE SCRIPTS
+if [ "$UPGRADE_MODE" -eq 1 ]; then
+    echo ""
+    echo "Running candidate upgrade preflight..."
+    "$RUNTIME_BINARY" upgrade-preflight "$SCRIPT_DIR"
+    load_upgrade_configuration
+
+    if [ "$TV_PLATFORM" = "lg_webos" ]; then
+        echo "Native TV platform selected; preserving the existing Python environment unchanged."
+    elif python_environment_healthy; then
+        echo "Python compatibility environment is healthy; preserving it unchanged."
+    else
+        REPAIR_PYTHON_ENVIRONMENT=1
+        "$RUNTIME_BINARY" upgrade-preflight "$SCRIPT_DIR" --repair-python
+        require_python_repair_prerequisites
+    fi
+else
+    check_fresh_install_prerequisites
+
+# CONFIGURE FRESH INSTALLATION
 echo ""
 echo "Running configuration script..."
 # Make sure configure.sh is executable
@@ -363,77 +481,77 @@ else
             ;;
     esac
 fi
+fi
+
+prepare_installation_files
 
 # 4. CREATE VIRTUAL ENVIRONMENT
-echo "Creating Python virtual environment at $VENV_DIR..."
-# Recreate the helper venv so OS Python minor-version upgrades do not leave
-# bscpylgtv installed under an interpreter-specific site-packages directory
-# that the new `/usr/bin/python3` no longer reads.
-run_privileged python3 -m venv --clear "$VENV_DIR"
-echo "Done."
-
-# 5. INSTALL BSCPYLGTV
-if [ "$SKIP_PIP_INSTALL" = "1" ]; then
-    echo "Skipping bscpylgtv installation because LG_BUDDY_SKIP_PIP_INSTALL=1."
-else
-    echo "Installing bscpylgtv into the virtual environment..."
-    run_privileged "$VENV_DIR/bin/pip" install bscpylgtv
+if [ "$UPGRADE_MODE" -eq 0 ] || [ "$REPAIR_PYTHON_ENVIRONMENT" -eq 1 ]; then
+    MUTATION_STARTED=1
+    echo "Creating Python virtual environment at $VENV_DIR..."
+    # Recreate the helper venv so OS Python minor-version upgrades do not leave
+    # bscpylgtv installed under an interpreter-specific site-packages directory
+    # that the new `/usr/bin/python3` no longer reads.
+    run_privileged python3 -m venv --clear "$VENV_DIR"
     echo "Done."
+
+    if [ "$SKIP_PIP_INSTALL" = "1" ]; then
+        echo "Skipping bscpylgtv installation because LG_BUDDY_SKIP_PIP_INSTALL=1."
+    else
+        echo "Installing bscpylgtv into the virtual environment..."
+        run_privileged "$VENV_DIR/bin/pip" install bscpylgtv
+        echo "Done."
+    fi
 fi
 
 # 6. INSTALL RUST RUNTIME AND SUPPORT FILES
+MUTATION_STARTED=1
 echo "Installing Rust runtime and support files..."
 run_privileged install -m 755 "$RUNTIME_BINARY" "$RUNTIME_INSTALL_PATH"
-run_privileged rm -f "${SYSTEM_BIN_DIR}/LG_Buddy_Startup"
-run_privileged rm -f "${SYSTEM_BIN_DIR}/LG_Buddy_Shutdown"
-run_privileged rm -f "${SYSTEM_BIN_DIR}/LG_Buddy_Screen_On"
-run_privileged rm -f "${SYSTEM_BIN_DIR}/LG_Buddy_Screen_Off"
-run_privileged rm -f "${SYSTEM_BIN_DIR}/LG_Buddy_Screen_Monitor"
-run_privileged rm -f "${SYSTEM_BIN_DIR}/LG_Buddy_sleep_pre"
-run_privileged rm -f "${SYSTEM_BIN_DIR}/LG_Buddy_Brightness"
-run_privileged rm -f "$COMMON_HELPER_PATH"
-run_privileged rm -f "$CONFIG_POINTER_PATH"
-run_privileged rmdir "$SYSTEM_LIB_DIR" 2>/dev/null || true
-run_privileged install -d "$SYSTEM_LIB_DIR"
-CONFIG_POINTER_TMP="$(mktemp)"
-write_config_pointer "$CONFIG_POINTER_TMP" "$CONFIG_FILE"
-run_privileged install -m 644 "$CONFIG_POINTER_TMP" "$CONFIG_POINTER_PATH"
-rm -f "$CONFIG_POINTER_TMP"
-CONFIG_POINTER_TMP=""
+if [ "$UPGRADE_MODE" -eq 0 ]; then
+    run_privileged rm -f "${SYSTEM_BIN_DIR}/LG_Buddy_Startup"
+    run_privileged rm -f "${SYSTEM_BIN_DIR}/LG_Buddy_Shutdown"
+    run_privileged rm -f "${SYSTEM_BIN_DIR}/LG_Buddy_Screen_On"
+    run_privileged rm -f "${SYSTEM_BIN_DIR}/LG_Buddy_Screen_Off"
+    run_privileged rm -f "${SYSTEM_BIN_DIR}/LG_Buddy_Screen_Monitor"
+    run_privileged rm -f "${SYSTEM_BIN_DIR}/LG_Buddy_sleep_pre"
+    run_privileged rm -f "${SYSTEM_BIN_DIR}/LG_Buddy_Brightness"
+    run_privileged rm -f "$COMMON_HELPER_PATH"
+    run_privileged rm -f "$CONFIG_POINTER_PATH"
+    run_privileged rmdir "$SYSTEM_LIB_DIR" 2>/dev/null || true
+fi
+if [ "$UPGRADE_MODE" -eq 0 ]; then
+    run_privileged install -d "$SYSTEM_LIB_DIR"
+    run_privileged install -m 644 "$CONFIG_POINTER_TMP" "$CONFIG_POINTER_PATH"
+fi
 echo "Installing brightness control desktop entry..."
-run_privileged mkdir -p "$APPLICATIONS_DIR"
-run_privileged cp "$SCRIPT_DIR/LG_Buddy_Brightness.desktop" "$DESKTOP_ENTRY_PATH"
-cp "$SCRIPT_DIR/LG_Buddy_Brightness.desktop" ~/Desktop/ 2>/dev/null || true
+run_privileged install -d "$APPLICATIONS_DIR"
+run_privileged install -m 644 "$SCRIPT_DIR/LG_Buddy_Brightness.desktop" "$DESKTOP_ENTRY_PATH"
+if [ "$UPGRADE_MODE" -eq 0 ]; then
+    cp "$SCRIPT_DIR/LG_Buddy_Brightness.desktop" ~/Desktop/ 2>/dev/null || true
+elif [ -f "$HOME/Desktop/LG_Buddy_Brightness.desktop" ]; then
+    cp "$SCRIPT_DIR/LG_Buddy_Brightness.desktop" "$HOME/Desktop/LG_Buddy_Brightness.desktop"
+fi
 echo "Done."
 
 # 7. SETUP SYSTEMD SERVICES
 echo "Copying and enabling systemd services..."
 run_privileged install -d "$SYSTEMD_SYSTEM_DIR"
 run_privileged install -d "$TMPFILES_CONF_DIR"
-run_privileged cp "$SCRIPT_DIR/systemd/LG_Buddy.service" "$SYSTEMD_SERVICE_PATH"
-run_privileged cp "$SCRIPT_DIR/systemd/lg_buddy.conf" "$TMPFILES_CONF_PATH"
+run_privileged install -m 644 "$SCRIPT_DIR/systemd/LG_Buddy.service" "$SYSTEMD_SERVICE_PATH"
+run_privileged install -m 644 "$SCRIPT_DIR/systemd/lg_buddy.conf" "$TMPFILES_CONF_PATH"
 run_privileged install -d "$SYSTEMD_SERVICE_OVERRIDE_DIR"
-SYSTEM_CONFIG_OVERRIDE_TMP="$(mktemp)"
-write_config_override "$SYSTEM_CONFIG_OVERRIDE_TMP" "$CONFIG_FILE"
 run_privileged install -m 644 "$SYSTEM_CONFIG_OVERRIDE_TMP" "${SYSTEMD_SERVICE_OVERRIDE_DIR}/config.conf"
-rm -f "$SYSTEM_CONFIG_OVERRIDE_TMP"
-SYSTEM_CONFIG_OVERRIDE_TMP=""
 
-cleanup_legacy_sleep_wake_handlers
+if [ "$UPGRADE_MODE" -eq 0 ]; then
+    cleanup_legacy_sleep_wake_handlers
+fi
 
-run_privileged cp "$SCRIPT_DIR/systemd/LG_Buddy_lifecycle.service" "$SYSTEMD_LIFECYCLE_SERVICE_PATH"
+run_privileged install -m 644 "$SCRIPT_DIR/systemd/LG_Buddy_lifecycle.service" "$SYSTEMD_LIFECYCLE_SERVICE_PATH"
 run_privileged install -d "$SYSTEMD_LIFECYCLE_OVERRIDE_DIR"
-SYSTEM_CONFIG_OVERRIDE_TMP="$(mktemp)"
-write_config_override "$SYSTEM_CONFIG_OVERRIDE_TMP" "$CONFIG_FILE"
 run_privileged install -m 644 "$SYSTEM_CONFIG_OVERRIDE_TMP" "${SYSTEMD_LIFECYCLE_OVERRIDE_DIR}/config.conf"
-rm -f "$SYSTEM_CONFIG_OVERRIDE_TMP"
-SYSTEM_CONFIG_OVERRIDE_TMP=""
 run_privileged install -d "$NM_PRE_DOWN_DIR"
-NM_HOOK_TMP="$(mktemp)"
-write_nm_pre_down_hook "$NM_HOOK_TMP"
 run_privileged install -m 755 "$NM_HOOK_TMP" "$NM_LIFECYCLE_HOOK_PATH"
-rm -f "$NM_HOOK_TMP"
-NM_HOOK_TMP=""
 
 if [ "$SKIP_SYSTEMD_ACTIONS" = "1" ]; then
     echo "Skipping systemd tmpfiles and enable actions because LG_BUDDY_SKIP_SYSTEMD_ACTIONS=1."
@@ -449,16 +567,16 @@ echo "Done."
 # 8. INSTALL USER SERVICES
 echo "Installing background update check user timer..."
 mkdir -p "$USER_SYSTEMD_DIR"
-cp "$SCRIPT_DIR/systemd/LG_Buddy_update_check.service" "$USER_UPDATE_CHECK_SERVICE_PATH"
-cp "$SCRIPT_DIR/systemd/LG_Buddy_update_check.timer" "$USER_UPDATE_CHECK_TIMER_PATH"
+install -m 644 "$SCRIPT_DIR/systemd/LG_Buddy_update_check.service" "$USER_UPDATE_CHECK_SERVICE_PATH"
+install -m 644 "$SCRIPT_DIR/systemd/LG_Buddy_update_check.timer" "$USER_UPDATE_CHECK_TIMER_PATH"
 mkdir -p "$USER_UPDATE_CHECK_OVERRIDE_DIR"
-write_config_override "${USER_UPDATE_CHECK_OVERRIDE_DIR}/config.conf" "$CONFIG_FILE"
+install -m 644 "$SYSTEM_CONFIG_OVERRIDE_TMP" "${USER_UPDATE_CHECK_OVERRIDE_DIR}/config.conf"
 echo "Done."
 
 echo "Installing screen monitor user service..."
-cp "$SCRIPT_DIR/systemd/LG_Buddy_screen.service" "$USER_SCREEN_SERVICE_PATH"
+install -m 644 "$SCRIPT_DIR/systemd/LG_Buddy_screen.service" "$USER_SCREEN_SERVICE_PATH"
 mkdir -p "$USER_SCREEN_OVERRIDE_DIR"
-write_config_override "${USER_SCREEN_OVERRIDE_DIR}/config.conf" "$CONFIG_FILE"
+install -m 644 "$SYSTEM_CONFIG_OVERRIDE_TMP" "${USER_SCREEN_OVERRIDE_DIR}/config.conf"
 if [ "$SKIP_SYSTEMD_ACTIONS" != "1" ]; then
     systemctl --user daemon-reload
 fi
@@ -499,7 +617,19 @@ else
     echo "System sleep/wake TV control disabled by config. Lifecycle integration is installed and will no-op until re-enabled."
 fi
 
-echo "Installation complete!"
-echo "The user-session service has been installed."
-echo "Please restart your computer for all changes to take full effect."
-echo "NOTE: On first use, you may need to accept a prompt on your TV to allow this application to connect."
+if [ "$UPGRADE_MODE" -eq 1 ]; then
+    INSTALLED_VERSION_OUTPUT="$("$RUNTIME_INSTALL_PATH" --version)"
+    if ! cmp -s "$RUNTIME_BINARY" "$RUNTIME_INSTALL_PATH" || [ "$INSTALLED_VERSION_OUTPUT" != "$CANDIDATE_VERSION_OUTPUT" ]; then
+        echo "Installed binary identity does not match the verified candidate." >&2
+        echo "Rerun this verified bundle with --upgrade to repair the partial installation." >&2
+        exit 1
+    fi
+    UPGRADE_COMPLETED=1
+    echo "Upgrade complete!"
+    echo "$INSTALLED_VERSION_OUTPUT"
+else
+    echo "Installation complete!"
+    echo "The user-session service has been installed."
+    echo "Please restart your computer for all changes to take full effect."
+    echo "NOTE: On first use, you may need to accept a prompt on your TV to allow this application to connect."
+fi
