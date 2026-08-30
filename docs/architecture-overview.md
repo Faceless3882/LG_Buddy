@@ -263,6 +263,12 @@ The intended split is:
   - runtime directory resolution
   - system/session state separation
   - ownership marker management
+- `upgrade_preflight.rs`
+  - observes whether the current release-bundle installation can be replaced
+    safely
+  - returns structured, actionable refusals without downloading or mutating
+    anything
+  - provides separate installed-runtime and verified-candidate entrypoints
 - `tv.rs`
   - TV transport abstraction
   - profile-bound `bscpylgtvcommand` adapter
@@ -427,6 +433,32 @@ operations. Setting or stepping volume explicitly unmutes after the volume
 operation; mute toggle reads the current state before writing its inverse.
 
 This keeps CLI parsing separate from operational behavior.
+
+## Host Upgrade Safety Boundary
+
+`upgrade_preflight.rs` checks observable host and installation state. It does
+not infer upgrade support from the distribution name, a build flag, an install
+receipt, or where the binary originally came from.
+
+The initial preflight expects the running binary to be the mutable
+`/usr/bin/lg-buddy` installation. It checks the conventional release-bundle
+filesystem topology, ordinary file and directory types, ownership, writable
+mounts, config-pointer discovery, user and system integrations, systemd manager
+availability, and the absence of legacy layouts that would require migration.
+The installed Python virtualenv root is part of that topology. Symlinks,
+multiply linked mutation targets, read-only files, and special files in owned
+installation or config state are refused.
+
+After a bundle has been verified, its candidate binary can run the second
+preflight. That pass rechecks the installed state, proves it is executing the
+candidate from the supplied bundle root, and checks the candidate manifest,
+installer, runtime, desktop entry, and systemd assets before any privileged
+mutation. Interactive-only configuration assets are not upgrade requirements.
+
+These checks are a conservative, evolving safety boundary, not an exhaustive
+host-support declaration or a promise that no later privileged operation can
+fail. New observable checks can be added as real installations expose unsafe
+conditions; callers only consume the structured compatibility result.
 
 ## Core Control Flows
 

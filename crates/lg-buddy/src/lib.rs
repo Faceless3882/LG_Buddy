@@ -19,6 +19,7 @@ pub mod sources;
 pub mod state;
 pub mod tv;
 pub mod updates;
+pub mod upgrade_preflight;
 pub mod version;
 pub mod web_os;
 pub mod wol;
