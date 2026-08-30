@@ -300,6 +300,12 @@ that a missing TV platform remains `bscpylgtv`, explicit platform values survive
 reconfiguration, and `lg_webos` routes to the stored-credential-only native path
 and reports a missing credential without initiating background pairing.
 
+The focused release-manifest suite covers deterministic serialization, schema
+and critical-field handling, duplicate and missing fields, canonical identity
+formats, archive layout, and binary version/channel/commit mismatches. The
+bundle smoke test then exercises the same validator against the generated and
+installed release binary.
+
 ## Current Practical Gaps
 
 The most important remaining gaps are:

@@ -142,8 +142,10 @@ jobs:
           ./scripts/test-release-bundle.sh \
               --skip-pip-install \
               --archive "dist/lg-buddy-${{ needs.validate.outputs.version }}-x86_64-unknown-linux-musl.tar.gz" \
+              --expected-tag "${{ needs.validate.outputs.tag }}" \
               --expected-version "${{ needs.validate.outputs.version }}" \
               --expected-channel "${{ needs.validate.outputs.channel }}" \
+              --expected-target x86_64-unknown-linux-musl \
               --expected-commit "${{ needs.validate.outputs.head_sha }}"
 
       - name: Generate checksums
