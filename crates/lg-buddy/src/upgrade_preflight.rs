@@ -17,6 +17,7 @@ enum InstallerPathPolicy {
     RecursiveClear,
     ExactDropInDirectory { expected_entry: &'static str },
     ReadableInput,
+    SystemReadableInput,
     ExecutableInput,
     InputDirectory,
 }
@@ -28,6 +29,7 @@ impl InstallerPathPolicy {
             Self::ReplaceFile
                 | Self::ReplaceExecutable
                 | Self::ReadableInput
+                | Self::SystemReadableInput
                 | Self::ExecutableInput
         )
     }
@@ -84,8 +86,6 @@ const SYSTEM_PATH_REQUIREMENTS: &[InstallerPathRequirement] = &[
         InstallerPathPolicy::ReplaceFile,
     ),
     requirement("/usr/bin", InstallerPathPolicy::MutateDirectory),
-    requirement("/usr/bin/LG_Buddy_PIP", InstallerPathPolicy::RecursiveClear),
-    requirement("/usr/lib/lg-buddy", InstallerPathPolicy::MutateDirectory),
     requirement("/etc/systemd/system", InstallerPathPolicy::MutateDirectory),
     requirement(
         "/etc/systemd/system/LG_Buddy.service.d",
@@ -109,6 +109,11 @@ const SYSTEM_PATH_REQUIREMENTS: &[InstallerPathRequirement] = &[
         InstallerPathPolicy::MutateDirectory,
     ),
 ];
+
+const PYTHON_REPAIR_PATH_REQUIREMENTS: &[InstallerPathRequirement] = &[requirement(
+    "/usr/bin/LG_Buddy_PIP",
+    InstallerPathPolicy::RecursiveClear,
+)];
 
 const LEGACY_SYSTEM_PATHS: &[&str] = &[
     "/usr/bin/LG_Buddy_Startup",
@@ -410,6 +415,10 @@ impl InstalledLayout {
     fn user_systemd_path(&self, path: &str) -> PathBuf {
         self.user_home.join(".config/systemd/user").join(path)
     }
+
+    fn user_desktop_entry(&self) -> PathBuf {
+        self.user_home.join("Desktop/LG_Buddy_Brightness.desktop")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -501,12 +510,12 @@ pub fn current_host_preflight() -> CompatibilityReport {
     evaluate_initial_preflight(&OsFilesystemFacts, &facts)
 }
 
-pub fn candidate_host_preflight(candidate_root: &Path) -> CompatibilityReport {
+pub fn candidate_host_preflight(candidate_root: &Path, repair_python: bool) -> CompatibilityReport {
     let facts = match observe_current_process() {
         Ok(facts) => facts,
         Err(report) => return report,
     };
-    evaluate_candidate_host_preflight(&OsFilesystemFacts, &facts, candidate_root)
+    evaluate_candidate_host_preflight(&OsFilesystemFacts, &facts, candidate_root, repair_python)
 }
 
 fn observe_current_process() -> Result<HostPreflightFacts, CompatibilityReport> {
@@ -536,13 +545,24 @@ fn observe_current_process() -> Result<HostPreflightFacts, CompatibilityReport> 
         }
     };
     let effective_uid = unsafe { libc::geteuid() };
+    let install_root = env::var_os("LG_BUDDY_INSTALL_ROOT")
+        .filter(|root| !root.is_empty())
+        .map(PathBuf::from);
+    let sandboxed_install = install_root.is_some();
+    let system_root = install_root.unwrap_or_else(|| PathBuf::from("/"));
+    let service_managers =
+        if sandboxed_install && env::var("LG_BUDDY_SKIP_SYSTEMD_ACTIONS").as_deref() == Ok("1") {
+            ServiceManagerFacts::available()
+        } else {
+            ServiceManagerFacts::observe()
+        };
     Ok(HostPreflightFacts {
-        layout: InstalledLayout::new("/", user_home),
+        layout: InstalledLayout::new(system_root, user_home),
         running_executable,
         effective_uid,
-        system_owner_uid: 0,
+        system_owner_uid: if sandboxed_install { effective_uid } else { 0 },
         user_owner_uid: effective_uid,
-        service_managers: ServiceManagerFacts::observe(),
+        service_managers,
     })
 }
 
@@ -556,6 +576,7 @@ pub fn evaluate_initial_preflight(
         &facts.layout.installed_executable(),
         "running-executable",
         "run the release-bundle installation at /usr/bin/lg-buddy, or use the host's native package manager",
+        false,
     )
 }
 
@@ -565,6 +586,7 @@ fn evaluate_installed_state(
     expected_running_executable: &Path,
     executable_check: &'static str,
     executable_remedy: &'static str,
+    repair_python: bool,
 ) -> CompatibilityReport {
     let mut checker = Checker::new(filesystem);
     let system_trust = TrustedRoot::strict(&facts.layout.system_root, facts.system_owner_uid);
@@ -613,6 +635,17 @@ fn evaluate_installed_state(
             check,
         );
     }
+    if repair_python {
+        for requirement in PYTHON_REPAIR_PATH_REQUIREMENTS {
+            checker.check_requirement(
+                &facts.layout.system_path(requirement.path),
+                facts.system_owner_uid,
+                Some(system_trust),
+                requirement.policy,
+                "python-environment-repair",
+            );
+        }
+    }
     for requirement in USER_PATH_REQUIREMENTS {
         let check = match requirement.policy {
             InstallerPathPolicy::MutateDirectory => "mutable-user-integration",
@@ -627,6 +660,13 @@ fn evaluate_installed_state(
             check,
         );
     }
+    checker.check_optional_requirement(
+        &facts.layout.user_desktop_entry(),
+        facts.user_owner_uid,
+        Some(user_trust),
+        InstallerPathPolicy::ReplaceFile,
+        "user-desktop",
+    );
 
     for path in LEGACY_SYSTEM_PATHS {
         checker.check_absent(&facts.layout.system_path(path));
@@ -699,6 +739,7 @@ pub fn evaluate_candidate_host_preflight(
     filesystem: &impl FilesystemFacts,
     facts: &HostPreflightFacts,
     candidate_root: &Path,
+    repair_python: bool,
 ) -> CompatibilityReport {
     let expected_candidate_executable = candidate_root.join("lg-buddy");
     let mut report = evaluate_installed_state(
@@ -707,6 +748,7 @@ pub fn evaluate_candidate_host_preflight(
         &expected_candidate_executable,
         "candidate-executable",
         "run the preflight with the verified candidate binary from this bundle",
+        repair_python,
     );
     report.extend(evaluate_candidate_preflight(
         filesystem,
@@ -820,9 +862,27 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
         check: &'static str,
     ) {
         self.check_ancestors(path, trusted_root);
-        let facts = match self.path_facts(path, check) {
-            Some(facts) => facts,
-            None => return,
+        let facts = match self.filesystem.path_facts(path) {
+            Ok(facts) => facts,
+            Err(err)
+                if policy == InstallerPathPolicy::RecursiveClear
+                    && err.kind() == io::ErrorKind::NotFound =>
+            {
+                return;
+            }
+            Err(err) => {
+                self.report.refuse(
+                    check,
+                    Some(path.to_path_buf()),
+                    if err.kind() == io::ErrorKind::NotFound {
+                        "required path is missing".to_string()
+                    } else {
+                        format!("could not inspect required path: {err}")
+                    },
+                    "restore this path from a current release-bundle installation",
+                );
+                return;
+            }
         };
         if policy.expects_file() && facts.kind != PathKind::File {
             self.report.refuse(
@@ -877,6 +937,13 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
                 check,
                 "input is not readable by its owner",
             ),
+            InstallerPathPolicy::SystemReadableInput => self.check_permissions(
+                path,
+                &facts,
+                0o404,
+                check,
+                "system input is not readable by its owner and the invoking user",
+            ),
             InstallerPathPolicy::ExecutableInput => self.check_permissions(
                 path,
                 &facts,
@@ -891,6 +958,20 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
                 check,
                 "input directory is not readable and searchable by its owner",
             ),
+        }
+    }
+
+    fn check_optional_requirement(
+        &mut self,
+        path: &Path,
+        owner_uid: u32,
+        trusted_root: Option<TrustedRoot<'_>>,
+        policy: InstallerPathPolicy,
+        check: &'static str,
+    ) {
+        match self.filesystem.path_facts(path) {
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            _ => self.check_requirement(path, owner_uid, trusted_root, policy, check),
         }
     }
 
@@ -1103,7 +1184,7 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
             path,
             owner_uid,
             Some(TrustedRoot::strict(system_root, owner_uid)),
-            InstallerPathPolicy::ReplaceFile,
+            InstallerPathPolicy::SystemReadableInput,
             "config-discovery",
         );
         if self
@@ -1402,10 +1483,79 @@ mod tests {
             &OsFilesystemFacts,
             &candidate_facts,
             &fixture.candidate_root,
+            false,
         );
 
         assert!(initial.compatible(), "{}", initial.render());
         assert!(candidate.compatible(), "{}", candidate.render());
+    }
+
+    #[test]
+    fn python_environment_safety_is_required_only_when_repair_is_requested() {
+        let fixture = InstalledFixture::new("conditional-python-repair");
+        let virtualenv = fixture.facts.layout.system_path("/usr/bin/LG_Buddy_PIP");
+        let mut candidate_facts = fixture.facts.clone();
+        candidate_facts.running_executable = fixture.candidate_root.join("lg-buddy");
+
+        let missing = evaluate_candidate_host_preflight(
+            &OsFilesystemFacts,
+            &candidate_facts,
+            &fixture.candidate_root,
+            true,
+        );
+        assert!(missing.compatible(), "{}", missing.render());
+
+        fs::create_dir_all(&virtualenv).unwrap();
+        let repair = evaluate_candidate_host_preflight(
+            &OsFilesystemFacts,
+            &candidate_facts,
+            &fixture.candidate_root,
+            true,
+        );
+        assert!(repair.compatible(), "{}", repair.render());
+
+        fs::remove_dir(&virtualenv).unwrap();
+        symlink(&fixture.config_directory, &virtualenv).unwrap();
+        let preserving = evaluate_candidate_host_preflight(
+            &OsFilesystemFacts,
+            &candidate_facts,
+            &fixture.candidate_root,
+            false,
+        );
+        let repair = evaluate_candidate_host_preflight(
+            &OsFilesystemFacts,
+            &candidate_facts,
+            &fixture.candidate_root,
+            true,
+        );
+
+        assert!(preserving.compatible(), "{}", preserving.render());
+        assert_failure(&repair, "python-environment-repair", &virtualenv, "Symlink");
+    }
+
+    #[test]
+    fn existing_user_desktop_launcher_must_be_safely_replaceable() {
+        let fixture = InstalledFixture::new("user-desktop-launcher");
+        let launcher = fixture.facts.layout.user_desktop_entry();
+        fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+        write_file(&launcher, false);
+        set_mode(&launcher, 0o400);
+        let mut candidate_facts = fixture.facts.clone();
+        candidate_facts.running_executable = fixture.candidate_root.join("lg-buddy");
+
+        let report = evaluate_candidate_host_preflight(
+            &OsFilesystemFacts,
+            &candidate_facts,
+            &fixture.candidate_root,
+            false,
+        );
+
+        assert_failure(
+            &report,
+            "user-desktop",
+            &launcher,
+            "not writable by its owner",
+        );
     }
 
     #[test]
@@ -1461,6 +1611,12 @@ mod tests {
                 "not readable by its owner",
             ),
             (
+                "system-readable-input",
+                InstallerPathPolicy::SystemReadableInput,
+                0o400,
+                "invoking user",
+            ),
+            (
                 "executable-input",
                 InstallerPathPolicy::ExecutableInput,
                 0o400,
@@ -1513,6 +1669,11 @@ mod tests {
                     fixture.candidate_root.clone(),
                     fixture.facts.user_owner_uid,
                 ),
+                InstallerPathPolicy::SystemReadableInput => (
+                    fixture.facts.layout.config_pointer(),
+                    fixture.facts.layout.system_root.clone(),
+                    fixture.facts.system_owner_uid,
+                ),
                 InstallerPathPolicy::ExecutableInput => (
                     fixture.candidate_root.join("install.sh"),
                     fixture.candidate_root.clone(),
@@ -1524,6 +1685,9 @@ mod tests {
                     fixture.facts.user_owner_uid,
                 ),
             };
+            if policy == InstallerPathPolicy::RecursiveClear {
+                fs::create_dir_all(&path).unwrap();
+            }
             let filesystem = OverriddenFilesystem {
                 path: path.clone(),
                 owner_uid: None,
@@ -1650,27 +1814,37 @@ mod tests {
     }
 
     #[test]
-    fn initial_preflight_refuses_a_symlinked_installed_virtualenv() {
+    fn python_repair_preflight_refuses_a_symlinked_installed_virtualenv() {
         let fixture = InstalledFixture::new("symlink-virtualenv");
         let virtualenv = fixture.facts.layout.system_path("/usr/bin/LG_Buddy_PIP");
         let target = fixture.root.join("external-virtualenv");
+        fs::create_dir(&virtualenv).unwrap();
         fs::remove_dir(&virtualenv).unwrap();
         fs::create_dir(&target).unwrap();
         symlink(&target, &virtualenv).unwrap();
+        let mut candidate_facts = fixture.facts.clone();
+        candidate_facts.running_executable = fixture.candidate_root.join("lg-buddy");
 
-        let report = evaluate_initial_preflight(&OsFilesystemFacts, &fixture.facts);
+        let report = evaluate_candidate_host_preflight(
+            &OsFilesystemFacts,
+            &candidate_facts,
+            &fixture.candidate_root,
+            true,
+        );
 
-        assert_failure(&report, "mutable-installation", &virtualenv, "Symlink");
+        assert_failure(&report, "python-environment-repair", &virtualenv, "Symlink");
     }
 
     #[test]
-    fn initial_preflight_refuses_a_nested_mount_in_the_recursively_cleared_virtualenv() {
+    fn python_repair_preflight_refuses_a_nested_virtualenv_mount() {
         let fixture = InstalledFixture::new("nested-virtualenv-mount");
         let nested_mount = fixture
             .facts
             .layout
             .system_path("/usr/bin/LG_Buddy_PIP/lib/python/site-packages");
         fs::create_dir_all(&nested_mount).unwrap();
+        let mut candidate_facts = fixture.facts.clone();
+        candidate_facts.running_executable = fixture.candidate_root.join("lg-buddy");
         let filesystem = OverriddenFilesystem {
             path: nested_mount.clone(),
             owner_uid: None,
@@ -1679,11 +1853,16 @@ mod tests {
             mount_point: Some(true),
         };
 
-        let report = evaluate_initial_preflight(&filesystem, &fixture.facts);
+        let report = evaluate_candidate_host_preflight(
+            &filesystem,
+            &candidate_facts,
+            &fixture.candidate_root,
+            true,
+        );
 
         assert_failure(
             &report,
-            "mutable-installation",
+            "python-environment-repair",
             &nested_mount,
             "nested mount point",
         );
@@ -2067,6 +2246,7 @@ mod tests {
             &OsFilesystemFacts,
             &fixture.facts,
             &fixture.candidate_root,
+            false,
         );
 
         let failure = report
@@ -2092,6 +2272,7 @@ mod tests {
             &OsFilesystemFacts,
             &candidate_facts,
             &fixture.candidate_root,
+            false,
         );
 
         assert_failure(&report, "installed-layout", &installed_service, "missing");

@@ -110,6 +110,16 @@ The checker assigns each target an installer-operation policy so replacement,
 directory mutation, recursive repair, exact drop-in, and candidate-input
 requirements cannot silently lose their operation-specific safeguards.
 
+The extracted candidate exposes this second pass through the hidden
+`upgrade-preflight` installer entrypoint. `install.sh --upgrade` invokes it
+before sudo or installation writes, loads the existing config pointer and
+settings without rewriting them, and never runs configuration, discovery, or
+pairing. Native and healthy compatibility installations preserve their Python
+environment; an unhealthy compatibility environment must pass the additional
+recursive-repair checks before it is rebuilt. After replacing owned runtime and
+integration files, the installer reloads system integrations before user
+integrations and verifies that the installed binary matches the candidate.
+
 This is intentionally a conservative and evolving refusal boundary. It does
 not migrate legacy layouts, declare broad host support, or guarantee that a
 later privileged operation cannot fail.
@@ -133,6 +143,17 @@ End users can extract the release archive and run:
 ```
 
 That path uses the bundled `lg-buddy` binary and does not require a Rust toolchain.
+
+To update an existing compatible release-bundle installation from an already
+verified and extracted newer bundle, run as the installed user:
+
+```bash
+./install.sh --upgrade
+```
+
+An incompatible or legacy layout is refused rather than migrated. If a failure
+occurs after installation writes begin, correct the reported cause and rerun the
+same verified bundle with `--upgrade`.
 
 ## Installing a locally built binary
 

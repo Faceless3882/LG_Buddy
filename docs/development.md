@@ -132,9 +132,9 @@ Smoke test a generated release bundle with:
 
 The smoke test validates `release-manifest.json` against the archive name and
 bundled binary before running installer code. It then installs into a temporary
-root and checks both TV platforms, native credential preservation across
-upgrades, lifecycle and NetworkManager hook topology, and uninstall cleanup
-without mutating the host installation.
+root and exercises upgrade refusal, preservation, Python repair, owned-file
+replacement, service ordering, installed identity, lifecycle topology, and
+uninstall cleanup without mutating the host installation.
 
 Run the focused manifest contract tests with:
 

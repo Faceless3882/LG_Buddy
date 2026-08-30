@@ -41,11 +41,11 @@ selection and troubleshooting. Protocol and event details are documented in the
 ## Before You Install
 
 The native `lg_webos` control path does not require Python. Native-only packages
-can omit the Python client, `venv`, and `pip`. The current `install.sh` flow
+can omit the Python client, `venv`, and `pip`. The current fresh-install flow
 still provisions `bscpylgtv` as a compatibility fallback and installs the
-brightness dialog, so release-bundle installation checks for Python 3 with
-`venv` and `pip`, plus `zenity`. `swayidle` is required only when using that
-desktop backend.
+brightness dialog, so release-bundle installation checks for Python 3 with a
+`venv` that provisions `pip`, plus `zenity`. `swayidle` is required only when
+using that desktop backend.
 
 ### Debian, Ubuntu, and Pop!_OS
 
@@ -94,6 +94,11 @@ If you select the native `lg_webos` control platform, accept the pairing prompt
 during setup. With the default `bscpylgtv` platform, the prompt may instead
 appear on first use; see the
 [bscpylgtv first-use guide](https://github.com/chros73/bscpylgtv/blob/master/docs/guides/first_use.md).
+
+To update an existing compatible release-bundle installation from an already
+verified and extracted newer bundle, run `./install.sh --upgrade`. Upgrade mode
+preserves configuration and credentials and does not repeat setup or pairing;
+incompatible and legacy layouts are refused rather than migrated.
 
 The shell installer targets conventional Linux installations with mutable
 system locations. First-class NixOS packaging is tracked in
