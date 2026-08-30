@@ -312,9 +312,10 @@ fixture. Its focused suite covers a passing mutable FHS layout plus symlinked,
 mounted, incompletely or wrongly owned, untrusted-writable, read-only,
 hard-linked, legacy, conflicting-drop-in, malformed-candidate, and
 unavailable-service-manager refusals. Table-driven cases exercise every path
-policy's permission contract and every declared candidate input; recursive
-repair coverage also refuses nested mount points below the virtualenv root. Run
-it with:
+policy's permission contract and every declared candidate input. Candidate
+containment cases reject untrusted and non-sticky shared-writable ancestors
+while preserving root-owned sticky temporary directories; recursive repair
+coverage also refuses nested mount points below the virtualenv root. Run it with:
 
 ```bash
 cargo test -p lg-buddy upgrade_preflight::tests --lib

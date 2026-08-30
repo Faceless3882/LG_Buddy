@@ -682,7 +682,7 @@ pub fn evaluate_candidate_preflight(
         return checker.report;
     }
 
-    let candidate_trust = TrustedRoot::strict(candidate_root, user_owner_uid);
+    let candidate_trust = TrustedRoot::candidate(candidate_root, user_owner_uid);
     for requirement in CANDIDATE_PATH_REQUIREMENTS {
         checker.check_requirement(
             &candidate_root.join(requirement.path),
@@ -753,6 +753,7 @@ struct TrustedRoot<'a> {
     path: &'a Path,
     owner_uid: u32,
     reject_other_writes: bool,
+    protect_external_ancestors: bool,
 }
 
 impl<'a> TrustedRoot<'a> {
@@ -761,6 +762,16 @@ impl<'a> TrustedRoot<'a> {
             path,
             owner_uid,
             reject_other_writes: true,
+            protect_external_ancestors: false,
+        }
+    }
+
+    fn candidate(path: &'a Path, owner_uid: u32) -> Self {
+        Self {
+            path,
+            owner_uid,
+            reject_other_writes: true,
+            protect_external_ancestors: true,
         }
     }
 
@@ -769,14 +780,26 @@ impl<'a> TrustedRoot<'a> {
             path,
             owner_uid,
             reject_other_writes: false,
+            protect_external_ancestors: false,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum AncestorPolicy {
+    Trusted {
+        owner_uid: u32,
+        reject_other_writes: bool,
+    },
+    CandidateExternal {
+        user_owner_uid: u32,
+    },
 }
 
 struct Checker<'a, F> {
     filesystem: &'a F,
     report: CompatibilityReport,
-    checked_ancestors: BTreeSet<(PathBuf, Option<(u32, bool)>)>,
+    checked_ancestors: BTreeSet<(PathBuf, Option<AncestorPolicy>)>,
 }
 
 impl<'a, F: FilesystemFacts> Checker<'a, F> {
@@ -1240,26 +1263,72 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
         }
     }
 
+    fn check_candidate_external_ancestor(
+        &mut self,
+        path: &Path,
+        facts: &PathFacts,
+        user_owner_uid: u32,
+    ) {
+        if facts.owner_uid != 0 && facts.owner_uid != user_owner_uid {
+            self.report.refuse(
+                "path-containment",
+                Some(path.to_path_buf()),
+                format!(
+                    "candidate path ancestor is owned by uid {}, expected root or uid {user_owner_uid}",
+                    facts.owner_uid
+                ),
+                "move the verified bundle below a root- or user-owned directory",
+            );
+            return;
+        }
+        if facts.mode & 0o022 != 0 && facts.mode & 0o1000 == 0 {
+            self.report.refuse(
+                "path-containment",
+                Some(path.to_path_buf()),
+                "candidate path ancestor is writable by its group or by other users without sticky-directory protection",
+                "move the verified bundle into a private directory or below a sticky shared directory such as /tmp",
+            );
+        }
+    }
+
     fn check_ancestors(&mut self, path: &Path, trusted_root: Option<TrustedRoot<'_>>) {
         for ancestor in path.ancestors().skip(1) {
-            let trusted_properties = trusted_root
-                .filter(|root| ancestor.starts_with(root.path))
-                .map(|root| (root.owner_uid, root.reject_other_writes));
+            let ancestor_policy = trusted_root.and_then(|root| {
+                if ancestor.starts_with(root.path) {
+                    Some(AncestorPolicy::Trusted {
+                        owner_uid: root.owner_uid,
+                        reject_other_writes: root.reject_other_writes,
+                    })
+                } else if root.protect_external_ancestors {
+                    Some(AncestorPolicy::CandidateExternal {
+                        user_owner_uid: root.owner_uid,
+                    })
+                } else {
+                    None
+                }
+            });
             if !self
                 .checked_ancestors
-                .insert((ancestor.to_path_buf(), trusted_properties))
+                .insert((ancestor.to_path_buf(), ancestor_policy))
             {
                 continue;
             }
             match self.filesystem.path_facts(ancestor) {
-                Ok(facts) if facts.kind == PathKind::Directory => {
-                    if let Some((expected_uid, reject_other_writes)) = trusted_properties {
-                        self.check_owner(ancestor, &facts, expected_uid, "path-containment");
+                Ok(facts) if facts.kind == PathKind::Directory => match ancestor_policy {
+                    Some(AncestorPolicy::Trusted {
+                        owner_uid,
+                        reject_other_writes,
+                    }) => {
+                        self.check_owner(ancestor, &facts, owner_uid, "path-containment");
                         if reject_other_writes {
                             self.check_not_writable_by_others(ancestor, &facts);
                         }
                     }
-                }
+                    Some(AncestorPolicy::CandidateExternal { user_owner_uid }) => {
+                        self.check_candidate_external_ancestor(ancestor, &facts, user_owner_uid)
+                    }
+                    None => {}
+                },
                 Ok(facts) => self.report.refuse(
                     "path-containment",
                     Some(ancestor.to_path_buf()),
@@ -1499,6 +1568,73 @@ mod tests {
                 "writable by its group or by other users",
             );
         }
+    }
+
+    #[test]
+    fn candidate_preflight_refuses_a_non_sticky_writable_external_ancestor() {
+        let fixture = InstalledFixture::new("writable-candidate-ancestor");
+        let ancestor = fixture.candidate_root.parent().unwrap().to_path_buf();
+        set_mode(&ancestor, 0o777);
+
+        let report = evaluate_candidate_preflight(
+            &OsFilesystemFacts,
+            &fixture.candidate_root,
+            fixture.facts.user_owner_uid,
+        );
+
+        assert_failure(
+            &report,
+            "path-containment",
+            &ancestor,
+            "without sticky-directory protection",
+        );
+    }
+
+    #[test]
+    fn candidate_preflight_refuses_an_external_ancestor_owned_by_another_user() {
+        let fixture = InstalledFixture::new("untrusted-candidate-ancestor-owner");
+        let ancestor = fixture.candidate_root.parent().unwrap().to_path_buf();
+        let filesystem = OverriddenFilesystem {
+            path: ancestor.clone(),
+            owner_uid: Some(fixture.facts.user_owner_uid + 1),
+            mode: None,
+            read_only: None,
+            mount_point: None,
+        };
+
+        let report = evaluate_candidate_preflight(
+            &filesystem,
+            &fixture.candidate_root,
+            fixture.facts.user_owner_uid,
+        );
+
+        assert_failure(
+            &report,
+            "path-containment",
+            &ancestor,
+            "expected root or uid",
+        );
+    }
+
+    #[test]
+    fn candidate_preflight_accepts_a_root_owned_sticky_external_ancestor() {
+        let fixture = InstalledFixture::new("sticky-candidate-ancestor");
+        let ancestor = fixture.candidate_root.parent().unwrap().to_path_buf();
+        let filesystem = OverriddenFilesystem {
+            path: ancestor,
+            owner_uid: Some(0),
+            mode: Some(0o1777),
+            read_only: None,
+            mount_point: None,
+        };
+
+        let report = evaluate_candidate_preflight(
+            &filesystem,
+            &fixture.candidate_root,
+            fixture.facts.user_owner_uid,
+        );
+
+        assert!(report.compatible(), "{}", report.render());
     }
 
     #[test]
@@ -2101,6 +2237,7 @@ mod tests {
             let candidate_root = root.join("candidate");
             create_relative_requirements(&candidate_root, CANDIDATE_PATH_REQUIREMENTS);
             set_directory_tree_mode(&candidate_root, 0o755);
+            set_mode(&root, 0o755);
 
             let owner_uid = unsafe { libc::geteuid() };
             let facts = HostPreflightFacts {

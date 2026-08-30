@@ -459,7 +459,9 @@ preflight. That pass rechecks the installed state, proves it is executing the
 candidate from the supplied bundle root, and checks the candidate manifest,
 installer, runtime, desktop entry, and systemd assets before any privileged
 mutation. Candidate inputs must be owner-usable and not writable by another
-user. Configuration and pairing scripts are deliberately excluded because the
+user. The external ancestor chain must remain root- or user-owned and cannot be
+shared-writable unless sticky-directory semantics protect its trusted child.
+Configuration and pairing scripts are deliberately excluded because the
 non-interactive upgrade mode preserves existing configuration and credentials
 without invoking them.
 
