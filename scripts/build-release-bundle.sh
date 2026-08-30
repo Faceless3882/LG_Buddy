@@ -61,6 +61,11 @@ install -m 755 "$REPO_ROOT/bin/LG_Buddy_Common" "$BUNDLE_DIR/bin/LG_Buddy_Common
 install -m 644 "$REPO_ROOT/LG_Buddy_Brightness.desktop" "$BUNDLE_DIR/LG_Buddy_Brightness.desktop"
 install -m 644 "$REPO_ROOT/README.md" "$BUNDLE_DIR/README.md"
 install -m 644 "$REPO_ROOT/LICENSE" "$BUNDLE_DIR/LICENSE"
+python3 "$SCRIPT_DIR/release_bundle_manifest.py" create \
+    --output "$BUNDLE_DIR/release-manifest.json" \
+    --release-tag "v$VERSION" \
+    --target "$TARGET" \
+    --binary "$BUNDLE_DIR/lg-buddy"
 install -m 644 "$REPO_ROOT/systemd/LG_Buddy.service" "$BUNDLE_DIR/systemd/LG_Buddy.service"
 install -m 644 "$REPO_ROOT/systemd/LG_Buddy_lifecycle.service" "$BUNDLE_DIR/systemd/LG_Buddy_lifecycle.service"
 install -m 644 "$REPO_ROOT/systemd/LG_Buddy_screen.service" "$BUNDLE_DIR/systemd/LG_Buddy_screen.service"

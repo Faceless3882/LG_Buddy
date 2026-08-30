@@ -111,10 +111,14 @@ For gamepad subsystem internals and adapter contribution guidance, see
 Build a release bundle locally with:
 
 ```bash
+LG_BUDDY_RELEASE_VERSION=0.0.0-dev \
+LG_BUDDY_BUILD_COMMIT="$(git rev-parse HEAD)" \
+cargo build --release -p lg-buddy --target x86_64-unknown-linux-gnu
 ./scripts/build-release-bundle.sh --target x86_64-unknown-linux-gnu --version 0.0.0-dev
 ```
 
-That script expects the matching release binary to already exist under:
+The builder requires a full release commit and expects the matching release
+binary to exist under:
 
 ```text
 ./target/<target>/release/lg-buddy
@@ -126,10 +130,17 @@ Smoke test a generated release bundle with:
 ./scripts/test-release-bundle.sh --archive ./dist/lg-buddy-0.0.0-dev-x86_64-unknown-linux-gnu.tar.gz
 ```
 
-The smoke test unpacks the archive, verifies expected files, and installs into a
-temporary root. It checks both TV platforms, native credential preservation
-across upgrades, lifecycle and NetworkManager hook topology, and uninstall
-cleanup without mutating the host installation.
+The smoke test validates `release-manifest.json` against the archive name and
+bundled binary before running installer code. It then installs into a temporary
+root and checks both TV platforms, native credential preservation across
+upgrades, lifecycle and NetworkManager hook topology, and uninstall cleanup
+without mutating the host installation.
+
+Run the focused manifest contract tests with:
+
+```bash
+python3 scripts/test_release_bundle_manifest.py
+```
 
 Dry-run the GitHub release publish step with:
 
@@ -167,6 +178,7 @@ the branch contract and recovery process, see
 | `configure.sh` | Interactive configuration tool |
 | `install.sh` | Installer for an existing binary |
 | `uninstall.sh` | Uninstaller |
+| `scripts/release_bundle_manifest.py` | Release-bundle identity manifest creator and validator |
 | `scripts/build-release-bundle.sh` | Release bundle builder |
 | `scripts/test-release-bundle.sh` | Release bundle smoke test |
 | `scripts/publish-release-assets.sh` | GitHub release publish helper |

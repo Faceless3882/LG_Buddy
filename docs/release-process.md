@@ -65,14 +65,36 @@ The workflow:
 1. Revalidates the live PR, refs, required checks, Cargo version, and tag state.
 2. Builds a static `x86_64-unknown-linux-musl` binary with exact version and
    commit identity.
-3. Packages and installs the release bundle in an isolated smoke-test root.
-4. Verifies the built and installed binary's exact version, channel, and commit.
-5. Generates and verifies `sha256sums.txt`.
-6. Publishes the tag and GitHub release without replacing conflicting assets.
-7. Downloads the published assets and verifies their checksums independently.
-8. Fast-forwards the selected branch only after publication succeeds.
+3. Generates a versioned identity manifest and packages the release bundle.
+4. Validates the manifest and installs the bundle in an isolated smoke-test root.
+5. Verifies the built and installed binary's exact version, channel, and commit.
+6. Generates and verifies `sha256sums.txt`.
+7. Publishes the tag and GitHub release without replacing conflicting assets.
+8. Downloads the published assets and verifies their checksums independently.
+9. Fast-forwards the selected branch only after publication succeeds.
 
 `install.sh` is only an installer. It does not build the runtime.
+
+## Release bundle identity
+
+Every release archive contains `release-manifest.json` at the bundle root. The
+schema-versioned JSON records the exact release tag, semantic version, release
+channel, Rust target triple, and full lowercase commit SHA. Version, tag, and
+channel must agree: stable SemVer maps to `stable`, prerelease SemVer maps to
+`prerelease`, and the tag is exactly `v<version>`.
+
+Schema 1 marks all five identity fields as critical. Validators reject an
+unsupported schema, duplicate JSON fields, missing identity fields, and unknown
+critical fields. Unknown non-critical fields may be ignored for compatible
+schema evolution. Official manifests use a deterministic field order and JSON
+rendering.
+
+The bundle builder derives version, channel, and commit from `lg-buddy
+--version`; it cannot package a binary whose identity disagrees with its tag.
+Smoke validation checks the manifest before executing installer code and then
+compares it with both the bundled and installed binary. Publishing validates
+the manifest directly from each archive without extracting or executing archive
+content.
 
 ## Nix source selection
 

@@ -43,6 +43,9 @@ jobs:
       - name: Validate release promotion contract
         run: python3 scripts/test_release_promotion.py
 
+      - name: Validate release bundle manifest contract
+        run: python3 scripts/test_release_bundle_manifest.py
+
   bundle-smoke-test:
     runs-on: ubuntu-latest
     needs: verify
@@ -65,13 +68,24 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y musl-tools zenity
 
       - name: Build lg-buddy release binary
+        env:
+          LG_BUDDY_BUILD_COMMIT: ${{ github.sha }}
+          LG_BUDDY_RELEASE_VERSION: 0.0.0-ci.smoke
         run: cargo build --release -p lg-buddy --target x86_64-unknown-linux-musl
 
       - name: Create release bundle
-        run: ./scripts/build-release-bundle.sh --target x86_64-unknown-linux-musl --version ci-smoke --output-dir dist
+        run: ./scripts/build-release-bundle.sh --target x86_64-unknown-linux-musl --version 0.0.0-ci.smoke --output-dir dist
 
       - name: Smoke test release bundle
-        run: ./scripts/test-release-bundle.sh --skip-pip-install --archive dist/lg-buddy-ci-smoke-x86_64-unknown-linux-musl.tar.gz
+        run: |
+          ./scripts/test-release-bundle.sh \
+              --skip-pip-install \
+              --archive dist/lg-buddy-0.0.0-ci.smoke-x86_64-unknown-linux-musl.tar.gz \
+              --expected-tag v0.0.0-ci.smoke \
+              --expected-version 0.0.0-ci.smoke \
+              --expected-channel prerelease \
+              --expected-target x86_64-unknown-linux-musl \
+              --expected-commit "${{ github.sha }}"
 
       - name: Generate checksums
         run: |
@@ -86,4 +100,4 @@ jobs:
       - name: Dry-run publish release assets
         env:
           GH_RELEASE_DRY_RUN: "1"
-        run: ./scripts/publish-release-assets.sh --dist-dir dist --tag v0.0.0-ci-smoke
+        run: ./scripts/publish-release-assets.sh --dist-dir dist --tag v0.0.0-ci.smoke --commit "${{ github.sha }}"

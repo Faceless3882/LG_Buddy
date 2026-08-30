@@ -3,19 +3,8 @@
 set -euo pipefail
 
 usage() {
-    echo "Usage: $0 --archive <path-to-release-tar.gz> [--work-dir <dir>] [--skip-pip-install] [--expected-version <version> --expected-channel <channel> --expected-commit <sha>]"
+    echo "Usage: $0 --archive <path-to-release.tar.gz> [--work-dir <dir>] [--skip-pip-install] [--expected-tag <tag> --expected-version <version> --expected-channel <channel> --expected-target <target> --expected-commit <sha>]"
     exit 1
-}
-
-assert_version_identity() {
-    local binary="$1"
-    local output=""
-
-    output="$("$binary" --version)"
-    printf '%s\n' "$output" | grep -F -x -q "lg-buddy $EXPECTED_VERSION"
-    printf '%s\n' "$output" | grep -F -x -q "version: $EXPECTED_VERSION"
-    printf '%s\n' "$output" | grep -F -x -q "channel: $EXPECTED_CHANNEL"
-    printf '%s\n' "$output" | grep -F -x -q "commit: $EXPECTED_COMMIT"
 }
 
 assert_file() {
@@ -174,11 +163,14 @@ validate_archive_paths() {
     done < <(tar -tzf "$archive")
 }
 
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 ARCHIVE=""
 WORK_DIR=""
 SKIP_PIP_INSTALL=0
+EXPECTED_TAG=""
 EXPECTED_VERSION=""
 EXPECTED_CHANNEL=""
+EXPECTED_TARGET=""
 EXPECTED_COMMIT=""
 
 while [ "$#" -gt 0 ]; do
@@ -195,12 +187,20 @@ while [ "$#" -gt 0 ]; do
             SKIP_PIP_INSTALL=1
             shift
             ;;
+        --expected-tag)
+            EXPECTED_TAG="${2:-}"
+            shift 2
+            ;;
         --expected-version)
             EXPECTED_VERSION="${2:-}"
             shift 2
             ;;
         --expected-channel)
             EXPECTED_CHANNEL="${2:-}"
+            shift 2
+            ;;
+        --expected-target)
+            EXPECTED_TARGET="${2:-}"
             shift 2
             ;;
         --expected-commit)
@@ -215,7 +215,14 @@ done
 
 [ -n "$ARCHIVE" ] || usage
 [ -z "$EXPECTED_VERSION$EXPECTED_CHANNEL$EXPECTED_COMMIT" ] || {
-    [ -n "$EXPECTED_VERSION" ] && [ -n "$EXPECTED_CHANNEL" ] && [ -n "$EXPECTED_COMMIT" ] || usage
+    [ -n "$EXPECTED_VERSION" ] && \
+        [ -n "$EXPECTED_CHANNEL" ] && \
+        [ -n "$EXPECTED_COMMIT" ] || usage
+}
+[ -z "$EXPECTED_TAG$EXPECTED_TARGET" ] || {
+    [ -n "$EXPECTED_TAG" ] && \
+        [ -n "$EXPECTED_TARGET" ] && \
+        [ -n "$EXPECTED_VERSION" ] || usage
 }
 [ -f "$ARCHIVE" ] || {
     echo "Archive not found: $ARCHIVE"
@@ -243,6 +250,25 @@ XDG_CONFIG_HOME="$HOME_DIR/.config"
 
 mkdir -p "$EXTRACT_DIR" "$INSTALL_ROOT" "$HOME_DIR"
 
+MANIFEST_EXPECTATIONS=()
+if [ -n "$EXPECTED_VERSION" ]; then
+    MANIFEST_EXPECTATIONS=(
+        --expected-version "$EXPECTED_VERSION"
+        --expected-channel "$EXPECTED_CHANNEL"
+        --expected-commit "$EXPECTED_COMMIT"
+    )
+fi
+if [ -n "$EXPECTED_TAG" ]; then
+    MANIFEST_EXPECTATIONS+=(
+        --expected-release-tag "$EXPECTED_TAG"
+        --expected-target "$EXPECTED_TARGET"
+    )
+fi
+
+# Validate archive identity without extracting or executing archive content.
+python3 "$SCRIPT_DIR/release_bundle_manifest.py" validate \
+    --archive "$ARCHIVE" \
+    "${MANIFEST_EXPECTATIONS[@]}"
 validate_archive_paths "$ARCHIVE"
 tar -C "$EXTRACT_DIR" -xzf "$ARCHIVE"
 BUNDLE_DIR="$(find "$EXTRACT_DIR" -mindepth 1 -maxdepth 1 -type d | head -n1)"
@@ -260,6 +286,7 @@ assert_executable "$BUNDLE_DIR/bin/LG_Buddy_Common"
 assert_file "$BUNDLE_DIR/LG_Buddy_Brightness.desktop"
 assert_file "$BUNDLE_DIR/README.md"
 assert_file "$BUNDLE_DIR/LICENSE"
+assert_file "$BUNDLE_DIR/release-manifest.json"
 assert_file "$BUNDLE_DIR/docs/architecture-overview.md"
 assert_file "$BUNDLE_DIR/docs/runtime-event-handler-map.md"
 assert_file "$BUNDLE_DIR/docs/user-guide.md"
@@ -271,6 +298,11 @@ assert_file "$BUNDLE_DIR/systemd/LG_Buddy_screen.service"
 assert_file "$BUNDLE_DIR/systemd/LG_Buddy_update_check.service"
 assert_file "$BUNDLE_DIR/systemd/LG_Buddy_update_check.timer"
 
+# The identity query is the first command executed from the extracted bundle.
+python3 "$SCRIPT_DIR/release_bundle_manifest.py" validate \
+    --manifest "$BUNDLE_DIR/release-manifest.json" \
+    --binary "$BUNDLE_DIR/lg-buddy" \
+    "${MANIFEST_EXPECTATIONS[@]}"
 assert_cli_surface "$BUNDLE_DIR/lg-buddy"
 
 VERSION_OUTPUT="$("$BUNDLE_DIR/lg-buddy" --version)"
@@ -278,9 +310,6 @@ printf '%s\n' "$VERSION_OUTPUT" | grep -q "^lg-buddy "
 printf '%s\n' "$VERSION_OUTPUT" | grep -q "^version: "
 printf '%s\n' "$VERSION_OUTPUT" | grep -q "^channel: "
 printf '%s\n' "$VERSION_OUTPUT" | grep -q "^commit: "
-if [ -n "$EXPECTED_VERSION" ]; then
-    assert_version_identity "$BUNDLE_DIR/lg-buddy"
-fi
 
 export HOME="$HOME_DIR"
 export XDG_CONFIG_HOME="$XDG_CONFIG_HOME"
@@ -362,9 +391,10 @@ printf '%s\n' "$INSTALLED_VERSION_OUTPUT" | grep -q "^lg-buddy "
 printf '%s\n' "$INSTALLED_VERSION_OUTPUT" | grep -q "^version: "
 printf '%s\n' "$INSTALLED_VERSION_OUTPUT" | grep -q "^channel: "
 printf '%s\n' "$INSTALLED_VERSION_OUTPUT" | grep -q "^commit: "
-if [ -n "$EXPECTED_VERSION" ]; then
-    assert_version_identity "$INSTALLED_BINARY"
-fi
+python3 "$SCRIPT_DIR/release_bundle_manifest.py" validate \
+    --manifest "$BUNDLE_DIR/release-manifest.json" \
+    --binary "$INSTALLED_BINARY" \
+    "${MANIFEST_EXPECTATIONS[@]}"
 
 # Existing profiles without the platform key remain on bscpylgtv. Materialize
 # that choice through settings, then use a controlled raw-config fixture to
