@@ -101,10 +101,10 @@ content.
 Release-bundle replacement is guarded by observed capability rather than a
 distribution allowlist or provenance receipt. The initial runtime preflight
 checks the installed mutable FHS topology, config discovery, ownership, path
-types, integration state, and system/user service-manager availability before
-an updater performs release or privilege-related effects. A verified
-candidate's binary performs a second pass for its own installer requirements
-before privileged mutation.
+types and mount boundaries, trusted system containment, integration override
+state, and system/user service-manager availability before an updater performs
+release or privilege-related effects. A verified candidate's binary performs a
+second pass for its own installer requirements before privileged mutation.
 
 This is intentionally a conservative and evolving refusal boundary. It does
 not migrate legacy layouts, declare broad host support, or guarantee that a

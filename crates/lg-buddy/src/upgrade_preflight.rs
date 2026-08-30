@@ -49,7 +49,9 @@ const LEGACY_SYSTEM_PATHS: &[&str] = &[
     "/usr/lib/lg-buddy/common.sh",
     "/usr/lib/systemd/system-sleep/LG_Buddy_sleep_hook",
     "/etc/systemd/system/LG_Buddy_wake.service",
+    "/etc/systemd/system/LG_Buddy_wake.service.d",
     "/etc/systemd/system/LG_Buddy_sleep.service",
+    "/etc/systemd/system/LG_Buddy_sleep.service.d",
     "/etc/NetworkManager/dispatcher.d/pre-down.d/LG_Buddy_sleep",
 ];
 
@@ -97,6 +99,7 @@ pub struct PathFacts {
     pub mode: u32,
     pub link_count: u64,
     pub read_only_filesystem: bool,
+    pub mount_point: bool,
 }
 
 pub trait FilesystemFacts {
@@ -132,6 +135,11 @@ impl FilesystemFacts for OsFilesystemFacts {
             } else {
                 false
             },
+            mount_point: if matches!(kind, PathKind::File | PathKind::Directory) {
+                path_is_mount_point(path)?
+            } else {
+                false
+            },
         })
     }
 
@@ -158,6 +166,39 @@ fn filesystem_is_read_only(path: &Path) -> io::Result<bool> {
     }
     let stat = unsafe { stat.assume_init() };
     Ok(stat.f_flag & libc::ST_RDONLY as libc::c_ulong != 0)
+}
+
+fn path_is_mount_point(path: &Path) -> io::Result<bool> {
+    let mountinfo = fs::read("/proc/self/mountinfo")?;
+    let path = path.as_os_str().as_bytes();
+    Ok(mountinfo.split(|byte| *byte == b'\n').any(|line| {
+        line.split(|byte| *byte == b' ')
+            .nth(4)
+            .is_some_and(|field| decode_mountinfo_field(field) == path)
+    }))
+}
+
+fn decode_mountinfo_field(field: &[u8]) -> Vec<u8> {
+    let mut decoded = Vec::with_capacity(field.len());
+    let mut index = 0;
+    while index < field.len() {
+        if field[index] == b'\\'
+            && index + 3 < field.len()
+            && field[index + 1..=index + 3]
+                .iter()
+                .all(|byte| matches!(byte, b'0'..=b'7'))
+        {
+            let value = (field[index + 1] - b'0') * 64
+                + (field[index + 2] - b'0') * 8
+                + (field[index + 3] - b'0');
+            decoded.push(value);
+            index += 4;
+        } else {
+            decoded.push(field[index]);
+            index += 1;
+        }
+    }
+    decoded
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -443,6 +484,7 @@ fn evaluate_installed_state(
             facts.system_owner_uid,
             *executable,
             true,
+            Some(&facts.layout.system_root),
             "installed-layout",
         );
     }
@@ -451,6 +493,7 @@ fn evaluate_installed_state(
             &facts.layout.system_path(path),
             facts.system_owner_uid,
             true,
+            Some(&facts.layout.system_root),
             "mutable-installation",
         );
     }
@@ -460,6 +503,7 @@ fn evaluate_installed_state(
             facts.user_owner_uid,
             *executable,
             true,
+            None,
             "user-integration",
         );
     }
@@ -468,6 +512,7 @@ fn evaluate_installed_state(
             &facts.layout.user_home.join(path),
             facts.user_owner_uid,
             true,
+            None,
             "mutable-user-integration",
         );
     }
@@ -476,8 +521,11 @@ fn evaluate_installed_state(
         checker.check_absent(&facts.layout.system_path(path));
     }
 
-    let config_path =
-        checker.read_config_pointer(&facts.layout.config_pointer(), facts.system_owner_uid);
+    let config_path = checker.read_config_pointer(
+        &facts.layout.config_pointer(),
+        facts.system_owner_uid,
+        &facts.layout.system_root,
+    );
     if let Some(config_path) = config_path {
         let config_marker = systemd_config_override_line(&config_path);
         for path in [
@@ -494,7 +542,7 @@ fn evaluate_installed_state(
                 .layout
                 .user_systemd_path("LG_Buddy_update_check.service.d/config.conf"),
         ] {
-            checker.check_file_has_line(&path, &config_marker);
+            checker.check_integration_override(&path, &config_marker);
         }
         checker.check_config_tree(&config_path, facts.user_owner_uid);
     }
@@ -523,11 +571,18 @@ pub fn evaluate_candidate_preflight(
         return checker.report;
     }
 
-    checker.check_directory(candidate_root, user_owner_uid, true, "candidate-layout");
+    checker.check_directory(
+        candidate_root,
+        user_owner_uid,
+        true,
+        None,
+        "candidate-layout",
+    );
     checker.check_directory(
         &candidate_root.join("systemd"),
         user_owner_uid,
         false,
+        None,
         "candidate-layout",
     );
     for (path, executable) in CANDIDATE_FILES {
@@ -536,9 +591,20 @@ pub fn evaluate_candidate_preflight(
             user_owner_uid,
             *executable,
             false,
+            None,
             "candidate-layout",
         );
     }
+    checker.check_owner_permissions(
+        &candidate_root.join("lg-buddy"),
+        0o100,
+        "candidate runtime is not executable by its owner",
+    );
+    checker.check_owner_permissions(
+        &candidate_root.join("install.sh"),
+        0o500,
+        "candidate installer is not readable and executable by its owner",
+    );
     checker.report
 }
 
@@ -598,7 +664,7 @@ fn systemd_config_override_line(config_path: &Path) -> String {
 struct Checker<'a, F> {
     filesystem: &'a F,
     report: CompatibilityReport,
-    checked_ancestors: BTreeSet<PathBuf>,
+    checked_ancestors: BTreeSet<(PathBuf, Option<u32>)>,
 }
 
 impl<'a, F: FilesystemFacts> Checker<'a, F> {
@@ -616,9 +682,10 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
         owner_uid: u32,
         executable: bool,
         must_be_mutable: bool,
+        trusted_system_root: Option<&Path>,
         check: &'static str,
     ) {
-        self.check_ancestors(path);
+        self.check_ancestors(path, trusted_system_root, owner_uid);
         let facts = match self.path_facts(path, check) {
             Some(facts) => facts,
             None => return,
@@ -633,6 +700,9 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
             return;
         }
         self.check_owner(path, &facts, owner_uid, check);
+        if trusted_system_root.is_some() {
+            self.check_not_writable_by_others(path, &facts);
+        }
         if must_be_mutable && facts.read_only_filesystem {
             self.report.refuse(
                 check,
@@ -650,6 +720,14 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
                     facts.link_count
                 ),
                 "replace the path with an independent regular file before upgrading",
+            );
+        }
+        if must_be_mutable && facts.mount_point {
+            self.report.refuse(
+                check,
+                Some(path.to_path_buf()),
+                "file is a mount point",
+                "replace the mounted path with an ordinary installation file before upgrading",
             );
         }
         if must_be_mutable && facts.mode & 0o200 == 0 {
@@ -675,9 +753,10 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
         path: &Path,
         owner_uid: u32,
         must_be_mutable: bool,
+        trusted_system_root: Option<&Path>,
         check: &'static str,
     ) {
-        self.check_ancestors(path);
+        self.check_ancestors(path, trusted_system_root, owner_uid);
         let facts = match self.path_facts(path, check) {
             Some(facts) => facts,
             None => return,
@@ -692,12 +771,23 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
             return;
         }
         self.check_owner(path, &facts, owner_uid, check);
+        if trusted_system_root.is_some() {
+            self.check_not_writable_by_others(path, &facts);
+        }
         if must_be_mutable && facts.read_only_filesystem {
             self.report.refuse(
                 check,
                 Some(path.to_path_buf()),
                 "directory is on a read-only filesystem",
                 "use the host's native package manager or make the installed release-bundle paths mutable",
+            );
+        }
+        if must_be_mutable && facts.mount_point {
+            self.report.refuse(
+                check,
+                Some(path.to_path_buf()),
+                "directory is a mount point",
+                "replace the mounted path with an ordinary installation directory before upgrading",
             );
         }
         if must_be_mutable && facts.mode & 0o200 == 0 {
@@ -710,7 +800,7 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
         }
     }
 
-    fn check_file_has_line(&mut self, path: &Path, expected: &str) {
+    fn check_integration_override(&mut self, path: &Path, expected: &str) {
         if self
             .report
             .failures
@@ -720,18 +810,51 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
             return;
         }
         match self.filesystem.read_to_string(path) {
-            Ok(contents) if contents.lines().any(|line| line.trim() == expected) => {}
-            Ok(_) => self.report.refuse(
-                "integration-config",
-                Some(path.to_path_buf()),
-                format!("integration does not reference {expected}"),
-                "restore the integration override for the discovered config path",
-            ),
+            Ok(contents) => {
+                let directives: Vec<_> = contents
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.starts_with('#') && !line.starts_with(';'))
+                    .filter(|line| line.contains("LG_BUDDY_CONFIG"))
+                    .collect();
+                if directives.len() != 1 || directives[0] != expected {
+                    self.report.refuse(
+                        "integration-config",
+                        Some(path.to_path_buf()),
+                        format!("integration does not reference exactly {expected}"),
+                        "restore the sole integration override for the discovered config path",
+                    );
+                }
+            }
             Err(err) => self.report.refuse(
                 "integration-config",
                 Some(path.to_path_buf()),
                 format!("could not read the integration override: {err}"),
                 "restore a readable integration override",
+            ),
+        }
+
+        let Some(directory) = path.parent() else {
+            return;
+        };
+        match self.filesystem.read_directory(directory) {
+            Ok(entries) => {
+                for entry in entries {
+                    if entry != path {
+                        self.report.refuse(
+                            "integration-config",
+                            Some(entry),
+                            "integration override directory contains an unexpected entry",
+                            "remove unexpected drop-ins before upgrading",
+                        );
+                    }
+                }
+            }
+            Err(err) => self.report.refuse(
+                "integration-config",
+                Some(directory.to_path_buf()),
+                format!("could not inspect the integration override directory: {err}"),
+                "make the integration override directory readable before upgrading",
             ),
         }
     }
@@ -754,8 +877,20 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
         }
     }
 
-    fn read_config_pointer(&mut self, path: &Path, owner_uid: u32) -> Option<PathBuf> {
-        self.check_file(path, owner_uid, false, true, "config-discovery");
+    fn read_config_pointer(
+        &mut self,
+        path: &Path,
+        owner_uid: u32,
+        system_root: &Path,
+    ) -> Option<PathBuf> {
+        self.check_file(
+            path,
+            owner_uid,
+            false,
+            true,
+            Some(system_root),
+            "config-discovery",
+        );
         if self
             .report
             .failures
@@ -797,7 +932,7 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
     }
 
     fn check_config_tree(&mut self, config_path: &Path, owner_uid: u32) {
-        self.check_file(config_path, owner_uid, false, false, "config-state");
+        self.check_file(config_path, owner_uid, false, false, None, "config-state");
         let Some(config_directory) = config_path.parent() else {
             self.report.refuse(
                 "config-state",
@@ -807,7 +942,13 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
             );
             return;
         };
-        self.check_directory(config_directory, owner_uid, true, "mutable-config-state");
+        self.check_directory(
+            config_directory,
+            owner_uid,
+            true,
+            None,
+            "mutable-config-state",
+        );
         if self
             .report
             .failures
@@ -874,13 +1015,58 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
         }
     }
 
-    fn check_ancestors(&mut self, path: &Path) {
+    fn check_owner_permissions(&mut self, path: &Path, required: u32, detail: &'static str) {
+        if self
+            .report
+            .failures
+            .iter()
+            .any(|failure| failure.path.as_deref() == Some(path))
+        {
+            return;
+        }
+        let Some(facts) = self.path_facts(path, "candidate-layout") else {
+            return;
+        };
+        if facts.mode & required != required {
+            self.report.refuse(
+                "candidate-layout",
+                Some(path.to_path_buf()),
+                detail,
+                "restore the candidate file mode from a verified release bundle",
+            );
+        }
+    }
+
+    fn check_not_writable_by_others(&mut self, path: &Path, facts: &PathFacts) {
+        if facts.mode & 0o022 != 0 {
+            self.report.refuse(
+                "path-containment",
+                Some(path.to_path_buf()),
+                "system path is writable by its group or by other users",
+                "remove group and other write permission from the system installation path",
+            );
+        }
+    }
+
+    fn check_ancestors(&mut self, path: &Path, trusted_system_root: Option<&Path>, owner_uid: u32) {
         for ancestor in path.ancestors().skip(1) {
-            if !self.checked_ancestors.insert(ancestor.to_path_buf()) {
+            let trusted_owner = match trusted_system_root {
+                Some(root) if ancestor.starts_with(root) => Some(owner_uid),
+                _ => None,
+            };
+            if !self
+                .checked_ancestors
+                .insert((ancestor.to_path_buf(), trusted_owner))
+            {
                 continue;
             }
             match self.filesystem.path_facts(ancestor) {
-                Ok(facts) if facts.kind == PathKind::Directory => {}
+                Ok(facts) if facts.kind == PathKind::Directory => {
+                    if let Some(expected_uid) = trusted_owner {
+                        self.check_owner(ancestor, &facts, expected_uid, "path-containment");
+                        self.check_not_writable_by_others(ancestor, &facts);
+                    }
+                }
                 Ok(facts) => self.report.refuse(
                     "path-containment",
                     Some(ancestor.to_path_buf()),
@@ -961,6 +1147,17 @@ mod tests {
     }
 
     #[test]
+    fn os_filesystem_identifies_mount_points() {
+        let root = OsFilesystemFacts.path_facts(Path::new("/")).unwrap();
+
+        assert!(root.mount_point);
+        assert_eq!(
+            decode_mountinfo_field(br"/tmp/lg\040buddy\134config"),
+            br"/tmp/lg buddy\config"
+        );
+    }
+
+    #[test]
     fn initial_preflight_refuses_a_symlinked_installed_runtime() {
         let fixture = InstalledFixture::new("symlink-runtime");
         let runtime = fixture.facts.layout.installed_executable();
@@ -1007,12 +1204,53 @@ mod tests {
         let filesystem = OverriddenFilesystem {
             path: runtime.clone(),
             owner_uid: Some(fixture.facts.system_owner_uid + 1),
+            mode: None,
             read_only: None,
+            mount_point: None,
         };
 
         let report = evaluate_initial_preflight(&filesystem, &fixture.facts);
 
         assert_failure(&report, "installed-layout", &runtime, "owned by uid");
+    }
+
+    #[test]
+    fn initial_preflight_refuses_an_untrusted_system_ancestor() {
+        let fixture = InstalledFixture::new("wrong-ancestor-owner");
+        let ancestor = fixture.facts.layout.system_path("/etc/systemd");
+        let filesystem = OverriddenFilesystem {
+            path: ancestor.clone(),
+            owner_uid: Some(fixture.facts.system_owner_uid + 1),
+            mode: None,
+            read_only: None,
+            mount_point: None,
+        };
+
+        let report = evaluate_initial_preflight(&filesystem, &fixture.facts);
+
+        assert_failure(&report, "path-containment", &ancestor, "owned by uid");
+    }
+
+    #[test]
+    fn initial_preflight_refuses_a_system_path_writable_by_other_users() {
+        let fixture = InstalledFixture::new("world-writable-system-path");
+        let directory = fixture.facts.layout.system_path("/etc/systemd/system");
+        let filesystem = OverriddenFilesystem {
+            path: directory.clone(),
+            owner_uid: None,
+            mode: Some(0o777),
+            read_only: None,
+            mount_point: None,
+        };
+
+        let report = evaluate_initial_preflight(&filesystem, &fixture.facts);
+
+        assert_failure(
+            &report,
+            "path-containment",
+            &directory,
+            "writable by its group or by other users",
+        );
     }
 
     #[test]
@@ -1022,7 +1260,9 @@ mod tests {
         let filesystem = OverriddenFilesystem {
             path: directory.clone(),
             owner_uid: None,
+            mode: None,
             read_only: Some(true),
+            mount_point: None,
         };
 
         let report = evaluate_initial_preflight(&filesystem, &fixture.facts);
@@ -1042,7 +1282,9 @@ mod tests {
         let filesystem = OverriddenFilesystem {
             path: runtime.clone(),
             owner_uid: None,
+            mode: None,
             read_only: Some(true),
+            mount_point: None,
         };
 
         let report = evaluate_initial_preflight(&filesystem, &fixture.facts);
@@ -1053,6 +1295,26 @@ mod tests {
             &runtime,
             "read-only filesystem",
         );
+    }
+
+    #[test]
+    fn initial_preflight_refuses_a_mounted_mutation_target() {
+        let fixture = InstalledFixture::new("mounted-service");
+        let service = fixture
+            .facts
+            .layout
+            .system_path("/etc/systemd/system/LG_Buddy.service");
+        let filesystem = OverriddenFilesystem {
+            path: service.clone(),
+            owner_uid: None,
+            mode: None,
+            read_only: None,
+            mount_point: Some(true),
+        };
+
+        let report = evaluate_initial_preflight(&filesystem, &fixture.facts);
+
+        assert_failure(&report, "installed-layout", &service, "mount point");
     }
 
     #[test]
@@ -1126,6 +1388,41 @@ mod tests {
     }
 
     #[test]
+    fn initial_preflight_refuses_conflicting_config_assignments() {
+        let fixture = InstalledFixture::new("duplicate-config-override");
+        let override_path = fixture
+            .facts
+            .layout
+            .user_systemd_path("LG_Buddy_screen.service.d/config.conf");
+        let mut contents = fs::read_to_string(&override_path).unwrap();
+        contents.push_str("Environment=\"LG_BUDDY_CONFIG=/tmp/other/config.env\"\n");
+        fs::write(&override_path, contents).unwrap();
+
+        let report = evaluate_initial_preflight(&OsFilesystemFacts, &fixture.facts);
+
+        assert_failure(
+            &report,
+            "integration-config",
+            &override_path,
+            "does not reference exactly",
+        );
+    }
+
+    #[test]
+    fn initial_preflight_refuses_an_unexpected_systemd_drop_in() {
+        let fixture = InstalledFixture::new("unexpected-systemd-drop-in");
+        let drop_in = fixture
+            .facts
+            .layout
+            .system_path("/etc/systemd/system/LG_Buddy.service.d/99-local.conf");
+        write_file(&drop_in, false);
+
+        let report = evaluate_initial_preflight(&OsFilesystemFacts, &fixture.facts);
+
+        assert_failure(&report, "integration-config", &drop_in, "unexpected entry");
+    }
+
+    #[test]
     fn initial_preflight_refuses_legacy_state_instead_of_migrating_it() {
         let fixture = InstalledFixture::new("legacy-state");
         let legacy = fixture
@@ -1133,6 +1430,23 @@ mod tests {
             .layout
             .system_path("/usr/bin/LG_Buddy_Startup");
         write_file(&legacy, false);
+
+        let report = evaluate_initial_preflight(&OsFilesystemFacts, &fixture.facts);
+
+        assert_failure(&report, "legacy-layout", &legacy, "legacy");
+    }
+
+    #[test]
+    fn initial_preflight_refuses_a_legacy_override_directory() {
+        let fixture = InstalledFixture::new("legacy-override-directory");
+        let legacy = fixture
+            .facts
+            .layout
+            .system_path("/etc/systemd/system/LG_Buddy_wake.service.d");
+        let external = fixture.root.join("external-legacy-override");
+        fs::create_dir(&external).unwrap();
+        fs::write(external.join("config.conf"), "external\n").unwrap();
+        symlink(&external, &legacy).unwrap();
 
         let report = evaluate_initial_preflight(&OsFilesystemFacts, &fixture.facts);
 
@@ -1166,6 +1480,28 @@ mod tests {
 
         assert_failure(&report, "candidate-layout", &manifest, "missing");
         assert_failure(&report, "candidate-layout", &installer, "not executable");
+    }
+
+    #[test]
+    fn candidate_preflight_requires_owner_usable_executable_modes() {
+        for (label, mode) in [("unreadable-installer", 0o100), ("other-executable", 0o401)] {
+            let fixture = InstalledFixture::new(label);
+            let installer = fixture.candidate_root.join("install.sh");
+            set_mode(&installer, mode);
+
+            let report = evaluate_candidate_preflight(
+                &OsFilesystemFacts,
+                &fixture.candidate_root,
+                fixture.facts.user_owner_uid,
+            );
+
+            assert_failure(
+                &report,
+                "candidate-layout",
+                &installer,
+                "not readable and executable by its owner",
+            );
+        }
     }
 
     #[test]
@@ -1263,7 +1599,9 @@ mod tests {
     struct OverriddenFilesystem {
         path: PathBuf,
         owner_uid: Option<u32>,
+        mode: Option<u32>,
         read_only: Option<bool>,
+        mount_point: Option<bool>,
     }
 
     impl FilesystemFacts for OverriddenFilesystem {
@@ -1273,8 +1611,14 @@ mod tests {
                 if let Some(owner_uid) = self.owner_uid {
                     facts.owner_uid = owner_uid;
                 }
+                if let Some(mode) = self.mode {
+                    facts.mode = mode;
+                }
                 if let Some(read_only) = self.read_only {
                     facts.read_only_filesystem = read_only;
+                }
+                if let Some(mount_point) = self.mount_point {
+                    facts.mount_point = mount_point;
                 }
             }
             Ok(facts)
@@ -1316,6 +1660,7 @@ mod tests {
             for (path, executable) in SYSTEM_FILES {
                 write_file(&layout.system_path(path), *executable);
             }
+            set_directory_tree_mode(&system_root, 0o755);
             for path in USER_MUTABLE_DIRECTORIES {
                 fs::create_dir_all(user_home.join(path)).unwrap();
             }
@@ -1385,9 +1730,23 @@ mod tests {
         set_executable(path, executable);
     }
 
+    fn set_directory_tree_mode(path: &Path, mode: u32) {
+        for entry in fs::read_dir(path).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                set_directory_tree_mode(&entry.path(), mode);
+            }
+        }
+        set_mode(path, mode);
+    }
+
     fn set_executable(path: &Path, executable: bool) {
-        let mut permissions = fs::metadata(path).unwrap().permissions();
         let mode = if executable { 0o755 } else { 0o644 };
+        set_mode(path, mode);
+    }
+
+    fn set_mode(path: &Path, mode: u32) {
+        let mut permissions = fs::metadata(path).unwrap().permissions();
         permissions.set_mode(mode);
         fs::set_permissions(path, permissions).unwrap();
     }

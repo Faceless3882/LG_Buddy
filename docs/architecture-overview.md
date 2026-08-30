@@ -446,7 +446,8 @@ filesystem topology, ordinary file and directory types, ownership, writable
 mounts, config-pointer discovery, user and system integrations, systemd manager
 availability, and the absence of legacy layouts that would require migration.
 The installed Python virtualenv root is part of that topology. Symlinks,
-multiply linked mutation targets, read-only files, and special files in owned
+mounted or multiply linked mutation targets, untrusted writable system paths,
+unexpected systemd drop-ins, read-only files, and special files in owned
 installation or config state are refused.
 
 After a bundle has been verified, its candidate binary can run the second

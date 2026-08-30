@@ -309,8 +309,9 @@ installed release binary.
 The upgrade-preflight module uses injected process, service-manager,
 filesystem, and ownership facts around a real temporary-root installation
 fixture. Its focused suite covers a passing mutable FHS layout plus symlinked,
-incomplete, wrongly owned, read-only, hard-linked, legacy,
-malformed-candidate, and unavailable-service-manager refusals. Run it with:
+mounted, incompletely or wrongly owned, untrusted-writable, read-only,
+hard-linked, legacy, conflicting-drop-in, malformed-candidate, and
+unavailable-service-manager refusals. Run it with:
 
 ```bash
 cargo test -p lg-buddy upgrade_preflight::tests --lib
