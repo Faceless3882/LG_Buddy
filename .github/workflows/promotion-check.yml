@@ -1,0 +1,97 @@
+name: Promotion
+
+on:
+  pull_request_target:
+    branches:
+      - main
+      - prerelease
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  validate-promotion:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Validate promotion PR source
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          IS_DRAFT: ${{ github.event.pull_request.draft }}
+        run: |
+          [ "$HEAD_REPOSITORY" = "$GITHUB_REPOSITORY" ] || {
+              echo "Promotion PRs must originate in this repository."
+              exit 1
+          }
+          [ "$HEAD_REF" = "dev" ] || {
+              echo "Only the exact dev branch may target $BASE_REF."
+              exit 1
+          }
+          case "$BASE_REF" in
+              main|prerelease) ;;
+              *)
+                  echo "Unsupported promotion target: $BASE_REF"
+                  exit 1
+                  ;;
+          esac
+          [ "$IS_DRAFT" = "false" ] || {
+              echo "Promotion PR must be ready for review."
+              exit 1
+          }
+
+      - name: Check out trusted promotion validator
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Fetch channel refs and release tags
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git fetch --force origin \
+              +refs/heads/main:refs/remotes/origin/main \
+              +refs/heads/prerelease:refs/remotes/origin/prerelease \
+              +refs/heads/dev:refs/remotes/origin/dev \
+              +refs/tags/*:refs/tags/*
+          [ "$(git rev-parse refs/remotes/origin/dev)" = "$HEAD_SHA" ]
+
+      - name: Validate promotion contract
+        id: contract
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 scripts/release_promotion.py \
+              --target "$BASE_REF" \
+              --head-ref "$HEAD_SHA" \
+              --base-sha "$BASE_SHA" \
+              --github-output "$GITHUB_OUTPUT"
+
+      - name: Reject conflicting GitHub release state
+        env:
+          CHANNEL: ${{ steps.contract.outputs.channel }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.contract.outputs.tag }}
+        run: |
+          if release_state="$(gh release view "$RELEASE_TAG" --json isDraft,isPrerelease 2>/dev/null)"; then
+              [ "$(printf '%s' "$release_state" | jq -r .isDraft)" = "false" ]
+              expected_prerelease="false"
+              [ "$CHANNEL" = "stable" ] || expected_prerelease="true"
+              [ "$(printf '%s' "$release_state" | jq -r .isPrerelease)" = "$expected_prerelease" ]
+          fi

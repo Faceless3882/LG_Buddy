@@ -3,8 +3,19 @@
 set -euo pipefail
 
 usage() {
-    echo "Usage: $0 --archive <path-to-release-tar.gz> [--work-dir <dir>] [--skip-pip-install]"
+    echo "Usage: $0 --archive <path-to-release-tar.gz> [--work-dir <dir>] [--skip-pip-install] [--expected-version <version> --expected-channel <channel> --expected-commit <sha>]"
     exit 1
+}
+
+assert_version_identity() {
+    local binary="$1"
+    local output=""
+
+    output="$("$binary" --version)"
+    printf '%s\n' "$output" | grep -F -x -q "lg-buddy $EXPECTED_VERSION"
+    printf '%s\n' "$output" | grep -F -x -q "version: $EXPECTED_VERSION"
+    printf '%s\n' "$output" | grep -F -x -q "channel: $EXPECTED_CHANNEL"
+    printf '%s\n' "$output" | grep -F -x -q "commit: $EXPECTED_COMMIT"
 }
 
 assert_file() {
@@ -166,6 +177,9 @@ validate_archive_paths() {
 ARCHIVE=""
 WORK_DIR=""
 SKIP_PIP_INSTALL=0
+EXPECTED_VERSION=""
+EXPECTED_CHANNEL=""
+EXPECTED_COMMIT=""
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -181,6 +195,18 @@ while [ "$#" -gt 0 ]; do
             SKIP_PIP_INSTALL=1
             shift
             ;;
+        --expected-version)
+            EXPECTED_VERSION="${2:-}"
+            shift 2
+            ;;
+        --expected-channel)
+            EXPECTED_CHANNEL="${2:-}"
+            shift 2
+            ;;
+        --expected-commit)
+            EXPECTED_COMMIT="${2:-}"
+            shift 2
+            ;;
         *)
             usage
             ;;
@@ -188,6 +214,9 @@ while [ "$#" -gt 0 ]; do
 done
 
 [ -n "$ARCHIVE" ] || usage
+[ -z "$EXPECTED_VERSION$EXPECTED_CHANNEL$EXPECTED_COMMIT" ] || {
+    [ -n "$EXPECTED_VERSION" ] && [ -n "$EXPECTED_CHANNEL" ] && [ -n "$EXPECTED_COMMIT" ] || usage
+}
 [ -f "$ARCHIVE" ] || {
     echo "Archive not found: $ARCHIVE"
     exit 1
@@ -249,6 +278,9 @@ printf '%s\n' "$VERSION_OUTPUT" | grep -q "^lg-buddy "
 printf '%s\n' "$VERSION_OUTPUT" | grep -q "^version: "
 printf '%s\n' "$VERSION_OUTPUT" | grep -q "^channel: "
 printf '%s\n' "$VERSION_OUTPUT" | grep -q "^commit: "
+if [ -n "$EXPECTED_VERSION" ]; then
+    assert_version_identity "$BUNDLE_DIR/lg-buddy"
+fi
 
 export HOME="$HOME_DIR"
 export XDG_CONFIG_HOME="$XDG_CONFIG_HOME"
@@ -330,6 +362,9 @@ printf '%s\n' "$INSTALLED_VERSION_OUTPUT" | grep -q "^lg-buddy "
 printf '%s\n' "$INSTALLED_VERSION_OUTPUT" | grep -q "^version: "
 printf '%s\n' "$INSTALLED_VERSION_OUTPUT" | grep -q "^channel: "
 printf '%s\n' "$INSTALLED_VERSION_OUTPUT" | grep -q "^commit: "
+if [ -n "$EXPECTED_VERSION" ]; then
+    assert_version_identity "$INSTALLED_BINARY"
+fi
 
 # Existing profiles without the platform key remain on bscpylgtv. Materialize
 # that choice through settings, then use a controlled raw-config fixture to
