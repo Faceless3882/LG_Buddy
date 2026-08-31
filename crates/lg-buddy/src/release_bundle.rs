@@ -2947,7 +2947,7 @@ mod tests {
     #[test]
     fn archive_layout_rejects_every_link_device_and_special_entry_type() {
         let root = "lg-buddy-1.4.0-x86_64-unknown-linux-musl";
-        for kind in [b'1', b'2', b'3', b'4', b'6', b'7', b'S', b'L', b'K'] {
+        for kind in *b"123467SLK" {
             assert!(validate_archive_layout(
                 &format!("{root}/docs/entry"),
                 root,
