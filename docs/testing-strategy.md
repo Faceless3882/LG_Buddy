@@ -317,14 +317,10 @@ binary identity, and cleanup on success or failure. Run it with:
 cargo test -p lg-buddy release_bundle::tests --lib
 ```
 
-After a release built with the current bundle contract is published, exercise
-the real GitHub transport and artifact with:
-
-```bash
-LG_BUDDY_TEST_RELEASE_TAG=vX.Y.Z cargo test -p lg-buddy \
-  release_bundle::tests::live_published_release_acquires_into_a_verified_stage \
-  --lib -- --ignored --exact
-```
+The normal suite replays GitHub release-response shapes through both a valid
+current-contract bundle and the observed historical `v1.4.0-beta.1` metadata.
+The historical payload is reduced to a deterministic pre-manifest archive and
+must still be rejected at the manifest boundary without contacting GitHub.
 
 The upgrade-preflight module uses injected process, service-manager,
 filesystem, and ownership facts around a real temporary-root installation

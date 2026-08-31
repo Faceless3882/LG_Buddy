@@ -407,7 +407,7 @@ fn validate_asset_metadata(
         )));
     }
 
-    let expected_download_url = expected_browser_download_url(release.tag_name(), asset.name())?;
+    let expected_download_url = expected_browser_download_url(release.tag_name(), asset.name());
     if asset.download_url() != expected_download_url {
         return Err(BundleAcquisitionError::ReleaseMetadata(format!(
             "asset `{}` download URL does not belong to the selected LG Buddy release",
@@ -417,25 +417,10 @@ fn validate_asset_metadata(
     Ok(())
 }
 
-fn expected_browser_download_url(tag: &str, name: &str) -> Result<String, BundleAcquisitionError> {
-    let mut url = Url::parse("https://github.com/").map_err(|err| {
-        BundleAcquisitionError::ReleaseMetadata(format!("cannot construct GitHub URL: {err}"))
-    })?;
-    url.path_segments_mut()
-        .map_err(|_| {
-            BundleAcquisitionError::ReleaseMetadata(
-                "cannot construct GitHub release URL".to_string(),
-            )
-        })?
-        .extend([
-            REPOSITORY_OWNER,
-            REPOSITORY_NAME,
-            "releases",
-            "download",
-            tag,
-            name,
-        ]);
-    Ok(url.to_string())
+fn expected_browser_download_url(tag: &str, name: &str) -> String {
+    format!(
+        "https://github.com/{REPOSITORY_OWNER}/{REPOSITORY_NAME}/releases/download/{tag}/{name}"
+    )
 }
 
 fn required_github_digest(asset: &ReleaseAsset) -> Result<String, BundleAcquisitionError> {
@@ -790,48 +775,7 @@ impl GitHubSource for UreqGitHubSource {
             "{GITHUB_API_ROOT}/repos/{REPOSITORY_OWNER}/{REPOSITORY_NAME}/releases/tags/{tag}"
         );
         let release: FreshGitHubRelease = self.get_json(&url)?;
-        if release.draft || release.tag_name != tag {
-            return Err(BundleAcquisitionError::ReleaseMetadata(
-                "fresh GitHub release metadata is draft or has the wrong tag".to_string(),
-            ));
-        }
-        let version = Version::parse(
-            release
-                .tag_name
-                .strip_prefix('v')
-                .unwrap_or(&release.tag_name),
-        )
-        .map_err(|err| {
-            BundleAcquisitionError::ReleaseMetadata(format!(
-                "fresh GitHub release tag is not a version: {err}"
-            ))
-        })?;
-        let channel = if release.prerelease {
-            UpdateChannel::Prerelease
-        } else {
-            UpdateChannel::Stable
-        };
-        Ok(ReleaseInfo::from_github(
-            version,
-            channel,
-            release.html_url,
-            release.tag_name,
-            release
-                .assets
-                .into_iter()
-                .map(|asset| {
-                    ReleaseAsset::from_github(
-                        asset.id,
-                        asset.name,
-                        asset.state,
-                        asset.size,
-                        asset.digest,
-                        asset.url,
-                        asset.browser_download_url,
-                    )
-                })
-                .collect(),
-        ))
+        release_info_from_github_response(release, tag)
     }
 
     fn resolve_tag_commit(&self, tag: &str) -> Result<String, BundleAcquisitionError> {
@@ -909,6 +853,54 @@ struct FreshGitHubAsset {
     digest: Option<String>,
     url: String,
     browser_download_url: String,
+}
+
+fn release_info_from_github_response(
+    release: FreshGitHubRelease,
+    expected_tag: &str,
+) -> Result<ReleaseInfo, BundleAcquisitionError> {
+    if release.draft || release.tag_name != expected_tag {
+        return Err(BundleAcquisitionError::ReleaseMetadata(
+            "fresh GitHub release metadata is draft or has the wrong tag".to_string(),
+        ));
+    }
+    let version = Version::parse(
+        release
+            .tag_name
+            .strip_prefix('v')
+            .unwrap_or(&release.tag_name),
+    )
+    .map_err(|err| {
+        BundleAcquisitionError::ReleaseMetadata(format!(
+            "fresh GitHub release tag is not a version: {err}"
+        ))
+    })?;
+    let channel = if release.prerelease {
+        UpdateChannel::Prerelease
+    } else {
+        UpdateChannel::Stable
+    };
+    Ok(ReleaseInfo::from_github(
+        version,
+        channel,
+        release.html_url,
+        release.tag_name,
+        release
+            .assets
+            .into_iter()
+            .map(|asset| {
+                ReleaseAsset::from_github(
+                    asset.id,
+                    asset.name,
+                    asset.state,
+                    asset.size,
+                    asset.digest,
+                    asset.url,
+                    asset.browser_download_url,
+                )
+            })
+            .collect(),
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1183,7 +1175,6 @@ impl Drop for StagingDirectory {
         let expected_uid = unsafe { libc::geteuid() };
         if fs::symlink_metadata(&self.path).is_ok_and(|metadata| {
             metadata.file_type().is_dir()
-                && !metadata.file_type().is_symlink()
                 && metadata.uid() == expected_uid
                 && metadata.mode() & 0o077 == 0
                 && metadata.dev() == self.device
@@ -1211,13 +1202,7 @@ fn ensure_private_directory(path: &Path) -> Result<(), BundleAcquisitionError> {
 
     let mut current = PathBuf::from("/");
     for component in path.components().skip(1) {
-        let std::path::Component::Normal(name) = component else {
-            return Err(BundleAcquisitionError::UnsafeStaging(format!(
-                "`{}` contains an unsupported path component",
-                path.display()
-            )));
-        };
-        current.push(name);
+        current.push(component.as_os_str());
         match fs::symlink_metadata(&current) {
             Ok(metadata) => validate_staging_ancestor(&current, &metadata)?,
             Err(err) if err.kind() == io::ErrorKind::NotFound => {
@@ -1252,7 +1237,7 @@ fn validate_staging_ancestor(
     path: &Path,
     metadata: &fs::Metadata,
 ) -> Result<(), BundleAcquisitionError> {
-    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+    if !metadata.file_type().is_dir() {
         return Err(BundleAcquisitionError::UnsafeStaging(format!(
             "`{}` is not a real directory",
             path.display()
@@ -1304,7 +1289,6 @@ fn open_lock_file(path: &Path) -> Result<File, BundleAcquisitionError> {
 struct ArchivePlan {
     root_name: String,
     entries: HashMap<String, ArchiveEntryFact>,
-    manifest: ReleaseIdentity,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1452,7 +1436,6 @@ fn inspect_archive(
     Ok(ArchivePlan {
         root_name: expected_root,
         entries: validated_entries,
-        manifest,
     })
 }
 
@@ -1705,13 +1688,7 @@ fn extract_archive(
         ));
     }
     reject_archive_trailing_data(&mut archive.into_inner())?;
-    let root = staging_root.join(&plan.root_name);
-    if plan.manifest.release_tag.is_empty() {
-        return Err(BundleAcquisitionError::Manifest(
-            "validated manifest identity was unexpectedly empty".to_string(),
-        ));
-    }
-    Ok(root)
+    Ok(staging_root.join(&plan.root_name))
 }
 
 fn reject_archive_trailing_data<R: Read>(reader: &mut R) -> Result<(), BundleAcquisitionError> {
@@ -2212,7 +2189,7 @@ mod tests {
             format!(
                 "{GITHUB_API_ROOT}/repos/{REPOSITORY_OWNER}/{REPOSITORY_NAME}/releases/assets/{id}"
             ),
-            expected_browser_download_url(tag, name).expect("download URL"),
+            expected_browser_download_url(tag, name),
         )
     }
 
@@ -2224,6 +2201,43 @@ mod tests {
             "v1.4.0".to_string(),
             assets,
         )
+    }
+
+    fn github_response_release_info(
+        identity: &ReleaseIdentity,
+        assets: &[(u64, &str, &[u8])],
+    ) -> ReleaseInfo {
+        let response = serde_json::json!({
+            "tag_name": identity.release_tag,
+            "html_url": format!(
+                "https://github.com/{REPOSITORY_OWNER}/{REPOSITORY_NAME}/releases/tag/{}",
+                identity.release_tag
+            ),
+            "draft": false,
+            "prerelease": identity.channel == UpdateChannel::Prerelease,
+            "assets": assets
+                .iter()
+                .map(|(id, name, bytes)| serde_json::json!({
+                    "id": id,
+                    "name": name,
+                    "state": "uploaded",
+                    "size": bytes.len(),
+                    "digest": format!("sha256:{}", sha256(bytes)),
+                    "url": format!(
+                        "{GITHUB_API_ROOT}/repos/{REPOSITORY_OWNER}/{REPOSITORY_NAME}/releases/assets/{id}"
+                    ),
+                    "browser_download_url": expected_browser_download_url(
+                        &identity.release_tag,
+                        name
+                    ),
+                }))
+                .collect::<Vec<_>>(),
+        });
+        release_info_from_github_response(
+            serde_json::from_value(response).expect("GitHub response fixture"),
+            &identity.release_tag,
+        )
+        .expect("valid GitHub response fixture")
     }
 
     #[derive(Clone)]
@@ -2246,6 +2260,8 @@ mod tests {
         for relative in required_relative_files() {
             let contents = if *relative == MANIFEST_NAME {
                 manifest_json(identity)
+            } else if *relative == "lg-buddy" {
+                embedded_identity_binary(identity)
             } else {
                 format!("fixture for {relative}\n").into_bytes()
             };
@@ -2383,6 +2399,14 @@ mod tests {
 
     fn write_embedded_identity_binary(directory: &Path, identity: &ReleaseIdentity) -> PathBuf {
         let path = directory.join("lg-buddy");
+        fs::write(&path, embedded_identity_binary(identity))
+            .expect("write embedded identity fixture");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
+            .expect("make fixture executable");
+        path
+    }
+
+    fn embedded_identity_binary(identity: &ReleaseIdentity) -> Vec<u8> {
         let mut bytes = vec![0_u8; 64];
         bytes[..4].copy_from_slice(b"\x7fELF");
         bytes[4] = 2;
@@ -2424,10 +2448,7 @@ mod tests {
             .copy_from_slice(&identity_offset.to_le_bytes());
         bytes[identity_header + 32..identity_header + 40]
             .copy_from_slice(&(record.len() as u64).to_le_bytes());
-        fs::write(&path, bytes).expect("write embedded identity fixture");
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
-            .expect("make fixture executable");
-        path
+        bytes
     }
 
     struct FakeSource {
@@ -2488,6 +2509,15 @@ mod tests {
     struct FakeBinaryIdentityReader {
         identity: ReleaseIdentity,
         calls: AtomicUsize,
+    }
+
+    impl FakeBinaryIdentityReader {
+        fn new(identity: ReleaseIdentity) -> Self {
+            Self {
+                identity,
+                calls: AtomicUsize::new(0),
+            }
+        }
     }
 
     struct UncalledSource;
@@ -3233,10 +3263,7 @@ mod tests {
         let cache_root = dir.join("cache");
         let active = StagingDirectory::create(&cache_root).expect("active staging");
         let active_path = active.path.clone();
-        let binary_reader = FakeBinaryIdentityReader {
-            identity: stable_identity(),
-            calls: AtomicUsize::new(0),
-        };
+        let binary_reader = FakeBinaryIdentityReader::new(stable_identity());
         assert!(matches!(
             acquire_release_bundle_with(
                 &release_info(Vec::new()),
@@ -3296,7 +3323,7 @@ mod tests {
     }
 
     #[test]
-    fn acquisition_uses_fresh_metadata_and_returns_only_a_verified_owned_stage() {
+    fn github_response_replay_returns_only_a_verified_owned_stage() {
         let identity = stable_identity();
         let fixture_dir = temp_dir("complete-acquisition");
         let archive_path =
@@ -3308,29 +3335,28 @@ mod tests {
             .to_string();
         let archive_bytes = read_file(&archive_path);
         let checksum_bytes = format!("{}  {archive_name}\n", sha256(&archive_bytes)).into_bytes();
-        let archive_asset = release_asset(1, &archive_name, &archive_bytes);
-        let checksum_asset = release_asset(2, CHECKSUM_ASSET_NAME, &checksum_bytes);
-        let fresh_release = release_info(vec![archive_asset, checksum_asset]);
+        let fresh_release = github_response_release_info(
+            &identity,
+            &[
+                (1, archive_name.as_str(), archive_bytes.as_slice()),
+                (2, CHECKSUM_ASSET_NAME, checksum_bytes.as_slice()),
+            ],
+        );
         let source = FakeSource {
             fresh_release,
             payloads: HashMap::from([(1, archive_bytes), (2, checksum_bytes)]),
             commit: identity.commit.clone(),
-        };
-        let binary_reader = FakeBinaryIdentityReader {
-            identity: identity.clone(),
-            calls: AtomicUsize::new(0),
         };
         let cache_root = fixture_dir.join("cache");
         let verified = acquire_release_bundle_with(
             &release_info(Vec::new()),
             &cache_root,
             &source,
-            &binary_reader,
+            &EmbeddedBinaryIdentityReader,
         )
         .expect("verified acquisition");
         assert_eq!(verified.identity(), &identity);
         assert!(verified.root().join("install.sh").is_file());
-        assert_eq!(binary_reader.calls.load(Ordering::Relaxed), 1);
         let staging_root = verified
             .root()
             .parent()
@@ -3357,10 +3383,7 @@ mod tests {
             payloads: HashMap::new(),
             commit: stable_identity().commit,
         };
-        let binary_reader = FakeBinaryIdentityReader {
-            identity: stable_identity(),
-            calls: AtomicUsize::new(0),
-        };
+        let binary_reader = FakeBinaryIdentityReader::new(stable_identity());
         let cache_root = fixture_dir.join("cache");
         assert!(matches!(
             acquire_release_bundle_with(
@@ -3399,10 +3422,7 @@ mod tests {
             payloads: HashMap::from([(1, archive_bytes), (2, checksum_bytes)]),
             commit: identity.commit.clone(),
         };
-        let binary_reader = FakeBinaryIdentityReader {
-            identity,
-            calls: AtomicUsize::new(0),
-        };
+        let binary_reader = FakeBinaryIdentityReader::new(identity);
         let cache_root = fixture_dir.join("cache");
         assert!(matches!(
             acquire_release_bundle_with(
@@ -3437,10 +3457,7 @@ mod tests {
             payloads: HashMap::from([(1, b"short".to_vec()), (2, checksum_bytes)]),
             commit: identity.commit.clone(),
         };
-        let binary_reader = FakeBinaryIdentityReader {
-            identity,
-            calls: AtomicUsize::new(0),
-        };
+        let binary_reader = FakeBinaryIdentityReader::new(identity);
         let cache_root = fixture_dir.join("cache");
         assert!(matches!(
             acquire_release_bundle_with(
@@ -3473,10 +3490,7 @@ mod tests {
             payloads: HashMap::from([(1, b"tampered".to_vec()), (2, checksum_bytes)]),
             commit: identity.commit.clone(),
         };
-        let binary_reader = FakeBinaryIdentityReader {
-            identity,
-            calls: AtomicUsize::new(0),
-        };
+        let binary_reader = FakeBinaryIdentityReader::new(identity);
         assert!(matches!(
             acquire_release_bundle_with(
                 &release_info(Vec::new()),
@@ -3511,13 +3525,10 @@ mod tests {
             payloads: HashMap::from([(1, archive_bytes), (2, checksum_bytes)]),
             commit: identity.commit.clone(),
         };
-        let binary_reader = FakeBinaryIdentityReader {
-            identity: ReleaseIdentity {
-                commit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
-                ..identity
-            },
-            calls: AtomicUsize::new(0),
-        };
+        let binary_reader = FakeBinaryIdentityReader::new(ReleaseIdentity {
+            commit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            ..identity
+        });
         let cache_root = fixture_dir.join("cache");
         assert!(matches!(
             acquire_release_bundle_with(
@@ -3536,58 +3547,58 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "contacts GitHub and checks the historical pre-manifest beta bundle"]
-    fn live_historical_beta_reaches_archive_validation_and_is_rejected() {
-        let selected = ReleaseInfo::from_github(
-            Version::parse("1.4.0-beta.1").expect("version"),
-            UpdateChannel::Prerelease,
-            "https://github.com/Staphylococcus/LG_Buddy/releases/tag/v1.4.0-beta.1".to_string(),
-            "v1.4.0-beta.1".to_string(),
-            Vec::new(),
+    fn observed_historical_beta_response_is_rejected_at_the_manifest_boundary() {
+        let identity = ReleaseIdentity {
+            release_tag: "v1.4.0-beta.1".to_string(),
+            version: Version::parse("1.4.0-beta.1").expect("version"),
+            channel: UpdateChannel::Prerelease,
+            target: RELEASE_TARGET.to_string(),
+            commit: "12326a4acdfc0dccb532e389e8d4ae5edeb78c20".to_string(),
+        };
+        let dir = temp_dir("observed-historical-beta");
+        let mut entries = valid_fixture_entries(&identity);
+        entries.retain(|entry| {
+            !matches!(entry, FixtureEntry::File(path, _, _) if path.ends_with(MANIFEST_NAME))
+        });
+        let archive_path = write_fixture_archive(&dir, &identity, &entries);
+        let archive_name = archive_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("archive name")
+            .to_string();
+        let archive_bytes = read_file(&archive_path);
+        let checksum_bytes = format!("{}  ./{archive_name}\n", sha256(&archive_bytes)).into_bytes();
+        let fresh_release = github_response_release_info(
+            &identity,
+            &[
+                (536_289_792, archive_name.as_str(), archive_bytes.as_slice()),
+                (536_289_793, CHECKSUM_ASSET_NAME, checksum_bytes.as_slice()),
+            ],
         );
-        let dir = temp_dir("live-historical-beta");
-        let error = acquire_release_bundle_with(
-            &selected,
-            &dir.join("cache"),
-            &UreqGitHubSource::new(),
-            &EmbeddedBinaryIdentityReader,
-        )
-        .expect_err("historical beta predates the manifest contract");
-        assert!(matches!(error, BundleAcquisitionError::Archive(_)));
-        fs::remove_dir_all(dir).expect("remove test directory");
-    }
-
-    #[test]
-    #[ignore = "set LG_BUDDY_TEST_RELEASE_TAG to a release built with the current bundle contract"]
-    fn live_published_release_acquires_into_a_verified_stage() {
-        let tag = std::env::var("LG_BUDDY_TEST_RELEASE_TAG")
-            .expect("set LG_BUDDY_TEST_RELEASE_TAG to an eligible published release tag");
-        let version = Version::parse(tag.strip_prefix('v').unwrap_or(&tag)).expect("version tag");
-        let channel = if version.pre.is_empty() {
-            UpdateChannel::Stable
-        } else {
-            UpdateChannel::Prerelease
+        let source = FakeSource {
+            fresh_release,
+            payloads: HashMap::from([(536_289_792, archive_bytes), (536_289_793, checksum_bytes)]),
+            commit: identity.commit.clone(),
         };
         let selected = ReleaseInfo::from_github(
-            version,
-            channel,
-            format!("https://github.com/{REPOSITORY_OWNER}/{REPOSITORY_NAME}/releases/tag/{tag}"),
-            tag,
+            identity.version.clone(),
+            identity.channel,
+            format!(
+                "https://github.com/{REPOSITORY_OWNER}/{REPOSITORY_NAME}/releases/tag/{}",
+                identity.release_tag
+            ),
+            identity.release_tag.clone(),
             Vec::new(),
         );
-        let dir = temp_dir("live-published-release");
-        let verified = acquire_release_bundle_with(
-            &selected,
-            &dir.join("cache"),
-            &UreqGitHubSource::new(),
-            &EmbeddedBinaryIdentityReader,
-        )
-        .expect("acquire published release");
-        assert_eq!(verified.identity().version(), selected.version());
-        assert_eq!(verified.identity().channel(), selected.channel());
-        assert_eq!(verified.identity().target(), RELEASE_TARGET);
-        assert!(verified.root().join("install.sh").is_file());
-        drop(verified);
+        let binary_reader = FakeBinaryIdentityReader::new(identity);
+        let error =
+            acquire_release_bundle_with(&selected, &dir.join("cache"), &source, &binary_reader)
+                .expect_err("historical beta predates the manifest contract");
+        assert!(matches!(
+            error,
+            BundleAcquisitionError::Archive(message) if message.contains(MANIFEST_NAME)
+        ));
+        assert_eq!(binary_reader.calls.load(Ordering::Relaxed), 0);
         fs::remove_dir_all(dir).expect("remove test directory");
     }
 }
