@@ -9,6 +9,7 @@ pub mod lifecycle;
 pub mod notifications;
 pub mod platform_access_token;
 pub mod policy;
+pub mod release_bundle;
 pub mod runtime_phase;
 pub mod screen;
 pub mod session;

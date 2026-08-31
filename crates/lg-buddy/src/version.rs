@@ -1,3 +1,5 @@
+include!(concat!(env!("OUT_DIR"), "/release_identity.rs"));
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VersionInfo {
     version: &'static str,
@@ -82,6 +84,7 @@ impl ReleaseChannel {
 }
 
 pub fn version_text() -> String {
+    std::hint::black_box(&LG_BUDDY_EMBEDDED_RELEASE_IDENTITY);
     VersionInfo::current().render()
 }
 
@@ -102,7 +105,7 @@ fn is_prerelease_version(version: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{version_text, ReleaseChannel, VersionInfo};
+    use super::{version_text, ReleaseChannel, VersionInfo, LG_BUDDY_EMBEDDED_RELEASE_IDENTITY};
 
     #[test]
     fn dev_version_output_reports_package_version_channel_and_unknown_commit() {
@@ -175,5 +178,25 @@ mod tests {
         assert!(output.contains("version: "));
         assert!(output.contains("channel: "));
         assert!(output.contains("commit: "));
+    }
+
+    #[test]
+    fn embedded_identity_matches_the_current_build_metadata() {
+        const PREFIX: &[u8] = b"LG_BUDDY_RELEASE_IDENTITY_V1\0";
+        const SUFFIX: &[u8] = b"\0LG_BUDDY_RELEASE_IDENTITY_END\0";
+        let record = &LG_BUDDY_EMBEDDED_RELEASE_IDENTITY;
+        assert!(record.starts_with(PREFIX));
+        assert!(record.ends_with(SUFFIX));
+        let payload = &record[PREFIX.len()..record.len() - SUFFIX.len()];
+        let manifest: serde_json::Value =
+            serde_json::from_slice(payload).expect("embedded identity JSON");
+        let current = VersionInfo::current();
+        assert_eq!(manifest["version"], current.version());
+        assert_eq!(manifest["release_tag"], format!("v{}", current.version()));
+        assert_eq!(manifest["channel"], current.channel().as_str());
+        assert_eq!(manifest["commit"], current.commit().unwrap_or("unknown"));
+        assert!(manifest["target"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty()));
     }
 }

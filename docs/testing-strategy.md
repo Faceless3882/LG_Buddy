@@ -307,6 +307,25 @@ formats, archive layout, and binary version/channel/commit mismatches. The
 bundle smoke test then exercises the same validator against the generated and
 installed release binary.
 
+The Rust release-bundle acquisition suite covers exact asset selection, fresh
+release metadata, bounded responses and downloads, GitHub and published digest
+agreement, lightweight and annotated tags, restrictive staging and locking,
+hostile archive types and paths, manifest identity, non-executing embedded
+binary identity, and cleanup on success or failure. Run it with:
+
+```bash
+cargo test -p lg-buddy release_bundle::tests --lib
+```
+
+After a release built with the current bundle contract is published, exercise
+the real GitHub transport and artifact with:
+
+```bash
+LG_BUDDY_TEST_RELEASE_TAG=vX.Y.Z cargo test -p lg-buddy \
+  release_bundle::tests::live_published_release_acquires_into_a_verified_stage \
+  --lib -- --ignored --exact
+```
+
 The upgrade-preflight module uses injected process, service-manager,
 filesystem, and ownership facts around a real temporary-root installation
 fixture. Its focused suite covers a passing mutable FHS layout plus symlinked,
