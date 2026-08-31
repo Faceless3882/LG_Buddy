@@ -434,6 +434,29 @@ operation; mute toggle reads the current state before writing its inverse.
 
 This keeps CLI parsing separate from operational behavior.
 
+## Release Bundle Acquisition Boundary
+
+`release_bundle.rs` turns a selected GitHub release into an owned, verified
+candidate without invoking its installer. Acquisition refreshes the selected
+tag directly from the fixed LG Buddy repository instead of trusting cached
+asset metadata, resolves the tag to a bounded immutable commit, and requires
+exactly one Linux-musl archive and one checksum asset.
+
+Asset downloads use fixed GitHub API URLs, bounded bodies and deadlines, and an
+explicit one-hop HTTPS release-asset redirect policy. Both assets must match
+GitHub's SHA-256 digest and declared size; the archive digest must also match
+the single corresponding entry in `sha256sums.txt`.
+
+The process holds a nonblocking filesystem lock while staging under a private
+user-cache directory. It scans the complete archive before extraction,
+rejecting path aliases, traversal, links, special files, duplicate entries,
+unsafe modes, excessive sizes, and unexpected layout. The manifest must agree
+with the release, target, and resolved commit. The extracted ELF is never run:
+its build-generated, linker-retained identity record is parsed as data and must
+independently agree on version, channel, target, tag, and commit. The returned
+guard owns the verified candidate and removes its staging tree when dropped;
+no executable, installer, sudo, or configuration action runs in this boundary.
+
 ## Host Upgrade Safety Boundary
 
 `upgrade_preflight.rs` checks observable host and installation state. It does
