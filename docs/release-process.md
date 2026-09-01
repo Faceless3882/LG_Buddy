@@ -8,17 +8,21 @@ LG Buddy uses three persistent branches as source channels:
 - `dev` is the ordinary integration branch and may contain unreleased work.
 
 The intended ancestry is `main <= prerelease <= dev`. Ordinary changes merge
-into `dev`. An official release requires a promotion PR whose head is the exact
+into `dev`. An official release requires a promotion PR whose head is the
 same-repository `dev` branch and whose base is `main` or `prerelease`.
 
 ## Promotion contract
 
-The promotion PR is the review and approval surface. The release-channel
-ruleset blocks GitHub's merge, squash, and rebase buttons from updating the
-branch because those methods would create a commit different from the reviewed
-`dev` commit; only the promotion App may perform the final fast-forward.
-Repository-wide automatic head-branch deletion stays disabled so GitHub cannot
-remove the persistent `dev` branch when a promotion PR becomes merged.
+The promotion PR is the review and approval surface. Required checks gate its
+merge, and merging the PR is the release authorization. The merged target-branch
+commit is the release commit; there is no separate approval label or publish
+action.
+
+The release App is not a substitute for merging. After the merged commit has
+passed the release build and smoke test, the App performs protected tag and
+release writes and keeps the persistent streams aligned. A prerelease merge
+advances `dev` to the merged prerelease commit. A stable merge advances both
+`prerelease` and `dev` to the merged stable commit.
 
 Required promotion checks prove that:
 
@@ -27,9 +31,8 @@ Required promotion checks prove that:
 - a stable target has a stable SemVer and a prerelease target has a prerelease
   SemVer
 - the version advances both existing release-channel heads
-- the persistent branches have not diverged or moved since review
-- the derived `v<crate-version>` tag is absent or already points to the same
-  commit during an idempotent retry
+- the persistent branches have not moved or diverged before merge
+- the derived `v<crate-version>` tag is absent before merge
 - normal CI and the release-bundle smoke test pass
 
 The tag, binary, archive, and GitHub release all use the Cargo package version.
@@ -40,38 +43,32 @@ There is no separate version input.
 1. Prepare the exact release version in `Cargo.toml` and `Cargo.lock` on `dev`.
 2. Open a PR from `dev` to `prerelease` or `main`.
 3. Wait for `verify`, `bundle-smoke-test`, and `validate-promotion` to pass.
-4. After review, a repository administrator applies the `release:promote`
-   label.
-5. The serialized release workflow rebuilds and smoke-tests the exact reviewed
-   commit without write credentials.
-6. A separate finalization job obtains a short-lived token from the dedicated
-   repository-only GitHub App, publishes the immutable tag and release, verifies
-   the published checksums, and only then fast-forwards the channel branch.
+4. Merge the promotion PR. This is the release authorization.
+5. The resulting push starts the serialized release workflow, which builds and
+   smoke-tests the merged release commit without write credentials.
+6. The final job obtains a short-lived token from the dedicated repository-only
+   GitHub App, aligns the remaining release streams, publishes the immutable tag
+   and release, and verifies the published checksums.
 
-Stable finalization advances `prerelease` before `main`, preserving
-`main <= prerelease` even if the second ref update needs to be retried.
-Prerelease finalization advances only `prerelease`; `dev` already points to the
-reviewed commit in both cases.
-
-Do not push version tags manually. Protected `v*` tags and release-channel
-branches permit bypass only to the dedicated promotion App. Failed finalization
-can be rerun safely, but an existing tag or asset is accepted only when it is
-byte-for-byte consistent with the same reviewed commit.
+Do not push version tags manually. Protected `v*` tags and stream-alignment
+writes permit bypass only to the dedicated release App. A failed post-merge
+release run can be rerun safely, but an existing tag or asset is accepted only
+when it is byte-for-byte consistent with the merged release commit.
 
 ## What the release workflow validates
 
 The workflow:
 
-1. Revalidates the live PR, refs, required checks, Cargo version, and tag state.
+1. Validates the merged target-branch commit, Cargo version, and tag state.
 2. Builds a static `x86_64-unknown-linux-musl` binary with exact version and
    commit identity.
 3. Generates a versioned identity manifest and packages the release bundle.
 4. Validates the manifest and installs the bundle in an isolated smoke-test root.
 5. Verifies the built and installed binary's exact version, channel, and commit.
 6. Generates and verifies `sha256sums.txt`.
-7. Publishes the tag and GitHub release without replacing conflicting assets.
-8. Downloads the published assets and verifies their checksums independently.
-9. Fast-forwards the selected branch only after publication succeeds.
+7. Keeps `main`, `prerelease`, and `dev` aligned for the next promotion.
+8. Publishes the tag and GitHub release without replacing conflicting assets.
+9. Downloads the published assets and verifies their checksums independently.
 
 `install.sh` is only an installer. It does not build the runtime.
 
