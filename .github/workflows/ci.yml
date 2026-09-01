@@ -5,6 +5,7 @@ on:
   push:
 
 permissions:
+  checks: read
   contents: read
 
 jobs:
@@ -38,7 +39,7 @@ jobs:
         run: cargo clippy -p lg-buddy --all-targets --all-features -- -D warnings
 
       - name: Validate shell scripts
-        run: bash -n install.sh uninstall.sh configure.sh bin/LG_Buddy_Common scripts/build-release-bundle.sh scripts/test-release-bundle.sh scripts/publish-release-assets.sh
+        run: bash -n install.sh uninstall.sh configure.sh bin/LG_Buddy_Common scripts/build-release-bundle.sh scripts/test-release-bundle.sh scripts/test-cross-version-upgrade.sh scripts/test-production-upgrade-canary.sh scripts/publish-release-assets.sh
 
       - name: Validate release promotion contract
         run: python3 scripts/test_release_promotion.py
@@ -46,9 +47,33 @@ jobs:
       - name: Validate release bundle manifest contract
         run: python3 scripts/test_release_bundle_manifest.py
 
+      - name: Validate GitHub response recorder
+        run: python3 scripts/test_record_github_release_responses.py
+
+      - name: Require successful production prerelease canary for stable promotion
+        if: github.event_name == 'pull_request' && github.base_ref == 'main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/prerelease" --jq .object.sha)"
+          [ "$prerelease_sha" != "${{ github.event.pull_request.base.sha }}" ] || {
+              echo "Stable promotion requires a distinct prerelease candidate."
+              exit 1
+          }
+          matching_checks="$(gh api \
+              -H 'Accept: application/vnd.github+json' \
+              "repos/$GITHUB_REPOSITORY/commits/$prerelease_sha/check-runs?per_page=100" \
+              --jq '[.check_runs[] | select(.name == "production-prerelease-canary" and .status == "completed" and .conclusion == "success" and .app.slug == "github-actions")] | length')"
+          [ "$matching_checks" -gt 0 ] || {
+              echo "No successful production-prerelease canary exists for $prerelease_sha."
+              exit 1
+          }
+
   bundle-smoke-test:
     runs-on: ubuntu-latest
     needs: verify
+    env:
+      SMOKE_VERSION: 1.4.0-beta.2.ci
 
     steps:
       - name: Check out repository
@@ -65,29 +90,53 @@ jobs:
           python-version: "3.x"
 
       - name: Install smoke-test prerequisites
-        run: sudo apt-get update && sudo apt-get install -y musl-tools zenity
+        run: sudo apt-get update && sudo apt-get install -y musl-tools strace zenity
 
       - name: Build lg-buddy release binary
         env:
           LG_BUDDY_BUILD_COMMIT: ${{ github.sha }}
-          LG_BUDDY_RELEASE_VERSION: 0.0.0-ci.smoke
+          LG_BUDDY_RELEASE_VERSION: ${{ env.SMOKE_VERSION }}
         run: cargo build --release -p lg-buddy --target x86_64-unknown-linux-musl
 
       - name: Create release bundle
         run: |
           umask 0002
-          ./scripts/build-release-bundle.sh --target x86_64-unknown-linux-musl --version 0.0.0-ci.smoke --output-dir dist
+          ./scripts/build-release-bundle.sh --target x86_64-unknown-linux-musl --version "$SMOKE_VERSION" --output-dir dist
 
       - name: Smoke test release bundle
         run: |
           ./scripts/test-release-bundle.sh \
               --skip-pip-install \
-              --archive dist/lg-buddy-0.0.0-ci.smoke-x86_64-unknown-linux-musl.tar.gz \
-              --expected-tag v0.0.0-ci.smoke \
-              --expected-version 0.0.0-ci.smoke \
+              --archive "dist/lg-buddy-${SMOKE_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
+              --expected-tag "v${SMOKE_VERSION}" \
+              --expected-version "$SMOKE_VERSION" \
               --expected-channel prerelease \
               --expected-target x86_64-unknown-linux-musl \
               --expected-commit "${{ github.sha }}"
+
+      - name: Download pinned cross-version baseline
+        run: |
+          curl --fail --silent --show-error --location \
+              --proto '=https' --tlsv1.2 \
+              --output "$RUNNER_TEMP/lg-buddy-1.4.0-beta.2-x86_64-unknown-linux-musl.tar.gz" \
+              https://github.com/Staphylococcus/LG_Buddy/releases/download/v1.4.0-beta.2/lg-buddy-1.4.0-beta.2-x86_64-unknown-linux-musl.tar.gz
+
+      - name: Smoke test cross-version upgrade
+        run: |
+          ./scripts/test-cross-version-upgrade.sh \
+              --previous-archive "$RUNNER_TEMP/lg-buddy-1.4.0-beta.2-x86_64-unknown-linux-musl.tar.gz" \
+              --previous-sha256 883e6cb869cbe60988a195acac2e15864d904797edfefbb7d90052eff9a17d32 \
+              --previous-tag v1.4.0-beta.2 \
+              --previous-version 1.4.0-beta.2 \
+              --previous-channel prerelease \
+              --previous-target x86_64-unknown-linux-musl \
+              --previous-commit 77c8f46c66b9e385f3d90c15dee33d775639bbeb \
+              --candidate-archive "dist/lg-buddy-${SMOKE_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
+              --candidate-tag "v${SMOKE_VERSION}" \
+              --candidate-version "$SMOKE_VERSION" \
+              --candidate-channel prerelease \
+              --candidate-target x86_64-unknown-linux-musl \
+              --candidate-commit "${{ github.sha }}"
 
       - name: Generate checksums
         run: |
@@ -102,4 +151,4 @@ jobs:
       - name: Dry-run publish release assets
         env:
           GH_RELEASE_DRY_RUN: "1"
-        run: ./scripts/publish-release-assets.sh --dist-dir dist --tag v0.0.0-ci.smoke --commit "${{ github.sha }}"
+        run: ./scripts/publish-release-assets.sh --dist-dir dist --tag "v${SMOKE_VERSION}" --commit "${{ github.sha }}"

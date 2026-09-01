@@ -102,6 +102,10 @@ and then runs the verified bundle's upgrade installer. Upgrade mode preserves
 configuration and credentials and does not repeat setup or pairing;
 incompatible and legacy layouts are refused rather than migrated.
 
+`v1.4.0-beta.2` is the first release with `updates install`; older versions
+need one normal manual release-bundle installation before assisted upgrades are
+available.
+
 The shell installer targets conventional Linux installations with mutable
 system locations. First-class NixOS packaging is tracked in
 [issue #24](https://github.com/Staphylococcus/LG_Buddy/issues/24).
