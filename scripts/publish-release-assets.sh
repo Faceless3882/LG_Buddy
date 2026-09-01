@@ -2,6 +2,8 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+
 usage() {
     echo "Usage: $0 [--dist-dir <dir>] [--tag <release-tag>] [--commit <release-commit>]"
     exit 1
@@ -71,10 +73,26 @@ VERSION="${TAG#v}"
 TITLE="LG Buddy ${VERSION}"
 NOTES="Prebuilt LG Buddy release bundle for Linux. Extract the archive and run ./install.sh from inside the bundle."
 RELEASE_FLAGS=()
+EXPECTED_CHANNEL="stable"
 
 if [[ "$VERSION" == *-* ]]; then
     RELEASE_FLAGS+=(--prerelease)
+    EXPECTED_CHANNEL="prerelease"
 fi
+
+for archive in "${ARCHIVES[@]}"; do
+    manifest_expectations=(
+        --expected-release-tag "$TAG"
+        --expected-version "$VERSION"
+        --expected-channel "$EXPECTED_CHANNEL"
+    )
+    if [ -n "$EXPECTED_COMMIT" ]; then
+        manifest_expectations+=(--expected-commit "$EXPECTED_COMMIT")
+    fi
+    python3 "$SCRIPT_DIR/release_bundle_manifest.py" validate \
+        --archive "$archive" \
+        "${manifest_expectations[@]}"
+done
 
 if [ "$DRY_RUN" = "1" ]; then
     echo "Dry run: would publish tag $TAG"

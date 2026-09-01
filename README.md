@@ -41,11 +41,11 @@ selection and troubleshooting. Protocol and event details are documented in the
 ## Before You Install
 
 The native `lg_webos` control path does not require Python. Native-only packages
-can omit the Python client, `venv`, and `pip`. The current `install.sh` flow
+can omit the Python client, `venv`, and `pip`. The current fresh-install flow
 still provisions `bscpylgtv` as a compatibility fallback and installs the
-brightness dialog, so release-bundle installation checks for Python 3 with
-`venv` and `pip`, plus `zenity`. `swayidle` is required only when using that
-desktop backend.
+brightness dialog, so release-bundle installation checks for Python 3 with a
+`venv` that provisions `pip`, plus `zenity`. `swayidle` is required only when
+using that desktop backend.
 
 ### Debian, Ubuntu, and Pop!_OS
 
@@ -95,6 +95,13 @@ during setup. With the default `bscpylgtv` platform, the prompt may instead
 appear on first use; see the
 [bscpylgtv first-use guide](https://github.com/chros73/bscpylgtv/blob/master/docs/guides/first_use.md).
 
+To check, verify, and install the next release from your saved update channel,
+run `lg-buddy updates install` as your regular user. It checks host
+compatibility, shows the exact target identity, asks for explicit confirmation,
+and then runs the verified bundle's upgrade installer. Upgrade mode preserves
+configuration and credentials and does not repeat setup or pairing;
+incompatible and legacy layouts are refused rather than migrated.
+
 The shell installer targets conventional Linux installations with mutable
 system locations. First-class NixOS packaging is tracked in
 [issue #24](https://github.com/Staphylococcus/LG_Buddy/issues/24).
@@ -118,6 +125,7 @@ lg-buddy volume mute
 lg-buddy settings list
 lg-buddy settings describe screen.backend
 lg-buddy updates check
+lg-buddy updates install
 lg-buddy --version
 ```
 

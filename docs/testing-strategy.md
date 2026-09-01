@@ -83,6 +83,9 @@ This is the place for integration tests and contract tests.
 - logind lifecycle and NetworkManager gate behavior against a private system-bus
   harness
 - desktop and auxiliary gamepad activity resetting one LG Buddy-owned deadline
+- update-install orchestration ordering against an injected runtime, including
+  refusal, decline, concurrent acquisition, candidate preflight, installer,
+  identity mismatch, cleanup, and success paths
 
 ### How to test it
 
@@ -295,10 +298,52 @@ These should not dominate the Rust test suite, but they still matter because ins
 
 The release-bundle smoke test covers the current installed lifecycle topology:
 the logind lifecycle service remains installed, the NetworkManager pre-down hook
-remains installed, and legacy systemd sleep hooks are absent. It also verifies
-that a missing TV platform remains `bscpylgtv`, explicit platform values survive
-reconfiguration, and `lg_webos` routes to the stored-credential-only native path
-and reports a missing credential without initiating background pairing.
+remains installed, and legacy systemd sleep hooks are absent. Its upgrade phase
+proves refusal before sudo, skips configuration, preserves config and native
+credentials byte-for-byte, conditionally preserves or repairs the Python
+environment, replaces the owned bundle assets, checks service action order, and
+verifies the installed runtime against the candidate bytes and identity.
+
+The focused release-manifest suite covers deterministic serialization, schema
+and critical-field handling, duplicate and missing fields, canonical identity
+formats, archive layout, and binary version/channel/commit mismatches. The
+bundle smoke test then exercises the same validator against the generated and
+installed release binary.
+
+The Rust release-bundle acquisition suite covers exact asset selection, fresh
+release metadata, bounded responses and downloads, GitHub and published digest
+agreement, lightweight and annotated tags, restrictive staging and locking,
+hostile archive types and paths, manifest identity, non-executing embedded
+binary identity, and cleanup on success or failure. Run it with:
+
+```bash
+cargo test -p lg-buddy release_bundle::tests --lib
+```
+
+The normal suite replays GitHub release-response shapes through both a valid
+current-contract bundle and the observed historical `v1.4.0-beta.1` metadata.
+The historical payload is reduced to a deterministic pre-manifest archive and
+must still be rejected at the manifest boundary without contacting GitHub.
+
+The upgrade-preflight module uses injected process, service-manager,
+filesystem, and ownership facts around a real temporary-root installation
+fixture. Its focused suite covers a passing mutable FHS layout plus symlinked,
+mounted, incompletely or wrongly owned, untrusted-writable, read-only,
+hard-linked, legacy, conflicting-drop-in, malformed-candidate, and
+unavailable-service-manager refusals. Table-driven cases exercise every path
+policy's permission contract and every declared candidate input. Candidate
+containment cases reject untrusted and non-sticky shared-writable ancestors
+while preserving root-owned sticky temporary directories. Virtualenv mutation
+checks are conditional on an actual compatibility-environment repair and refuse
+unsafe roots or nested mount points before clearing. Run it with:
+
+```bash
+cargo test -p lg-buddy upgrade_preflight::tests --lib
+```
+
+The initial and candidate checks are deliberately non-mutating. Orchestration
+tests for their consumers must separately prove that a refusal prevents release
+client, confirmation, sudo, and installer effects.
 
 ## Current Practical Gaps
 

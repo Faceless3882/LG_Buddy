@@ -263,6 +263,12 @@ The intended split is:
   - runtime directory resolution
   - system/session state separation
   - ownership marker management
+- `upgrade_preflight.rs`
+  - observes whether the current release-bundle installation can be replaced
+    safely
+  - returns structured, actionable refusals without downloading or mutating
+    anything
+  - provides separate installed-runtime and verified-candidate entrypoints
 - `tv.rs`
   - TV transport abstraction
   - profile-bound `bscpylgtvcommand` adapter
@@ -382,6 +388,7 @@ The intended public user-action surface is:
 - `settings set <KEY> <VALUE>`
 - `settings unset <KEY>`
 - `updates check [--notify]`
+- `updates install`
 
 The binary also retains package-owned and compatibility entrypoints during the
 public-surface migration:
@@ -404,11 +411,16 @@ the runtime command handlers in `commands.rs` and `session/runner.rs`.
 modules and delegates platform ingestion to `sources/`. The on-demand
 `updates check` command reads the saved `updates.channel` policy and consumes
 the GitHub Releases API without entering the screen, lifecycle, or scheduling
-paths. `updates background-check` is the timer-owned wrapper: it exits before
-GitHub/cache work when `updates.auto_check` is disabled and otherwise delegates
-to the same settings-driven check path with notification intent enabled. When
-notification is
-requested and an update is available, the one-shot CLI process hands the
+paths. `updates install` adds the user-confirmed upgrade orchestration: initial
+host preflight, fresh settings-driven discovery, target identity resolution,
+explicit terminal confirmation, verified bundle acquisition, candidate
+preflight, direct `install.sh --upgrade` execution, and installed identity
+verification. The verified bundle and acquisition lock remain owned until the
+installer and final verification finish. `updates background-check` is the
+timer-owned wrapper: it exits before GitHub/cache work when
+`updates.auto_check` is disabled and otherwise delegates to the same
+settings-driven check path with notification intent enabled. When notification
+is requested and an update is available, the one-shot CLI process hands the
 resolved update facts to the LG Buddy-owned user-session D-Bus surface. The
 running session process then owns desktop notification dispatch, notification
 ids, the `View Release` action, and the notification opt-out action. The
@@ -427,6 +439,71 @@ operations. Setting or stepping volume explicitly unmutes after the volume
 operation; mute toggle reads the current state before writing its inverse.
 
 This keeps CLI parsing separate from operational behavior.
+
+## Release Bundle Acquisition Boundary
+
+`release_bundle.rs` turns a selected GitHub release into an owned, verified
+candidate without invoking its installer. Acquisition refreshes the selected
+tag directly from the fixed LG Buddy repository instead of trusting cached
+asset metadata, resolves the tag to a bounded immutable commit, and requires
+exactly one Linux-musl archive and one checksum asset.
+
+Asset downloads use fixed GitHub API URLs, bounded bodies and deadlines, and an
+explicit one-hop HTTPS release-asset redirect policy. Both assets must match
+GitHub's SHA-256 digest and declared size; the archive digest must also match
+the single corresponding entry in `sha256sums.txt`.
+
+The process holds a nonblocking filesystem lock while staging under a private
+user-cache directory. It scans the complete archive before extraction,
+rejecting path aliases, traversal, links, special files, duplicate entries,
+unsafe modes, excessive sizes, and unexpected layout. The manifest must agree
+with the release, target, and resolved commit. The extracted ELF is never run:
+its build-generated, linker-retained identity record is parsed as data and must
+independently agree on version, channel, target, tag, and commit. The returned
+guard owns the verified candidate and removes its staging tree when dropped;
+no executable, installer, sudo, or configuration action runs in this boundary.
+
+## Host Upgrade Safety Boundary
+
+`upgrade_preflight.rs` checks observable host and installation state. It does
+not infer upgrade support from the distribution name, a build flag, an install
+receipt, or where the binary originally came from.
+
+The initial preflight expects the running binary to be the mutable
+`/usr/bin/lg-buddy` installation. It checks the conventional release-bundle
+filesystem topology, ordinary file and directory types, ownership, writable
+mounts, config-pointer discovery, readable configuration state, user and system
+integrations, systemd manager availability, and the absence of legacy layouts
+that would require migration. Each path is tied to the upgrade
+operation that consumes it: file replacement, executable replacement,
+directory mutation, read-only input, or exact drop-in replacement. Those
+policies carry their ownership, permission, link, mount, and containment
+invariants. Symlinks, mounted or multiply linked replacement targets,
+untrusted writable system paths, unexpected systemd drop-ins, read-only
+mutation targets, and special files in owned config state are refused.
+
+After a bundle has been verified, its candidate binary can run the second
+preflight. That pass rechecks the installed state, proves it is executing the
+candidate from the supplied bundle root, and checks the candidate manifest,
+installer, runtime, desktop entry, and systemd assets before any privileged
+mutation. Candidate inputs must be owner-usable and not writable by another
+user. The external ancestor chain must remain root- or user-owned and cannot be
+shared-writable unless sticky-directory semantics protect its trusted child.
+Configuration and pairing scripts are deliberately excluded because the
+non-interactive upgrade mode preserves existing configuration and credentials
+without invoking them.
+
+The installer then reads the existing platform choice and checks the legacy
+Python environment without mutating either. Native installations and healthy
+compatibility environments preserve that directory unchanged. Only an
+unhealthy compatibility environment triggers a second candidate preflight for
+recursive repair; that conditional pass also refuses unsafe virtualenv roots
+and nested mounts before the directory is cleared.
+
+These checks are a conservative, evolving safety boundary, not an exhaustive
+host-support declaration or a promise that no later privileged operation can
+fail. New observable checks can be added as real installations expose unsafe
+conditions; callers only consume the structured compatibility result.
 
 ## Core Control Flows
 

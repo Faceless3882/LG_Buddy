@@ -32,7 +32,7 @@ jobs:
               exit 1
           }
           [ "$HEAD_REF" = "dev" ] || {
-              echo "Only the exact dev branch may target $BASE_REF."
+              echo "Only the dev branch may target $BASE_REF."
               exit 1
           }
           case "$BASE_REF" in

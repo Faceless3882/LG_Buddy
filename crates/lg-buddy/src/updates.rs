@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::fmt;
 use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -22,6 +22,8 @@ const GITHUB_API_VERSION: &str = "2026-03-10";
 const GITHUB_ACCEPT: &str = "application/vnd.github+json";
 const GITHUB_CONNECT_TIMEOUT_SECONDS: u64 = 5;
 const GITHUB_REQUEST_TIMEOUT_SECONDS: u64 = 20;
+const MAX_GITHUB_RESPONSE_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_GITHUB_ERROR_BYTES: u64 = 16 * 1024;
 const PRERELEASE_PAGE_SIZE: u8 = 20;
 const CACHE_DIR_NAME: &str = "lg-buddy";
 const UPDATE_CHECK_CACHE_FILE_NAME: &str = "update-check.json";
@@ -29,6 +31,7 @@ const UPDATE_CHECK_CACHE_FILE_NAME: &str = "update-check.json";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UpdatesCommand {
     Check { notify: bool },
+    Install,
     BackgroundCheck,
 }
 
@@ -45,6 +48,7 @@ impl UpdatesCommand {
 
         match subcommand.as_ref() {
             "check" => parse_check_args(args),
+            "install" => parse_no_args("install", UpdatesCommand::Install, args),
             "background-check" => parse_background_check_args(args),
             other => Err(UpdatesParseError::UnknownSubcommand(other.to_string())),
         }
@@ -53,6 +57,7 @@ impl UpdatesCommand {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Check { .. } => "check",
+            Self::Install => "install",
             Self::BackgroundCheck => "background-check",
         }
     }
@@ -60,8 +65,32 @@ impl UpdatesCommand {
     fn notify(&self) -> bool {
         match self {
             Self::Check { notify } => *notify,
+            Self::Install => false,
             Self::BackgroundCheck => true,
         }
+    }
+}
+
+fn parse_no_args<I, S>(
+    subcommand: &'static str,
+    command: UpdatesCommand,
+    args: I,
+) -> Result<UpdatesCommand, UpdatesParseError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let arguments = args
+        .into_iter()
+        .map(|arg| arg.as_ref().to_string())
+        .collect::<Vec<_>>();
+    if arguments.is_empty() {
+        Ok(command)
+    } else {
+        Err(UpdatesParseError::UnexpectedArguments {
+            subcommand,
+            arguments,
+        })
     }
 }
 
@@ -131,7 +160,7 @@ impl fmt::Display for UpdatesParseError {
         match self {
             Self::MissingSubcommand => write!(
                 f,
-                "missing updates command; expected `updates check [--notify]`"
+                "missing updates command; expected `updates check [--notify]` or `updates install`"
             ),
             Self::UnknownSubcommand(subcommand) => {
                 write!(f, "unknown updates command `{subcommand}`")
@@ -328,6 +357,10 @@ pub enum UpdatesError {
         endpoint: &'static str,
         source: serde_json::Error,
     },
+    ResponseTooLarge {
+        url: String,
+        max_bytes: u64,
+    },
     InvalidLocalVersion {
         version: String,
         source: semver::Error,
@@ -346,6 +379,7 @@ pub enum UpdatesError {
     CacheEncode(serde_json::Error),
     Settings(SettingsError),
     SettingsInvariant(String),
+    CommandInvariant(String),
     DeferredFailures(Vec<UpdatesDeferredFailure>),
     Notification(UpdateNotificationError),
     Io(io::Error),
@@ -401,6 +435,10 @@ impl fmt::Display for UpdatesError {
                     "could not parse GitHub releases API `{endpoint}` response: {source}"
                 )
             }
+            Self::ResponseTooLarge { url, max_bytes } => write!(
+                f,
+                "GitHub releases API `{url}` exceeded the {max_bytes}-byte response limit"
+            ),
             Self::InvalidLocalVersion { version, source } => {
                 write!(f, "invalid local LG Buddy version `{version}`: {source}")
             }
@@ -431,6 +469,7 @@ impl fmt::Display for UpdatesError {
             Self::SettingsInvariant(message) => {
                 write!(f, "invalid update settings metadata: {message}")
             }
+            Self::CommandInvariant(message) => write!(f, "invalid update command: {message}"),
             Self::DeferredFailures(failures) => {
                 write!(f, "update check completed with deferred failure")?;
                 if failures.len() != 1 {
@@ -469,9 +508,11 @@ impl Error for UpdatesError {
             Self::Io(err) => Some(err),
             Self::Http { .. }
             | Self::ApiStatus { .. }
+            | Self::ResponseTooLarge { .. }
             | Self::NoMatchingRelease { .. }
             | Self::NotModifiedWithoutCache { .. }
-            | Self::SettingsInvariant(_) => None,
+            | Self::SettingsInvariant(_)
+            | Self::CommandInvariant(_) => None,
         }
     }
 }
@@ -493,9 +534,88 @@ pub struct ReleaseInfo {
     version: Version,
     channel: UpdateChannel,
     url: String,
+    tag_name: String,
+    assets: Vec<ReleaseAsset>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReleaseAsset {
+    id: u64,
+    name: String,
+    state: String,
+    size: u64,
+    digest: Option<String>,
+    api_url: String,
+    download_url: String,
+}
+
+impl ReleaseAsset {
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+
+    pub fn state(&self) -> &str {
+        &self.state
+    }
+
+    pub fn digest(&self) -> Option<&str> {
+        self.digest.as_deref()
+    }
+
+    pub fn api_url(&self) -> &str {
+        &self.api_url
+    }
+
+    pub fn download_url(&self) -> &str {
+        &self.download_url
+    }
+
+    pub(crate) fn from_github(
+        id: u64,
+        name: String,
+        state: String,
+        size: u64,
+        digest: Option<String>,
+        api_url: String,
+        download_url: String,
+    ) -> Self {
+        Self {
+            id,
+            name,
+            state,
+            size,
+            digest,
+            api_url,
+            download_url,
+        }
+    }
 }
 
 impl ReleaseInfo {
+    pub(crate) fn from_github(
+        version: Version,
+        channel: UpdateChannel,
+        url: String,
+        tag_name: String,
+        assets: Vec<ReleaseAsset>,
+    ) -> Self {
+        Self {
+            version,
+            channel,
+            url,
+            tag_name,
+            assets,
+        }
+    }
+
     pub fn version(&self) -> &Version {
         &self.version
     }
@@ -508,19 +628,37 @@ impl ReleaseInfo {
         &self.url
     }
 
+    pub fn tag_name(&self) -> &str {
+        &self.tag_name
+    }
+
+    pub fn assets(&self) -> &[ReleaseAsset] {
+        &self.assets
+    }
+
     fn to_cached(&self) -> CachedReleaseInfo {
         CachedReleaseInfo {
             version: self.version.to_string(),
             channel: self.channel,
             url: self.url.clone(),
+            tag_name: Some(self.tag_name.clone()),
+            assets: self.assets.clone(),
         }
     }
 
     fn from_cached(cached: &CachedReleaseInfo) -> Option<Self> {
-        Version::parse(&cached.version).ok().map(|version| Self {
-            version,
-            channel: cached.channel,
-            url: cached.url.clone(),
+        Version::parse(&cached.version).ok().map(|version| {
+            let tag_name = cached
+                .tag_name
+                .clone()
+                .unwrap_or_else(|| format!("v{version}"));
+            Self {
+                version,
+                channel: cached.channel,
+                url: cached.url.clone(),
+                tag_name,
+                assets: cached.assets.clone(),
+            }
         })
     }
 }
@@ -687,6 +825,10 @@ struct CachedReleaseInfo {
     version: String,
     channel: UpdateChannel,
     url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tag_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    assets: Vec<ReleaseAsset>,
 }
 
 impl CachedReleaseInfo {
@@ -717,14 +859,18 @@ impl UpdateCheckResult {
             "up to date"
         };
 
-        format!(
+        let mut output = format!(
             "status: {status}\ncurrent: {} ({})\nlatest: {} ({})\nurl: {}\n",
             self.current_version,
             self.current_channel.as_str(),
             self.latest.version(),
             self.latest.channel().as_str(),
             self.latest.url()
-        )
+        );
+        if self.update_available() {
+            output.push_str("install: lg-buddy updates install\n");
+        }
+        output
     }
 
     fn notification_request(&self) -> Result<UpdateNotificationRequest, UpdateNotificationError> {
@@ -788,6 +934,10 @@ impl Default for UreqGitHubReleasesClient {
             agent: ureq::AgentBuilder::new()
                 .timeout_connect(Duration::from_secs(GITHUB_CONNECT_TIMEOUT_SECONDS))
                 .timeout(Duration::from_secs(GITHUB_REQUEST_TIMEOUT_SECONDS))
+                .https_only(true)
+                .try_proxy_from_env(false)
+                .redirects(0)
+                .redirect_auth_headers(ureq::RedirectAuthHeaders::Never)
                 .build(),
         }
     }
@@ -815,23 +965,20 @@ impl GitHubReleasesClient for UreqGitHubReleasesClient {
         let result = request.call();
 
         match result {
-            Ok(response) => {
-                if response.status() == 304 {
-                    return Ok(GitHubReleaseResponse::NotModified);
-                }
-
+            Ok(response) if response.status() == 200 => {
                 let etag = response.header("ETag").map(str::to_string);
-                response
-                    .into_string()
+                read_ureq_response_body(response, &url, MAX_GITHUB_RESPONSE_BYTES)
                     .map(|body| GitHubReleaseResponse::Ok { body, etag })
-                    .map_err(|err| UpdatesError::Http {
-                        url,
-                        message: err.to_string(),
-                    })
+            }
+            Ok(response) if response.status() == 304 => Ok(GitHubReleaseResponse::NotModified),
+            Ok(response) => {
+                let status = response.status();
+                let body = read_ureq_response_body(response, &url, MAX_GITHUB_ERROR_BYTES)?;
+                Err(UpdatesError::ApiStatus { url, status, body })
             }
             Err(ureq::Error::Status(304, _)) => Ok(GitHubReleaseResponse::NotModified),
             Err(ureq::Error::Status(status, response)) => {
-                let body = response.into_string().unwrap_or_default();
+                let body = read_ureq_response_body(response, &url, MAX_GITHUB_ERROR_BYTES)?;
                 Err(UpdatesError::ApiStatus { url, status, body })
             }
             Err(ureq::Error::Transport(err)) => Err(UpdatesError::Http {
@@ -840,6 +987,33 @@ impl GitHubReleasesClient for UreqGitHubReleasesClient {
             }),
         }
     }
+}
+
+fn read_ureq_response_body(
+    response: ureq::Response,
+    url: &str,
+    max_bytes: u64,
+) -> Result<String, UpdatesError> {
+    let mut bytes = Vec::new();
+    response
+        .into_reader()
+        .take(max_bytes + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|err| UpdatesError::Http {
+            url: url.to_string(),
+            message: err.to_string(),
+        })?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(UpdatesError::ResponseTooLarge {
+            url: url.to_string(),
+            max_bytes,
+        });
+    }
+
+    String::from_utf8(bytes).map_err(|err| UpdatesError::Http {
+        url: url.to_string(),
+        message: format!("response was not valid UTF-8: {err}"),
+    })
 }
 
 trait UpdateCacheStore {
@@ -969,12 +1143,30 @@ struct GitHubRelease {
     html_url: String,
     draft: bool,
     prerelease: bool,
+    #[serde(default)]
+    assets: Vec<GitHubReleaseAsset>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubReleaseAsset {
+    id: u64,
+    name: String,
+    state: String,
+    size: u64,
+    digest: Option<String>,
+    url: String,
+    browser_download_url: String,
 }
 
 pub fn run_updates_command<W: io::Write>(
     command: UpdatesCommand,
     writer: &mut W,
 ) -> Result<(), UpdatesError> {
+    if matches!(command, UpdatesCommand::Install) {
+        return Err(UpdatesError::CommandInvariant(
+            "updates install must use the install orchestrator".to_string(),
+        ));
+    }
     let client = UreqGitHubReleasesClient::default();
     let version = VersionInfo::current();
     let notification_handoff = SessionBusUpdateNotificationHandoff;
@@ -990,6 +1182,23 @@ pub fn run_updates_command<W: io::Write>(
     };
 
     run_updates_command_with_update_settings(command, writer, context)
+}
+
+pub(crate) fn discover_install_candidate(
+    current: VersionInfo,
+) -> Result<ReleaseInfo, UpdatesError> {
+    let client = UreqGitHubReleasesClient::default();
+    let settings = EnvUpdateSettings::from_env()?;
+    discover_install_candidate_with(current, &client, &settings)
+}
+
+fn discover_install_candidate_with<C: GitHubReleasesClient, U: UpdateSettings>(
+    current: VersionInfo,
+    client: &C,
+    settings: &U,
+) -> Result<ReleaseInfo, UpdatesError> {
+    let channel = settings.channel()?;
+    check_updates(channel, current, client).map(|result| result.latest)
 }
 
 #[cfg(test)]
@@ -1112,7 +1321,6 @@ fn run_updates_command_with_update_settings<
     Ok(())
 }
 
-#[cfg(test)]
 fn check_updates<C: GitHubReleasesClient>(
     channel: UpdateChannel,
     current: VersionInfo,
@@ -1253,10 +1461,28 @@ fn release_info_from_api_release(
         UpdateChannel::Stable
     };
 
-    parse_release_version(&release.tag_name).map(|version| ReleaseInfo {
-        version,
-        channel: release_channel,
-        url: release.html_url,
+    parse_release_version(&release.tag_name).map(|version| {
+        ReleaseInfo::from_github(
+            version,
+            release_channel,
+            release.html_url,
+            release.tag_name,
+            release
+                .assets
+                .into_iter()
+                .map(|asset| {
+                    ReleaseAsset::from_github(
+                        asset.id,
+                        asset.name,
+                        asset.state,
+                        asset.size,
+                        asset.digest,
+                        asset.url,
+                        asset.browser_download_url,
+                    )
+                })
+                .collect(),
+        )
     })
 }
 
@@ -1275,15 +1501,16 @@ fn current_unix_seconds() -> u64 {
 mod tests {
     use super::{
         atomic_write_file, check_updates, check_updates_with_cache,
-        evaluate_update_notification_policy, parse_release_version, resolve_update_cache_path,
-        run_updates_command_with, run_updates_command_with_update_settings, CachedReleaseInfo,
-        CachedUpdateCheck, CachedUpdateNotification, DefaultUpdateCacheStore, EnvUpdateSettings,
-        FileUpdateCacheStore, GitHubReleaseResponse, GitHubReleasesClient, ReleaseEndpoint,
-        ReleaseInfo, StaticUpdateSettings, UpdateCachePathError, UpdateCachePathSources,
-        UpdateCacheStore, UpdateChannel, UpdateCheckCache, UpdateNotificationDecision,
-        UpdateNotificationPolicyInput, UpdateNotificationReason, UpdateNotificationSkipReason,
-        UpdateSettings, UpdatesCommand, UpdatesDeferredFailure, UpdatesError, UpdatesRunContext,
-        UreqGitHubReleasesClient, PRERELEASE_PAGE_SIZE,
+        discover_install_candidate_with, evaluate_update_notification_policy,
+        parse_release_version, resolve_update_cache_path, run_updates_command_with,
+        run_updates_command_with_update_settings, CachedReleaseInfo, CachedUpdateCheck,
+        CachedUpdateNotification, DefaultUpdateCacheStore, EnvUpdateSettings, FileUpdateCacheStore,
+        GitHubReleaseResponse, GitHubReleasesClient, ReleaseAsset, ReleaseEndpoint, ReleaseInfo,
+        StaticUpdateSettings, UpdateCachePathError, UpdateCachePathSources, UpdateCacheStore,
+        UpdateChannel, UpdateCheckCache, UpdateNotificationDecision, UpdateNotificationPolicyInput,
+        UpdateNotificationReason, UpdateNotificationSkipReason, UpdateSettings, UpdatesCommand,
+        UpdatesDeferredFailure, UpdatesError, UpdatesRunContext, UreqGitHubReleasesClient,
+        MAX_GITHUB_RESPONSE_BYTES, PRERELEASE_PAGE_SIZE,
     };
     use crate::session_notifications::{
         UpdateNotificationError, UpdateNotificationHandoff, UpdateNotificationOutcome,
@@ -1539,10 +1766,13 @@ mod tests {
     }
 
     fn release_info(version: &str, channel: UpdateChannel, url: &str) -> ReleaseInfo {
+        let version = Version::parse(version).expect("test version should parse");
         ReleaseInfo {
-            version: Version::parse(version).expect("test version should parse"),
+            tag_name: format!("v{version}"),
+            version,
             channel,
             url: url.to_string(),
+            assets: Vec::new(),
         }
     }
 
@@ -1567,6 +1797,8 @@ mod tests {
                 version: version.to_string(),
                 channel,
                 url: url.to_string(),
+                tag_name: None,
+                assets: Vec::new(),
             },
             last_notification: None,
         }
@@ -1584,6 +1816,8 @@ mod tests {
                 version: version.to_string(),
                 channel,
                 url: url.to_string(),
+                tag_name: None,
+                assets: Vec::new(),
             },
         }
     }
@@ -1836,17 +2070,25 @@ mod tests {
         let store = FileUpdateCacheStore::new(path);
 
         let mut cache = UpdateCheckCache::default();
-        cache.set_entry(
+        let mut stable_entry = cached_entry_with_notification(
+            Some("\"stable-etag\""),
+            "1.1.0",
             UpdateChannel::Stable,
-            cached_entry_with_notification(
-                Some("\"stable-etag\""),
-                "1.1.0",
-                UpdateChannel::Stable,
-                "https://github.test/releases/tag/v1.1.0",
-                TEST_NOW,
-                TEST_NOW + 1,
-            ),
+            "https://github.test/releases/tag/v1.1.0",
+            TEST_NOW,
+            TEST_NOW + 1,
         );
+        stable_entry.latest.tag_name = Some("v1.1.0".to_string());
+        stable_entry.latest.assets = vec![ReleaseAsset::from_github(
+            42,
+            "lg-buddy-1.1.0-x86_64-unknown-linux-musl.tar.gz".to_string(),
+            "uploaded".to_string(),
+            1234,
+            Some(format!("sha256:{}", "a".repeat(64))),
+            "https://api.github.test/releases/assets/42".to_string(),
+            "https://github.test/releases/download/v1.1.0/bundle.tar.gz".to_string(),
+        )];
+        cache.set_entry(UpdateChannel::Stable, stable_entry);
         cache.set_entry(
             UpdateChannel::Prerelease,
             cached_entry(
@@ -2013,6 +2255,106 @@ mod tests {
     }
 
     #[test]
+    fn ureq_client_refuses_release_discovery_redirects() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local test server");
+        let address = listener.local_addr().expect("read local test address");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client connection");
+            let mut request = [0; 2048];
+            let _ = stream.read(&mut request).expect("read request");
+            stream
+                .write_all(
+                    b"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:1/untrusted\r\nContent-Length: 0\r\n\r\n",
+                )
+                .expect("write redirect");
+        });
+        let base_url = Box::leak(format!("http://{address}/releases").into_boxed_str());
+        let client = UreqGitHubReleasesClient {
+            base_url,
+            agent: ureq::AgentBuilder::new()
+                .timeout(Duration::from_secs(5))
+                .try_proxy_from_env(false)
+                .redirects(0)
+                .redirect_auth_headers(ureq::RedirectAuthHeaders::Never)
+                .build(),
+        };
+
+        assert!(matches!(
+            client.get(ReleaseEndpoint::LatestStable, "lg-buddy/1.3.0", None),
+            Err(UpdatesError::ApiStatus { status: 302, .. })
+        ));
+        server.join().expect("server thread should finish");
+    }
+
+    #[test]
+    fn release_discovery_preserves_complete_asset_metadata() {
+        let body = r#"{
+          "tag_name":"v1.4.0",
+          "html_url":"https://github.com/Staphylococcus/LG_Buddy/releases/tag/v1.4.0",
+          "draft":false,
+          "prerelease":false,
+          "assets":[{
+            "id":123,
+            "name":"lg-buddy-1.4.0-x86_64-unknown-linux-musl.tar.gz",
+            "state":"uploaded",
+            "size":456,
+            "digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "url":"https://api.github.com/repos/Staphylococcus/LG_Buddy/releases/assets/123",
+            "browser_download_url":"https://github.com/Staphylococcus/LG_Buddy/releases/download/v1.4.0/lg-buddy-1.4.0-x86_64-unknown-linux-musl.tar.gz"
+          }]
+        }"#;
+        let client = MockGitHubReleasesClient::new(vec![Ok(body.to_string())]);
+        let result = check_updates(
+            UpdateChannel::Stable,
+            version_info("1.3.0", ReleaseChannel::Stable),
+            &client,
+        )
+        .expect("update check");
+
+        assert_eq!(result.latest.tag_name(), "v1.4.0");
+        assert_eq!(result.latest.assets().len(), 1);
+        let asset = &result.latest.assets()[0];
+        assert_eq!(asset.id(), 123);
+        assert_eq!(asset.state(), "uploaded");
+        assert_eq!(asset.size(), 456);
+        assert_eq!(
+            asset.digest(),
+            Some("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
+    }
+
+    #[test]
+    fn ureq_client_rejects_oversized_release_metadata() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local test server");
+        let address = listener.local_addr().expect("read local test address");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client connection");
+            let mut request = [0; 2048];
+            let _ = stream.read(&mut request).expect("read request");
+            let body = vec![b' '; MAX_GITHUB_RESPONSE_BYTES as usize + 1];
+            stream
+                .write_all(
+                    format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len()).as_bytes(),
+                )
+                .expect("write response header");
+            stream.write_all(&body).expect("write response body");
+        });
+        let base_url = Box::leak(format!("http://{address}/releases").into_boxed_str());
+        let client = UreqGitHubReleasesClient {
+            base_url,
+            agent: ureq::AgentBuilder::new()
+                .timeout(Duration::from_secs(5))
+                .build(),
+        };
+
+        assert!(matches!(
+            client.get(ReleaseEndpoint::LatestStable, "lg-buddy/1.3.0", None),
+            Err(UpdatesError::ResponseTooLarge { .. })
+        ));
+        server.join().expect("server thread should finish");
+    }
+
+    #[test]
     fn stable_not_modified_uses_cached_release_metadata() {
         let client =
             MockGitHubReleasesClient::new_responses(vec![Ok(GitHubReleaseResponse::NotModified)]);
@@ -2040,7 +2382,7 @@ mod tests {
         assert!(result.update_available());
         assert_eq!(
             result.render(),
-            "status: update available\ncurrent: 1.1.0 (stable)\nlatest: 1.1.1 (stable)\nurl: https://github.test/releases/tag/v1.1.1\n"
+            "status: update available\ncurrent: 1.1.0 (stable)\nlatest: 1.1.1 (stable)\nurl: https://github.test/releases/tag/v1.1.1\ninstall: lg-buddy updates install\n"
         );
         assert_eq!(
             client.requests_with_etags(),
@@ -2697,6 +3039,33 @@ mod tests {
     }
 
     #[test]
+    fn install_discovery_uses_saved_channel_and_ignores_automatic_check_gate() {
+        let client = MockGitHubReleasesClient::new(vec![Ok(format!(
+            "[{},{}]",
+            stable_release("v1.1.0"),
+            prerelease("v1.2.0-beta.1")
+        ))]);
+        let update_settings = StaticUpdateSettings::disabled(UpdateChannel::Prerelease);
+
+        let release = discover_install_candidate_with(
+            version_info("1.1.0", ReleaseChannel::Stable),
+            &client,
+            &update_settings,
+        )
+        .expect("install discovery should use the saved prerelease channel");
+
+        assert_eq!(release.version(), &Version::parse("1.2.0-beta.1").unwrap());
+        assert_eq!(release.channel(), UpdateChannel::Prerelease);
+        assert_eq!(
+            client.requests(),
+            vec![(
+                "https://api.example.test/releases?per_page=20".to_string(),
+                "lg-buddy/1.1.0".to_string()
+            )]
+        );
+    }
+
+    #[test]
     fn saved_channel_drives_manual_checks_for_every_binary_identity() {
         for saved_channel in [UpdateChannel::Stable, UpdateChannel::Prerelease] {
             let update_settings = stored_update_settings("disabled", saved_channel);
@@ -3204,7 +3573,7 @@ mod tests {
         assert!(result.update_available());
         assert_eq!(
             result.render(),
-            "status: update available\ncurrent: 1.2.0-beta.1 (prerelease)\nlatest: 1.2.0 (stable)\nurl: https://github.test/releases/tag/v1.2.0\n"
+            "status: update available\ncurrent: 1.2.0-beta.1 (prerelease)\nlatest: 1.2.0 (stable)\nurl: https://github.test/releases/tag/v1.2.0\ninstall: lg-buddy updates install\n"
         );
     }
 
