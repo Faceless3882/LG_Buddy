@@ -182,10 +182,10 @@ the branch contract and recovery process, see
 | `scripts/build-release-bundle.sh` | Release bundle builder |
 | `scripts/test-release-bundle.sh` | Release bundle smoke test |
 | `scripts/publish-release-assets.sh` | GitHub release publish helper |
-| `scripts/release_promotion.py` | Promotion version, ancestry, and tag validator |
+| `scripts/release_promotion.py` | Promotion version, branch, and tag validator |
 | `.github/workflows/ci.yml` | CI validation workflow |
 | `.github/workflows/promotion-check.yml` | Trusted promotion PR contract check |
-| `.github/workflows/release.yml` | Approved promotion build, publication, and ref finalizer |
+| `.github/workflows/release.yml` | Post-merge promotion build and publication workflow |
 | `bin/LG_Buddy_Common` | Shared shell config helper used by setup scripts |
 | `systemd/` | Installed unit files and tmpfiles config, including the logind lifecycle service |
 | `docs/architecture-overview.md` | Runtime architecture |

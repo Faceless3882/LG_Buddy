@@ -23,7 +23,7 @@ Keep one concern per pull request.
 
 Base ordinary contribution PRs on `dev` and target `dev`. The persistent
 `main` and `prerelease` branches accept only release promotion PRs whose head is
-the exact same-repository `dev` branch; see the
+the same-repository `dev` branch; see the
 [release process](docs/release-process.md).
 
 Good PRs usually fit one of these shapes:

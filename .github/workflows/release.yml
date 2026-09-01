@@ -1,82 +1,37 @@
 name: Release promotion
 
 on:
-  pull_request_target:
+  push:
     branches:
       - main
       - prerelease
-    types:
-      - labeled
 
 permissions:
   actions: read
-  checks: read
   contents: read
-  pull-requests: read
 
 concurrency:
   group: release-promotion
   cancel-in-progress: false
 
 jobs:
-  authorize:
-    if: github.event.label.name == 'release:promote'
-    runs-on: ubuntu-latest
-    outputs:
-      base_ref: ${{ steps.authorize.outputs.base_ref }}
-      base_sha: ${{ steps.authorize.outputs.base_sha }}
-      head_sha: ${{ steps.authorize.outputs.head_sha }}
-      pr_number: ${{ steps.authorize.outputs.pr_number }}
-
-    steps:
-      - name: Authorize promotion request
-        id: authorize
-        env:
-          ACTOR: ${{ github.actor }}
-          BASE_REF: ${{ github.event.pull_request.base.ref }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          GH_TOKEN: ${{ github.token }}
-          HEAD_REF: ${{ github.event.pull_request.head.ref }}
-          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          IS_DRAFT: ${{ github.event.pull_request.draft }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          [ "$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$ACTOR/permission" --jq .permission)" = "admin" ] || {
-              echo "Only a repository administrator may request release promotion."
-              exit 1
-          }
-          [ "$HEAD_REPOSITORY" = "$GITHUB_REPOSITORY" ]
-          [ "$HEAD_REF" = "dev" ]
-          [ "$IS_DRAFT" = "false" ]
-          case "$BASE_REF" in
-              main|prerelease) ;;
-              *) exit 1 ;;
-          esac
-          gh pr checks "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --required
-          {
-              echo "base_ref=$BASE_REF"
-              echo "base_sha=$BASE_SHA"
-              echo "head_sha=$HEAD_SHA"
-              echo "pr_number=$PR_NUMBER"
-          } >> "$GITHUB_OUTPUT"
-
   validate:
     runs-on: ubuntu-latest
-    needs: authorize
     outputs:
+      base_sha: ${{ steps.contract.outputs.base_sha }}
       channel: ${{ steps.contract.outputs.channel }}
       head_sha: ${{ steps.contract.outputs.head_sha }}
-      main_sha: ${{ steps.contract.outputs.main_sha }}
       prerelease_sha: ${{ steps.contract.outputs.prerelease_sha }}
+      publish: ${{ steps.contract.outputs.publish }}
+      source_sha: ${{ steps.contract.outputs.source_sha }}
       tag: ${{ steps.contract.outputs.tag }}
       version: ${{ steps.contract.outputs.version }}
 
     steps:
-      - name: Check out trusted promotion validator
+      - name: Check out merged release commit
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.authorize.outputs.base_sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -85,7 +40,7 @@ jobs:
         with:
           python-version: "3.x"
 
-      - name: Fetch channel refs and release tags
+      - name: Fetch release refs and tags
         run: |
           git fetch --force origin \
               +refs/heads/main:refs/remotes/origin/main \
@@ -93,23 +48,27 @@ jobs:
               +refs/heads/dev:refs/remotes/origin/dev \
               +refs/tags/*:refs/tags/*
 
-      - name: Validate promotion contract
+      - name: Validate merged promotion
         id: contract
+        env:
+          BASE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+          TARGET: ${{ github.ref_name }}
         run: |
           python3 scripts/release_promotion.py \
-              --target "${{ needs.authorize.outputs.base_ref }}" \
-              --head-ref "${{ needs.authorize.outputs.head_sha }}" \
-              --base-sha "${{ needs.authorize.outputs.base_sha }}" \
+              --merged \
+              --target "$TARGET" \
+              --head-ref "$HEAD_SHA" \
+              --base-sha "$BASE_SHA" \
               --github-output "$GITHUB_OUTPUT"
 
   build-release-bundle:
+    if: needs.validate.outputs.publish == 'true'
     runs-on: ubuntu-latest
-    needs:
-      - authorize
-      - validate
+    needs: validate
 
     steps:
-      - name: Check out exact reviewed dev commit
+      - name: Check out merged release commit
         uses: actions/checkout@v4
         with:
           ref: ${{ needs.validate.outputs.head_sha }}
@@ -168,19 +127,19 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  finalize:
+  publish:
+    if: needs.validate.outputs.publish == 'true'
     runs-on: ubuntu-latest
     environment: release-promotion
     needs:
-      - authorize
       - validate
       - build-release-bundle
 
     steps:
-      - name: Check out trusted finalizer
+      - name: Check out merged release commit
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.authorize.outputs.base_sha }}
+          ref: ${{ needs.validate.outputs.head_sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -189,8 +148,7 @@ jobs:
         with:
           python-version: "3.x"
 
-      - name: Fetch and revalidate current refs
-        id: recheck
+      - name: Fetch and revalidate release refs
         run: |
           git fetch --force origin \
               +refs/heads/main:refs/remotes/origin/main \
@@ -198,16 +156,10 @@ jobs:
               +refs/heads/dev:refs/remotes/origin/dev \
               +refs/tags/*:refs/tags/*
           python3 scripts/release_promotion.py \
-              --target "${{ needs.authorize.outputs.base_ref }}" \
-              --head-ref "${{ needs.authorize.outputs.head_sha }}" \
-              --base-sha "${{ needs.authorize.outputs.base_sha }}" \
-              --github-output "$GITHUB_OUTPUT"
-          [ "$(git rev-parse refs/remotes/origin/dev)" = "${{ needs.validate.outputs.head_sha }}" ]
-
-      - name: Revalidate required PR checks
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh pr checks "${{ needs.authorize.outputs.pr_number }}" --repo "$GITHUB_REPOSITORY" --required
+              --merged \
+              --target "${{ github.ref_name }}" \
+              --head-ref "${{ needs.validate.outputs.head_sha }}" \
+              --base-sha "${{ needs.validate.outputs.base_sha }}"
 
       - name: Download verified release bundle
         uses: actions/download-artifact@v4
@@ -218,8 +170,8 @@ jobs:
       - name: Verify downloaded checksums
         run: cd dist && sha256sum -c sha256sums.txt
 
-      - name: Create repository-scoped promotion token
-        id: promotion-token
+      - name: Create repository-scoped release token
+        id: release-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
         with:
           app-id: ${{ vars.RELEASE_PROMOTION_APP_ID }}
@@ -228,37 +180,14 @@ jobs:
           repositories: LG_Buddy
           permission-contents: write
 
-      - name: Publish release and advance channel refs
+      - name: Align release streams
         env:
-          BASE_REF: ${{ needs.authorize.outputs.base_ref }}
-          EXPECTED_MAIN_SHA: ${{ needs.validate.outputs.main_sha }}
-          EXPECTED_PRERELEASE_SHA: ${{ needs.validate.outputs.prerelease_sha }}
-          GH_TOKEN: ${{ steps.promotion-token.outputs.token }}
+          GH_TOKEN: ${{ steps.release-token.outputs.token }}
           HEAD_SHA: ${{ needs.validate.outputs.head_sha }}
-          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+          PRERELEASE_SHA: ${{ needs.validate.outputs.prerelease_sha }}
+          SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+          TARGET: ${{ github.ref_name }}
         run: |
-          remote_tag_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq .object.sha 2>/dev/null || true)"
-          if [ -z "$remote_tag_sha" ]; then
-              gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
-                  -f ref="refs/tags/$RELEASE_TAG" \
-                  -f sha="$HEAD_SHA" >/dev/null
-          elif [ "$remote_tag_sha" != "$HEAD_SHA" ]; then
-              echo "Tag $RELEASE_TAG points to $remote_tag_sha, expected $HEAD_SHA."
-              exit 1
-          fi
-
-          if ! git rev-parse --verify "refs/tags/$RELEASE_TAG" >/dev/null 2>&1; then
-              git tag "$RELEASE_TAG" "$HEAD_SHA"
-          fi
-          ./scripts/publish-release-assets.sh \
-              --dist-dir dist \
-              --tag "$RELEASE_TAG" \
-              --commit "$HEAD_SHA"
-
-          verify_dir="$(mktemp -d)"
-          gh release download "$RELEASE_TAG" --dir "$verify_dir"
-          (cd "$verify_dir" && sha256sum -c sha256sums.txt)
-
           update_ref() {
               local ref_name="$1"
               local expected_sha="$2"
@@ -277,11 +206,36 @@ jobs:
                   -F force=false >/dev/null
           }
 
-          if [ "$BASE_REF" = "main" ]; then
-              update_ref prerelease "$EXPECTED_PRERELEASE_SHA"
-              update_ref main "$EXPECTED_MAIN_SHA"
+          if [ "$TARGET" = "main" ]; then
+              update_ref prerelease "$PRERELEASE_SHA"
+          fi
+          update_ref dev "$SOURCE_SHA"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ steps.release-token.outputs.token }}
+          HEAD_SHA: ${{ needs.validate.outputs.head_sha }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          if remote_tag_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq .object.sha 2>/dev/null)"; then
+              [ "$remote_tag_sha" = "$HEAD_SHA" ] || {
+                  echo "Tag $RELEASE_TAG points to $remote_tag_sha, expected $HEAD_SHA."
+                  exit 1
+              }
           else
-              update_ref prerelease "$EXPECTED_PRERELEASE_SHA"
+              gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+                  -f ref="refs/tags/$RELEASE_TAG" \
+                  -f sha="$HEAD_SHA" >/dev/null
           fi
 
-          [ "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$BASE_REF" --jq .object.sha)" = "$HEAD_SHA" ]
+          if ! git rev-parse --verify "refs/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+              git tag "$RELEASE_TAG" "$HEAD_SHA"
+          fi
+          ./scripts/publish-release-assets.sh \
+              --dist-dir dist \
+              --tag "$RELEASE_TAG" \
+              --commit "$HEAD_SHA"
+
+          verify_dir="$(mktemp -d)"
+          gh release download "$RELEASE_TAG" --dir "$verify_dir"
+          (cd "$verify_dir" && sha256sum -c sha256sums.txt)

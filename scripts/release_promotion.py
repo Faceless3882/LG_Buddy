@@ -154,6 +154,64 @@ def require_ancestor(repository: Path, ancestor: str, descendant: str) -> None:
         raise PromotionError(result.stderr.strip() or "git merge-base failed")
 
 
+def validate_release_identity(
+    repository: Path,
+    *,
+    target: str,
+    head_sha: str,
+    current_main_ref: str,
+    current_prerelease_ref: str,
+) -> dict[str, object]:
+    version_text = package_version_at_ref(repository, head_sha)
+    lock_version = lock_version_at_ref(repository, head_sha)
+    if lock_version != version_text:
+        raise PromotionError(
+            f"crate version {version_text} does not match Cargo.lock version {lock_version}"
+        )
+
+    version = SemVer.parse(version_text)
+    if version.build:
+        raise PromotionError("official release versions must not contain build metadata")
+    if target == "main" and version.prerelease:
+        raise PromotionError(f"main requires a stable version, found {version_text}")
+    if target == "prerelease" and not version.prerelease:
+        raise PromotionError(f"prerelease requires a prerelease version, found {version_text}")
+
+    for channel, current_ref in (
+        ("main", current_main_ref),
+        ("prerelease", current_prerelease_ref),
+    ):
+        if resolve(repository, current_ref) == head_sha:
+            continue
+        current_text = package_version_at_ref(repository, current_ref)
+        if version <= SemVer.parse(current_text):
+            raise PromotionError(
+                f"candidate {version_text} must advance {channel} from {current_text}"
+            )
+
+    tag = f"v{version_text}"
+    tag_result = subprocess.run(
+        ["git", "rev-parse", "--verify", f"refs/tags/{tag}^{{commit}}"],
+        cwd=repository,
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    retry = tag_result.returncode == 0
+    if retry and tag_result.stdout.strip() != head_sha:
+        raise PromotionError(
+            f"tag {tag} already points to {tag_result.stdout.strip()}, not {head_sha}"
+        )
+
+    return {
+        "version": version_text,
+        "tag": tag,
+        "channel": "stable" if target == "main" else "prerelease",
+        "retry": retry,
+    }
+
+
 def validate_promotion(
     repository: Path,
     *,
@@ -181,56 +239,85 @@ def validate_promotion(
     require_ancestor(repository, main_sha, prerelease_sha)
     require_ancestor(repository, prerelease_sha, head_sha)
 
-    version_text = package_version_at_ref(repository, head_sha)
-    lock_version = lock_version_at_ref(repository, head_sha)
-    if lock_version != version_text:
-        raise PromotionError(
-            f"crate version {version_text} does not match Cargo.lock version {lock_version}"
-        )
-
-    version = SemVer.parse(version_text)
-    if version.build:
-        raise PromotionError("official release versions must not contain build metadata")
-    if target == "main" and version.prerelease:
-        raise PromotionError(f"main requires a stable version, found {version_text}")
-    if target == "prerelease" and not version.prerelease:
-        raise PromotionError(f"prerelease requires a prerelease version, found {version_text}")
-
-    current_main_text = package_version_at_ref(repository, main_sha)
-    current_prerelease_text = package_version_at_ref(repository, prerelease_sha)
-    for channel, current_text in (
-        ("main", current_main_text),
-        ("prerelease", current_prerelease_text),
-    ):
-        if version <= SemVer.parse(current_text):
-            raise PromotionError(
-                f"candidate {version_text} must advance {channel} from {current_text}"
-            )
-
-    tag = f"v{version_text}"
-    tag_result = subprocess.run(
-        ["git", "rev-parse", "--verify", f"refs/tags/{tag}^{{commit}}"],
-        cwd=repository,
-        check=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
+    identity = validate_release_identity(
+        repository,
+        target=target,
+        head_sha=head_sha,
+        current_main_ref=main_sha,
+        current_prerelease_ref=prerelease_sha,
     )
-    retry = tag_result.returncode == 0
-    if retry and tag_result.stdout.strip() != head_sha:
-        raise PromotionError(
-            f"tag {tag} already points to {tag_result.stdout.strip()}, not {head_sha}"
-        )
+    if identity["retry"]:
+        raise PromotionError(f"tag {identity['tag']} already exists before promotion merge")
 
     return {
-        "version": version_text,
-        "tag": tag,
-        "channel": "stable" if target == "main" else "prerelease",
+        **identity,
+        "publish": True,
         "head_sha": head_sha,
+        "source_sha": dev_sha,
         "base_sha": target_sha,
         "main_sha": main_sha,
         "prerelease_sha": prerelease_sha,
-        "retry": retry,
+    }
+
+
+def validate_merged_promotion(
+    repository: Path,
+    *,
+    target: str,
+    head_ref: str,
+    base_sha: str,
+    main_ref: str,
+    prerelease_ref: str,
+) -> dict[str, object]:
+    if target not in {"main", "prerelease"}:
+        raise PromotionError(f"unsupported promotion target: {target}")
+
+    head_sha = resolve(repository, head_ref)
+    previous_sha = resolve(repository, base_sha)
+    main_sha = resolve(repository, main_ref)
+    prerelease_sha = resolve(repository, prerelease_ref)
+    target_sha = main_sha if target == "main" else prerelease_sha
+    if target_sha != head_sha:
+        raise PromotionError(f"merged {target} moved from release commit {head_sha} to {target_sha}")
+    require_ancestor(repository, previous_sha, head_sha)
+
+    if target == "prerelease" and main_sha == head_sha:
+        version = package_version_at_ref(repository, head_sha)
+        return {
+            "publish": False,
+            "version": version,
+            "tag": f"v{version}",
+            "channel": "stable",
+            "retry": False,
+            "head_sha": head_sha,
+            "source_sha": "",
+            "base_sha": previous_sha,
+            "main_sha": main_sha,
+            "prerelease_sha": prerelease_sha,
+        }
+
+    parents = git(repository, "rev-list", "--parents", "-n", "1", head_sha).split()
+    if len(parents) != 3:
+        raise PromotionError("release promotion must produce a two-parent merge commit")
+    source_sha = parents[2]
+
+    identity = validate_release_identity(
+        repository,
+        target=target,
+        head_sha=head_sha,
+        current_main_ref=previous_sha if target == "main" else main_sha,
+        current_prerelease_ref=(
+            previous_sha if target == "prerelease" else prerelease_sha
+        ),
+    )
+    return {
+        **identity,
+        "publish": True,
+        "head_sha": head_sha,
+        "source_sha": source_sha,
+        "base_sha": previous_sha,
+        "main_sha": main_sha,
+        "prerelease_sha": prerelease_sha,
     }
 
 
@@ -251,21 +338,32 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prerelease-ref", default="refs/remotes/origin/prerelease")
     parser.add_argument("--dev-ref", default="refs/remotes/origin/dev")
     parser.add_argument("--github-output", type=Path)
+    parser.add_argument("--merged", action="store_true")
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     try:
-        result = validate_promotion(
-            args.repository.resolve(),
-            target=args.target,
-            head_ref=args.head_ref,
-            base_sha=args.base_sha,
-            main_ref=args.main_ref,
-            prerelease_ref=args.prerelease_ref,
-            dev_ref=args.dev_ref,
-        )
+        if args.merged:
+            result = validate_merged_promotion(
+                args.repository.resolve(),
+                target=args.target,
+                head_ref=args.head_ref,
+                base_sha=args.base_sha,
+                main_ref=args.main_ref,
+                prerelease_ref=args.prerelease_ref,
+            )
+        else:
+            result = validate_promotion(
+                args.repository.resolve(),
+                target=args.target,
+                head_ref=args.head_ref,
+                base_sha=args.base_sha,
+                main_ref=args.main_ref,
+                prerelease_ref=args.prerelease_ref,
+                dev_ref=args.dev_ref,
+            )
     except PromotionError as error:
         raise SystemExit(f"release promotion validation failed: {error}") from error
 
