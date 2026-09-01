@@ -60,7 +60,7 @@ class RepositoryFixture:
         self.git("switch", "dev")
         self.write_version(version, lock_version)
         self.git("add", ".")
-        self.git("commit", "-m", f"prepare {version}")
+        self.git("commit", "--allow-empty", "-m", f"prepare {version}")
         return self.git("rev-parse", "HEAD")
 
     def validate(self, target: str, head_sha: str) -> dict[str, object]:
@@ -160,6 +160,28 @@ class PromotionTests(unittest.TestCase):
         head = self.repository.candidate("1.4.0-beta.1", "1.3.0")
         with self.assertRaisesRegex(PromotionError, "does not match Cargo.lock"):
             self.repository.validate("prerelease", head)
+
+    def test_stable_version_must_strictly_advance_main(self) -> None:
+        for version in ("1.3.0", "1.2.9"):
+            with self.subTest(version=version):
+                head = self.repository.candidate(version)
+                with self.assertRaisesRegex(
+                    PromotionError, f"candidate {version} must advance main from 1.3.0"
+                ):
+                    self.repository.validate("main", head)
+
+    def test_prerelease_version_must_strictly_advance_prerelease(self) -> None:
+        current = self.repository.candidate("1.4.0-beta.2")
+        self.repository.git("branch", "-f", "prerelease", current)
+
+        for version in ("1.4.0-beta.2", "1.4.0-beta.1"):
+            with self.subTest(version=version):
+                head = self.repository.candidate(version)
+                with self.assertRaisesRegex(
+                    PromotionError,
+                    f"candidate {version} must advance prerelease from 1.4.0-beta.2",
+                ):
+                    self.repository.validate("prerelease", head)
 
     def test_stale_target_is_rejected(self) -> None:
         head = self.repository.candidate("1.4.0-beta.1")

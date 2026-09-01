@@ -162,6 +162,12 @@ Run the focused manifest contract tests with:
 python3 scripts/test_release_bundle_manifest.py
 ```
 
+Run the mock-backed draft publication and retry contract tests with:
+
+```bash
+python3 scripts/test_publish_release_assets.py
+```
+
 Dry-run the GitHub release publish step with:
 
 ```bash

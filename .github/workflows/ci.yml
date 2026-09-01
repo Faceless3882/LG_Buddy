@@ -44,6 +44,9 @@ jobs:
       - name: Validate release promotion contract
         run: python3 scripts/test_release_promotion.py
 
+      - name: Validate release publication contract
+        run: python3 scripts/test_publish_release_assets.py
+
       - name: Validate release bundle manifest contract
         run: python3 scripts/test_release_bundle_manifest.py
 
