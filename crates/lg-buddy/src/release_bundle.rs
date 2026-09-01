@@ -60,6 +60,22 @@ pub struct ReleaseIdentity {
 }
 
 impl ReleaseIdentity {
+    pub(crate) fn from_parts(
+        release_tag: impl Into<String>,
+        version: Version,
+        channel: UpdateChannel,
+        target: impl Into<String>,
+        commit: impl Into<String>,
+    ) -> Self {
+        Self {
+            release_tag: release_tag.into(),
+            version,
+            channel,
+            target: target.into(),
+            commit: commit.into(),
+        }
+    }
+
     pub fn release_tag(&self) -> &str {
         &self.release_tag
     }
@@ -202,6 +218,27 @@ pub fn acquire_release_bundle(
     acquire_release_bundle_with(release, &cache_root, &source, &EmbeddedBinaryIdentityReader)
 }
 
+pub(crate) fn resolve_release_identity(
+    release: &ReleaseInfo,
+) -> Result<ReleaseIdentity, BundleAcquisitionError> {
+    let source = UreqGitHubSource::new();
+    resolve_release_with(release, &source).map(|resolved| resolved.identity)
+}
+
+pub(crate) fn verify_release_binary_identity(
+    binary: &Path,
+    expected: &ReleaseIdentity,
+) -> Result<ReleaseIdentity, BundleAcquisitionError> {
+    let observed =
+        read_embedded_binary_identity(binary, expected.target(), expected.release_tag())?;
+    if observed != *expected {
+        return Err(BundleAcquisitionError::Binary(format!(
+            "identity {observed:?} does not match verified release identity {expected:?}"
+        )));
+    }
+    Ok(observed)
+}
+
 fn acquisition_cache_root_from_env() -> Result<PathBuf, BundleAcquisitionError> {
     let base = std::env::var_os("XDG_CACHE_HOME")
         .filter(|value| !value.is_empty())
@@ -221,21 +258,11 @@ fn acquire_release_bundle_with<S: GitHubSource, B: BinaryIdentityReader>(
     source: &S,
     binary_reader: &B,
 ) -> Result<VerifiedReleaseBundle, BundleAcquisitionError> {
-    validate_release_identity(release)?;
     let staging = StagingDirectory::create(cache_root)?;
-    let fresh_release = source.fetch_release_by_tag(release)?;
-    validate_release_identity(&fresh_release)?;
-    if fresh_release.version() != release.version()
-        || fresh_release.channel() != release.channel()
-        || fresh_release.tag_name() != release.tag_name()
-    {
-        return Err(BundleAcquisitionError::ReleaseMetadata(
-            "fresh release-by-tag metadata disagrees with the selected release".to_string(),
-        ));
-    }
+    let resolved = resolve_release_with(release, source)?;
+    let fresh_release = resolved.release;
+    let expected = resolved.identity;
     let selected = select_release_assets(&fresh_release)?;
-    let commit = source.resolve_tag_commit(fresh_release.tag_name())?;
-    validate_commit_sha(&commit).map_err(BundleAcquisitionError::TagResolution)?;
 
     let checksum_path = staging.path.join(CHECKSUM_ASSET_NAME);
     let archive_path = staging.path.join(selected.archive.name());
@@ -259,13 +286,6 @@ fn acquire_release_bundle_with<S: GitHubSource, B: BinaryIdentityReader>(
         )));
     }
 
-    let expected = ReleaseIdentity {
-        release_tag: fresh_release.tag_name().to_string(),
-        version: fresh_release.version().clone(),
-        channel: fresh_release.channel(),
-        target: RELEASE_TARGET.to_string(),
-        commit,
-    };
     let plan = inspect_archive(&archive_download.file, selected.archive.name(), &expected)?;
     let root = extract_archive(&archive_download.file, &staging.path, &plan)?;
     let observed = binary_reader.read_identity(
@@ -284,6 +304,42 @@ fn acquire_release_bundle_with<S: GitHubSource, B: BinaryIdentityReader>(
         root,
         identity: expected,
         _staging: staging,
+    })
+}
+
+struct ResolvedRelease {
+    release: ReleaseInfo,
+    identity: ReleaseIdentity,
+}
+
+fn resolve_release_with<S: GitHubSource>(
+    release: &ReleaseInfo,
+    source: &S,
+) -> Result<ResolvedRelease, BundleAcquisitionError> {
+    validate_release_identity(release)?;
+    let fresh_release = source.fetch_release_by_tag(release)?;
+    validate_release_identity(&fresh_release)?;
+    if fresh_release.version() != release.version()
+        || fresh_release.channel() != release.channel()
+        || fresh_release.tag_name() != release.tag_name()
+    {
+        return Err(BundleAcquisitionError::ReleaseMetadata(
+            "fresh release-by-tag metadata disagrees with the selected release".to_string(),
+        ));
+    }
+    select_release_assets(&fresh_release)?;
+    let commit = source.resolve_tag_commit(fresh_release.tag_name())?;
+    validate_commit_sha(&commit).map_err(BundleAcquisitionError::TagResolution)?;
+    let identity = ReleaseIdentity::from_parts(
+        fresh_release.tag_name(),
+        fresh_release.version().clone(),
+        fresh_release.channel(),
+        RELEASE_TARGET,
+        commit,
+    );
+    Ok(ResolvedRelease {
+        release: fresh_release,
+        identity,
     })
 }
 
@@ -2592,6 +2648,25 @@ mod tests {
         let redirect = request_budget(redirect_remaining);
         assert_eq!(redirect.connect, redirect_remaining);
         assert_eq!(redirect.request, redirect_remaining);
+    }
+
+    #[test]
+    fn release_identity_resolution_validates_metadata_without_downloading_assets() {
+        let identity = stable_identity();
+        let archive_name = format!("lg-buddy-1.4.0-{RELEASE_TARGET}.tar.gz");
+        let source = FakeSource {
+            fresh_release: release_info(vec![
+                release_asset(1, &archive_name, b"archive"),
+                release_asset(2, CHECKSUM_ASSET_NAME, b"checksum"),
+            ]),
+            payloads: HashMap::new(),
+            commit: identity.commit.clone(),
+        };
+
+        let resolved = resolve_release_with(&release_info(Vec::new()), &source)
+            .expect("metadata-only resolution should not download assets");
+
+        assert_eq!(resolved.identity, identity);
     }
 
     #[test]

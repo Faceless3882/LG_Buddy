@@ -31,6 +31,7 @@ const UPDATE_CHECK_CACHE_FILE_NAME: &str = "update-check.json";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UpdatesCommand {
     Check { notify: bool },
+    Install,
     BackgroundCheck,
 }
 
@@ -47,6 +48,7 @@ impl UpdatesCommand {
 
         match subcommand.as_ref() {
             "check" => parse_check_args(args),
+            "install" => parse_no_args("install", UpdatesCommand::Install, args),
             "background-check" => parse_background_check_args(args),
             other => Err(UpdatesParseError::UnknownSubcommand(other.to_string())),
         }
@@ -55,6 +57,7 @@ impl UpdatesCommand {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Check { .. } => "check",
+            Self::Install => "install",
             Self::BackgroundCheck => "background-check",
         }
     }
@@ -62,8 +65,32 @@ impl UpdatesCommand {
     fn notify(&self) -> bool {
         match self {
             Self::Check { notify } => *notify,
+            Self::Install => false,
             Self::BackgroundCheck => true,
         }
+    }
+}
+
+fn parse_no_args<I, S>(
+    subcommand: &'static str,
+    command: UpdatesCommand,
+    args: I,
+) -> Result<UpdatesCommand, UpdatesParseError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let arguments = args
+        .into_iter()
+        .map(|arg| arg.as_ref().to_string())
+        .collect::<Vec<_>>();
+    if arguments.is_empty() {
+        Ok(command)
+    } else {
+        Err(UpdatesParseError::UnexpectedArguments {
+            subcommand,
+            arguments,
+        })
     }
 }
 
@@ -133,7 +160,7 @@ impl fmt::Display for UpdatesParseError {
         match self {
             Self::MissingSubcommand => write!(
                 f,
-                "missing updates command; expected `updates check [--notify]`"
+                "missing updates command; expected `updates check [--notify]` or `updates install`"
             ),
             Self::UnknownSubcommand(subcommand) => {
                 write!(f, "unknown updates command `{subcommand}`")
@@ -352,6 +379,7 @@ pub enum UpdatesError {
     CacheEncode(serde_json::Error),
     Settings(SettingsError),
     SettingsInvariant(String),
+    CommandInvariant(String),
     DeferredFailures(Vec<UpdatesDeferredFailure>),
     Notification(UpdateNotificationError),
     Io(io::Error),
@@ -441,6 +469,7 @@ impl fmt::Display for UpdatesError {
             Self::SettingsInvariant(message) => {
                 write!(f, "invalid update settings metadata: {message}")
             }
+            Self::CommandInvariant(message) => write!(f, "invalid update command: {message}"),
             Self::DeferredFailures(failures) => {
                 write!(f, "update check completed with deferred failure")?;
                 if failures.len() != 1 {
@@ -482,7 +511,8 @@ impl Error for UpdatesError {
             | Self::ResponseTooLarge { .. }
             | Self::NoMatchingRelease { .. }
             | Self::NotModifiedWithoutCache { .. }
-            | Self::SettingsInvariant(_) => None,
+            | Self::SettingsInvariant(_)
+            | Self::CommandInvariant(_) => None,
         }
     }
 }
@@ -829,14 +859,18 @@ impl UpdateCheckResult {
             "up to date"
         };
 
-        format!(
+        let mut output = format!(
             "status: {status}\ncurrent: {} ({})\nlatest: {} ({})\nurl: {}\n",
             self.current_version,
             self.current_channel.as_str(),
             self.latest.version(),
             self.latest.channel().as_str(),
             self.latest.url()
-        )
+        );
+        if self.update_available() {
+            output.push_str("install: lg-buddy updates install\n");
+        }
+        output
     }
 
     fn notification_request(&self) -> Result<UpdateNotificationRequest, UpdateNotificationError> {
@@ -1128,6 +1162,11 @@ pub fn run_updates_command<W: io::Write>(
     command: UpdatesCommand,
     writer: &mut W,
 ) -> Result<(), UpdatesError> {
+    if matches!(command, UpdatesCommand::Install) {
+        return Err(UpdatesError::CommandInvariant(
+            "updates install must use the install orchestrator".to_string(),
+        ));
+    }
     let client = UreqGitHubReleasesClient::default();
     let version = VersionInfo::current();
     let notification_handoff = SessionBusUpdateNotificationHandoff;
@@ -1143,6 +1182,23 @@ pub fn run_updates_command<W: io::Write>(
     };
 
     run_updates_command_with_update_settings(command, writer, context)
+}
+
+pub(crate) fn discover_install_candidate(
+    current: VersionInfo,
+) -> Result<ReleaseInfo, UpdatesError> {
+    let client = UreqGitHubReleasesClient::default();
+    let settings = EnvUpdateSettings::from_env()?;
+    discover_install_candidate_with(current, &client, &settings)
+}
+
+fn discover_install_candidate_with<C: GitHubReleasesClient, U: UpdateSettings>(
+    current: VersionInfo,
+    client: &C,
+    settings: &U,
+) -> Result<ReleaseInfo, UpdatesError> {
+    let channel = settings.channel()?;
+    check_updates(channel, current, client).map(|result| result.latest)
 }
 
 #[cfg(test)]
@@ -1265,7 +1321,6 @@ fn run_updates_command_with_update_settings<
     Ok(())
 }
 
-#[cfg(test)]
 fn check_updates<C: GitHubReleasesClient>(
     channel: UpdateChannel,
     current: VersionInfo,
@@ -1446,16 +1501,16 @@ fn current_unix_seconds() -> u64 {
 mod tests {
     use super::{
         atomic_write_file, check_updates, check_updates_with_cache,
-        evaluate_update_notification_policy, parse_release_version, resolve_update_cache_path,
-        run_updates_command_with, run_updates_command_with_update_settings, CachedReleaseInfo,
-        CachedUpdateCheck, CachedUpdateNotification, DefaultUpdateCacheStore, EnvUpdateSettings,
-        FileUpdateCacheStore, GitHubReleaseResponse, GitHubReleasesClient, ReleaseAsset,
-        ReleaseEndpoint, ReleaseInfo, StaticUpdateSettings, UpdateCachePathError,
-        UpdateCachePathSources, UpdateCacheStore, UpdateChannel, UpdateCheckCache,
-        UpdateNotificationDecision, UpdateNotificationPolicyInput, UpdateNotificationReason,
-        UpdateNotificationSkipReason, UpdateSettings, UpdatesCommand, UpdatesDeferredFailure,
-        UpdatesError, UpdatesRunContext, UreqGitHubReleasesClient, MAX_GITHUB_RESPONSE_BYTES,
-        PRERELEASE_PAGE_SIZE,
+        discover_install_candidate_with, evaluate_update_notification_policy,
+        parse_release_version, resolve_update_cache_path, run_updates_command_with,
+        run_updates_command_with_update_settings, CachedReleaseInfo, CachedUpdateCheck,
+        CachedUpdateNotification, DefaultUpdateCacheStore, EnvUpdateSettings, FileUpdateCacheStore,
+        GitHubReleaseResponse, GitHubReleasesClient, ReleaseAsset, ReleaseEndpoint, ReleaseInfo,
+        StaticUpdateSettings, UpdateCachePathError, UpdateCachePathSources, UpdateCacheStore,
+        UpdateChannel, UpdateCheckCache, UpdateNotificationDecision, UpdateNotificationPolicyInput,
+        UpdateNotificationReason, UpdateNotificationSkipReason, UpdateSettings, UpdatesCommand,
+        UpdatesDeferredFailure, UpdatesError, UpdatesRunContext, UreqGitHubReleasesClient,
+        MAX_GITHUB_RESPONSE_BYTES, PRERELEASE_PAGE_SIZE,
     };
     use crate::session_notifications::{
         UpdateNotificationError, UpdateNotificationHandoff, UpdateNotificationOutcome,
@@ -2327,7 +2382,7 @@ mod tests {
         assert!(result.update_available());
         assert_eq!(
             result.render(),
-            "status: update available\ncurrent: 1.1.0 (stable)\nlatest: 1.1.1 (stable)\nurl: https://github.test/releases/tag/v1.1.1\n"
+            "status: update available\ncurrent: 1.1.0 (stable)\nlatest: 1.1.1 (stable)\nurl: https://github.test/releases/tag/v1.1.1\ninstall: lg-buddy updates install\n"
         );
         assert_eq!(
             client.requests_with_etags(),
@@ -2984,6 +3039,33 @@ mod tests {
     }
 
     #[test]
+    fn install_discovery_uses_saved_channel_and_ignores_automatic_check_gate() {
+        let client = MockGitHubReleasesClient::new(vec![Ok(format!(
+            "[{},{}]",
+            stable_release("v1.1.0"),
+            prerelease("v1.2.0-beta.1")
+        ))]);
+        let update_settings = StaticUpdateSettings::disabled(UpdateChannel::Prerelease);
+
+        let release = discover_install_candidate_with(
+            version_info("1.1.0", ReleaseChannel::Stable),
+            &client,
+            &update_settings,
+        )
+        .expect("install discovery should use the saved prerelease channel");
+
+        assert_eq!(release.version(), &Version::parse("1.2.0-beta.1").unwrap());
+        assert_eq!(release.channel(), UpdateChannel::Prerelease);
+        assert_eq!(
+            client.requests(),
+            vec![(
+                "https://api.example.test/releases?per_page=20".to_string(),
+                "lg-buddy/1.1.0".to_string()
+            )]
+        );
+    }
+
+    #[test]
     fn saved_channel_drives_manual_checks_for_every_binary_identity() {
         for saved_channel in [UpdateChannel::Stable, UpdateChannel::Prerelease] {
             let update_settings = stored_update_settings("disabled", saved_channel);
@@ -3491,7 +3573,7 @@ mod tests {
         assert!(result.update_available());
         assert_eq!(
             result.render(),
-            "status: update available\ncurrent: 1.2.0-beta.1 (prerelease)\nlatest: 1.2.0 (stable)\nurl: https://github.test/releases/tag/v1.2.0\n"
+            "status: update available\ncurrent: 1.2.0-beta.1 (prerelease)\nlatest: 1.2.0 (stable)\nurl: https://github.test/releases/tag/v1.2.0\ninstall: lg-buddy updates install\n"
         );
     }
 

@@ -231,12 +231,21 @@ lg-buddy updates check
 lg-buddy updates check --notify
 lg-buddy settings set updates.channel prerelease
 lg-buddy updates check
+lg-buddy updates install
 ```
 
 The saved `updates.channel` setting controls every check, regardless of the
 installed binary's own release channel. `stable` checks stable releases only;
 `prerelease` considers both stable and prerelease releases and selects the
 highest semantic version.
+
+`updates install` is an assisted, foreground upgrade. It checks whether the
+current host and installation are safely upgradeable before discovery, shows
+the current and target version/channel/commit, and requires you to type `yes`
+in a terminal before downloading the release bundle. It then verifies the
+bundle, reruns preflight from the candidate, invokes `install.sh --upgrade`,
+and verifies the installed release identity. It does not accept channel or
+version arguments, downgrade, migrate legacy installations, or run unattended.
 
 `--notify` sends a desktop notification through the running user service. When
 supported by the desktop, the notification includes actions to open the release
@@ -251,7 +260,8 @@ lg-buddy settings set updates.auto_check enabled
 lg-buddy settings set updates.channel prerelease
 ```
 
-Disabling automatic checks does not disable manual `updates check` commands.
+Disabling automatic checks does not disable manual `updates check` or
+`updates install` commands. Both use the saved `updates.channel` setting.
 
 ## Technical References
 
