@@ -51,8 +51,9 @@ There is no separate version input.
    smoke-tests the merged release commit without write credentials, including
    an archive-driven upgrade from the pinned public baseline.
 6. The final job obtains a short-lived token from the dedicated repository-only
-   GitHub App, aligns the remaining release streams, publishes the immutable tag
-   and release, and verifies the published checksums.
+   GitHub App, aligns the remaining release streams, creates or resumes a draft,
+   verifies its complete asset set, and publishes it. Repository release
+   immutability then locks the tag and assets.
 7. A published prerelease then runs `v1.4.0-beta.2` through the real production
    `lg-buddy updates install` path. The canary records sanitized GitHub response
    evidence for the deterministic mock. Stable promotion remains blocked until
@@ -60,8 +61,17 @@ There is no separate version input.
 
 Do not push version tags manually. Protected `v*` tags and stream-alignment
 writes permit bypass only to the dedicated release App. A failed post-merge
-release run can be rerun safely, but an existing tag or asset is accepted only
-when it is byte-for-byte consistent with the merged release commit.
+release run can be rerun safely: an incomplete draft remains private and is
+resumed only when its tag, classification, and existing assets match the merged
+release commit. A published release is accepted only when its expected asset set
+is complete and byte-for-byte identical.
+
+Repository release immutability must remain enabled. GitHub applies it only when
+a draft is published, so the publisher uploads and verifies every expected asset
+before making the release visible. Each stored asset must report the expected
+name, uploaded state, byte size, and server-computed SHA-256 digest. Unexpected
+draft assets block publication; published releases are verification-only and are
+never repaired in place.
 
 ## What the release workflow validates
 
@@ -77,7 +87,8 @@ The workflow:
    preserved user state plus replaced owned integration files.
 7. Generates and verifies `sha256sums.txt`.
 8. Keeps `main`, `prerelease`, and `dev` aligned for the next promotion.
-9. Publishes the tag and GitHub release without replacing conflicting assets.
+9. Stages the exact release assets privately, then publishes them together under
+   the repository's immutable-release policy.
 10. Downloads the published assets and verifies their checksums independently.
 11. For prereleases, exercises production GitHub discovery, acquisition,
     confirmation, installation, and final identity from the pinned baseline.
