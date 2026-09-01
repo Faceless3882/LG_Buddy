@@ -83,6 +83,9 @@ This is the place for integration tests and contract tests.
 - logind lifecycle and NetworkManager gate behavior against a private system-bus
   harness
 - desktop and auxiliary gamepad activity resetting one LG Buddy-owned deadline
+- update-install orchestration ordering against an injected runtime, including
+  refusal, decline, concurrent acquisition, candidate preflight, installer,
+  identity mismatch, cleanup, and success paths
 
 ### How to test it
 

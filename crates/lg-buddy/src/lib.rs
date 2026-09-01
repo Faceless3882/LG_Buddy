@@ -19,6 +19,7 @@ pub mod settings;
 pub mod sources;
 pub mod state;
 pub mod tv;
+pub mod update_install;
 pub mod updates;
 pub mod upgrade_preflight;
 pub mod version;
@@ -47,6 +48,7 @@ use crate::tv::{
     OledBrightness, OledBrightnessParseError, TvClientBuildError, VolumeLevel,
     VolumeLevelParseError,
 };
+use crate::update_install::{run_update_install, UpdateInstallError};
 use crate::updates::{run_updates_command, UpdatesCommand, UpdatesError, UpdatesParseError};
 use crate::upgrade_preflight::CompatibilityReport;
 use std::fmt;
@@ -140,12 +142,14 @@ impl SettingsHelpTopic {
 pub enum UpdatesHelpTopic {
     Root,
     Check,
+    Install,
 }
 
 impl UpdatesHelpTopic {
     fn from_subcommand(subcommand: &str) -> Option<Self> {
         match subcommand {
             "check" => Some(Self::Check),
+            "install" => Some(Self::Install),
             _ => None,
         }
     }
@@ -291,6 +295,7 @@ pub enum RunError {
     Dev(DevError),
     Settings(SettingsError),
     Updates(UpdatesError),
+    UpdateInstall(UpdateInstallError),
     UpgradePreflight(CompatibilityReport),
     NotificationAfterPrimary {
         primary: Box<RunError>,
@@ -312,6 +317,7 @@ impl fmt::Display for RunError {
             Self::Dev(err) => write!(f, "{err}"),
             Self::Settings(err) => write!(f, "{err}"),
             Self::Updates(err) => write!(f, "{err}"),
+            Self::UpdateInstall(err) => write!(f, "{err}"),
             Self::UpgradePreflight(report) => write!(f, "{report}"),
             Self::NotificationAfterPrimary {
                 primary,
@@ -338,6 +344,7 @@ impl std::error::Error for RunError {
             Self::Dev(err) => Some(err),
             Self::Settings(err) => Some(err),
             Self::Updates(err) => Some(err),
+            Self::UpdateInstall(err) => Some(err),
             Self::UpgradePreflight(_) => None,
             Self::NotificationAfterPrimary { primary, .. } => Some(primary.as_ref()),
         }
@@ -483,7 +490,7 @@ Commands:
   screen off      Blank the configured TV output if active
   screen on       Restore the TV output after an LG Buddy screen blank
   settings        Inspect and edit structured LG Buddy settings
-  updates         Check for LG Buddy releases
+  updates         Check for and install LG Buddy releases
   help [COMMAND...]
                   Show global or scoped command help
 
@@ -496,6 +503,7 @@ Settings:
 
 Updates:
   updates check [--notify]
+  updates install
 "
     )
 }
@@ -637,14 +645,16 @@ pub fn updates_usage(program: &str, topic: UpdatesHelpTopic) -> String {
     match topic {
         UpdatesHelpTopic::Root => format!(
             "\
-LG Buddy update checks
+LG Buddy updates
 
 Usage:
   {program} updates check [--notify]
+  {program} updates install
   {program} updates --help
 
 Commands:
   check           Check GitHub releases for an available update
+  install         Interactively verify and install an available update
 "
         ),
         UpdatesHelpTopic::Check => format!(
@@ -656,6 +666,17 @@ Usage:
 
 Options:
   --notify        Request a desktop notification when an update is available
+"
+        ),
+        UpdatesHelpTopic::Install => format!(
+            "\
+LG Buddy update installation
+
+Usage:
+  {program} updates install
+
+Installs the next release from the saved updates.channel after host checks and
+explicit confirmation. Channel and version arguments are not accepted.
 "
         ),
     }
@@ -798,6 +819,9 @@ pub fn run_command<W: Write>(command: Command, writer: &mut W) -> Result<(), Run
         Command::Settings(command) => {
             run_settings_command(command, writer).map_err(RunError::Settings)
         }
+        Command::Updates(UpdatesCommand::Install) => {
+            run_update_install(writer).map_err(RunError::UpdateInstall)
+        }
         Command::Updates(command) => {
             run_updates_command(command, writer).map_err(RunError::Updates)
         }
@@ -909,10 +933,10 @@ where
                     ))
                 }),
             [subcommand, arguments @ ..] => {
-                if UpdatesHelpTopic::from_subcommand(subcommand).is_some() {
+                if let Some(topic) = UpdatesHelpTopic::from_subcommand(subcommand) {
                     Err(ParseError::Updates(
                         UpdatesParseError::UnexpectedArguments {
-                            subcommand: "check",
+                            subcommand: updates_help_subcommand(topic),
                             arguments: arguments.to_vec(),
                         },
                     ))
@@ -924,6 +948,14 @@ where
             }
         },
         other => Err(ParseError::UnknownCommand(other.to_string())),
+    }
+}
+
+fn updates_help_subcommand(topic: UpdatesHelpTopic) -> &'static str {
+    match topic {
+        UpdatesHelpTopic::Root => "updates",
+        UpdatesHelpTopic::Check => "check",
+        UpdatesHelpTopic::Install => "install",
     }
 }
 
@@ -992,14 +1024,13 @@ where
         )));
     }
 
-    if UpdatesHelpTopic::from_subcommand(subcommand).is_some()
-        && arguments[1..]
+    if let Some(topic) = UpdatesHelpTopic::from_subcommand(subcommand) {
+        if arguments[1..]
             .iter()
             .any(|argument| matches!(argument.as_str(), "-h" | "--help"))
-    {
-        return Ok(ParseOutcome::Help(HelpTopic::Updates(
-            UpdatesHelpTopic::Check,
-        )));
+        {
+            return Ok(ParseOutcome::Help(HelpTopic::Updates(topic)));
+        }
     }
 
     UpdatesCommand::parse(arguments)
@@ -1365,6 +1396,12 @@ mod tests {
             )))
         );
         assert_eq!(
+            parse_args(["help", "updates", "install"]),
+            Ok(ParseOutcome::Help(HelpTopic::Updates(
+                UpdatesHelpTopic::Install
+            )))
+        );
+        assert_eq!(
             parse_args(["updates", "--help"]),
             Ok(ParseOutcome::Help(HelpTopic::Updates(
                 UpdatesHelpTopic::Root
@@ -1374,6 +1411,12 @@ mod tests {
             parse_args(["updates", "check", "--help"]),
             Ok(ParseOutcome::Help(HelpTopic::Updates(
                 UpdatesHelpTopic::Check
+            )))
+        );
+        assert_eq!(
+            parse_args(["updates", "install", "--help"]),
+            Ok(ParseOutcome::Help(HelpTopic::Updates(
+                UpdatesHelpTopic::Install
             )))
         );
     }
@@ -1601,6 +1644,12 @@ mod tests {
             parse_args(["updates", "check", "--notify"]),
             Ok(ParseOutcome::Command(Command::Updates(
                 UpdatesCommand::Check { notify: true }
+            )))
+        );
+        assert_eq!(
+            parse_args(["updates", "install"]),
+            Ok(ParseOutcome::Command(Command::Updates(
+                UpdatesCommand::Install
             )))
         );
         assert_eq!(
@@ -1887,6 +1936,18 @@ mod tests {
                 }
             ))
         );
+        let error = parse_args(["updates", "install", "stable"]).unwrap_err();
+        assert_eq!(
+            error,
+            ParseError::Updates(UpdatesParseError::UnexpectedArguments {
+                subcommand: "install",
+                arguments: vec!["stable".to_string()]
+            })
+        );
+        assert_eq!(
+            error.help_topic(),
+            HelpTopic::Updates(UpdatesHelpTopic::Install)
+        );
         assert_eq!(
             parse_args(["updates", "check", "--notify", "--notify"]),
             Err(ParseError::Updates(UpdatesParseError::DuplicateNotify))
@@ -2050,6 +2111,7 @@ mod tests {
     fn updates_usage_is_scoped_and_hides_the_timer_entrypoint() {
         let root = updates_usage("lg-buddy", UpdatesHelpTopic::Root);
         assert!(root.contains("lg-buddy updates check [--notify]"));
+        assert!(root.contains("lg-buddy updates install"));
         assert!(!root.contains("--channel"));
         assert!(!root.contains("background-check"));
 
@@ -2057,6 +2119,11 @@ mod tests {
         assert!(!check.contains("--channel"));
         assert!(check.contains("--notify"));
         assert!(!check.contains("background-check"));
+
+        let install = updates_usage("lg-buddy", UpdatesHelpTopic::Install);
+        assert!(install.contains("lg-buddy updates install"));
+        assert!(install.contains("saved updates.channel"));
+        assert!(!install.contains("--channel"));
     }
 
     #[test]

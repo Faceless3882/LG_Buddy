@@ -388,6 +388,7 @@ The intended public user-action surface is:
 - `settings set <KEY> <VALUE>`
 - `settings unset <KEY>`
 - `updates check [--notify]`
+- `updates install`
 
 The binary also retains package-owned and compatibility entrypoints during the
 public-surface migration:
@@ -410,11 +411,16 @@ the runtime command handlers in `commands.rs` and `session/runner.rs`.
 modules and delegates platform ingestion to `sources/`. The on-demand
 `updates check` command reads the saved `updates.channel` policy and consumes
 the GitHub Releases API without entering the screen, lifecycle, or scheduling
-paths. `updates background-check` is the timer-owned wrapper: it exits before
-GitHub/cache work when `updates.auto_check` is disabled and otherwise delegates
-to the same settings-driven check path with notification intent enabled. When
-notification is
-requested and an update is available, the one-shot CLI process hands the
+paths. `updates install` adds the user-confirmed upgrade orchestration: initial
+host preflight, fresh settings-driven discovery, target identity resolution,
+explicit terminal confirmation, verified bundle acquisition, candidate
+preflight, direct `install.sh --upgrade` execution, and installed identity
+verification. The verified bundle and acquisition lock remain owned until the
+installer and final verification finish. `updates background-check` is the
+timer-owned wrapper: it exits before GitHub/cache work when
+`updates.auto_check` is disabled and otherwise delegates to the same
+settings-driven check path with notification intent enabled. When notification
+is requested and an update is available, the one-shot CLI process hands the
 resolved update facts to the LG Buddy-owned user-session D-Bus surface. The
 running session process then owns desktop notification dispatch, notification
 ids, the `View Release` action, and the notification opt-out action. The

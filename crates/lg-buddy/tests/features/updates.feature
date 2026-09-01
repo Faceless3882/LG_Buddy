@@ -1,10 +1,11 @@
 Feature: Updates CLI
-  LG Buddy should expose manual update checks without advertising its timer entrypoint.
+  LG Buddy should expose manual checks and assisted installation without advertising its timer entrypoint.
 
   Scenario: Updates help describes the public check command
     When I run the command "updates --help"
     Then the command succeeds
     And stdout contains "updates check [--notify]"
+    And stdout contains "updates install"
     And stdout does not contain "--channel"
     And stdout does not contain "background-check"
 
@@ -27,10 +28,26 @@ Feature: Updates CLI
     And stderr contains "updates check [--notify]"
     And stderr does not contain "background-check"
 
+  Scenario: Updates install has scoped help and accepts no target arguments
+    When I run the command "updates install --help"
+    Then the command succeeds
+    And stdout contains "updates install"
+    And stdout contains "saved updates.channel"
+    And stdout does not contain "--channel"
+    When I run the command "help updates install"
+    Then the command succeeds
+    And stdout contains "updates install"
+    When I run the command "updates install 1.5.0"
+    Then the command fails
+    And the command exits with status 2
+    And stderr contains "unexpected arguments for `updates install`: 1.5.0"
+    And stderr contains "updates install"
+
   Scenario: Global help hides the timer entrypoint
     When I run the command "--help"
     Then the command succeeds
     And stdout contains "updates check [--notify]"
+    And stdout contains "updates install"
     And stdout does not contain "updates background-check"
 
   Scenario: The hidden background check entrypoint remains operational

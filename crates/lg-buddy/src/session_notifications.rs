@@ -154,7 +154,7 @@ impl UpdateNotificationRequest {
         let mut notification = Notification::new(
             "LG Buddy update available",
             format!(
-                "LG Buddy {} ({}) is available.\nCurrent: {} ({})\n{}",
+                "LG Buddy {} ({}) is available.\nCurrent: {} ({})\nInstall: lg-buddy updates install\n{}",
                 self.latest_version,
                 self.latest_channel.as_str(),
                 self.current_version,
@@ -1389,6 +1389,12 @@ mod tests {
         assert_eq!(notifications[0].actions[0].label, "Never Notify Again");
         assert_eq!(notifications[0].actions[1].key, VIEW_RELEASE_ACTION_KEY);
         assert_eq!(notifications[0].actions[1].label, "View Release");
+        assert!(notifications[0]
+            .body
+            .contains("Install: lg-buddy updates install"));
+        assert!(notifications[0]
+            .body
+            .contains("https://github.test/releases/tag/v1.1.1"));
         assert_eq!(dispatcher.pending_len(), 1);
     }
 

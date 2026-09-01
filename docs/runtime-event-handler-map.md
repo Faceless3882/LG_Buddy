@@ -44,6 +44,7 @@ the shared native-session path.
 | manual screen blank | `lg-buddy screen off` | `commands` -> `screen` | Blank or power off the TV if LG Buddy owns the configured input. |
 | manual screen restore | `lg-buddy screen on` | `commands` -> `screen` | Restore the screen when marker and restore-policy rules allow it. |
 | manual update check | `lg-buddy updates check` | `updates` -> saved channel policy -> GitHub releases API | Check for an available release independently of the automatic update-check setting. |
+| user-confirmed update install | `lg-buddy updates install` | `update_install` -> host preflight -> release verification -> candidate preflight -> `install.sh --upgrade` -> installed identity verification | Install only a newer release from the saved channel after explicit terminal confirmation. |
 | user update-check timer | `lg-buddy updates background-check` | `updates` -> saved channel policy -> GitHub releases API -> session notification handoff | Check for updates when automatic checks are enabled and notify once per release. |
 
 Compatibility command surfaces still exist for direct/manual invocation:

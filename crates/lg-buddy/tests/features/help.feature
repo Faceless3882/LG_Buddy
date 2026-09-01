@@ -22,6 +22,7 @@ Feature: Public CLI help
     And stdout contains "settings set <KEY> <VALUE>"
     And stdout contains "settings unset <KEY>"
     And stdout contains "updates check [--notify]"
+    And stdout contains "updates install"
     And stdout contains "help [COMMAND...]"
     And stdout contains "--help, -h"
     And stdout contains "--version, -V"

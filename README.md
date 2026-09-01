@@ -95,9 +95,11 @@ during setup. With the default `bscpylgtv` platform, the prompt may instead
 appear on first use; see the
 [bscpylgtv first-use guide](https://github.com/chros73/bscpylgtv/blob/master/docs/guides/first_use.md).
 
-To update an existing compatible release-bundle installation from an already
-verified and extracted newer bundle, run `./install.sh --upgrade`. Upgrade mode
-preserves configuration and credentials and does not repeat setup or pairing;
+To check, verify, and install the next release from your saved update channel,
+run `lg-buddy updates install` as your regular user. It checks host
+compatibility, shows the exact target identity, asks for explicit confirmation,
+and then runs the verified bundle's upgrade installer. Upgrade mode preserves
+configuration and credentials and does not repeat setup or pairing;
 incompatible and legacy layouts are refused rather than migrated.
 
 The shell installer targets conventional Linux installations with mutable
@@ -123,6 +125,7 @@ lg-buddy volume mute
 lg-buddy settings list
 lg-buddy settings describe screen.backend
 lg-buddy updates check
+lg-buddy updates install
 lg-buddy --version
 ```
 
