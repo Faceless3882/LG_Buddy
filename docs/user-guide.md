@@ -247,6 +247,10 @@ bundle, reruns preflight from the candidate, invokes `install.sh --upgrade`,
 and verifies the installed release identity. It does not accept channel or
 version arguments, downgrade, migrate legacy installations, or run unattended.
 
+`v1.4.0-beta.2` is the first release that contains `updates install`. Older
+installations require one normal manual installation of an updater-capable
+release before this assisted path is available.
+
 `--notify` sends a desktop notification through the running user service. When
 supported by the desktop, the notification includes actions to open the release
 or disable future automatic notifications. LG Buddy does not repeatedly notify

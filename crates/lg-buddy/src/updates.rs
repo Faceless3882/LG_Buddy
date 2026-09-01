@@ -2324,6 +2324,44 @@ mod tests {
     }
 
     #[test]
+    fn observed_beta_2_response_is_replayed_as_the_upgrade_baseline() {
+        // Reduced to the fields consumed by GitHubRelease from the production
+        // response recorded in https://github.com/Staphylococcus/LG_Buddy/issues/99.
+        let body = include_str!("../testdata/github/releases-v1.4.0-beta.2.json");
+        let client = MockGitHubReleasesClient::new(vec![Ok(body.to_string())]);
+        let release = discover_install_candidate_with(
+            version_info("1.4.0-beta.1", ReleaseChannel::Prerelease),
+            &client,
+            &StaticUpdateSettings::enabled(UpdateChannel::Prerelease),
+        )
+        .expect("observed prerelease response should select beta.2");
+
+        assert_eq!(release.version(), &Version::parse("1.4.0-beta.2").unwrap());
+        assert_eq!(release.channel(), UpdateChannel::Prerelease);
+        assert_eq!(release.tag_name(), "v1.4.0-beta.2");
+        assert_eq!(release.assets().len(), 2);
+        let archive = &release.assets()[0];
+        assert_eq!(archive.id(), 539980839);
+        assert_eq!(archive.size(), 3_051_471);
+        assert_eq!(
+            archive.digest(),
+            Some("sha256:883e6cb869cbe60988a195acac2e15864d904797edfefbb7d90052eff9a17d32")
+        );
+        assert_eq!(
+            archive.api_url(),
+            "https://api.github.com/repos/Staphylococcus/LG_Buddy/releases/assets/539980839"
+        );
+        assert_eq!(
+            archive.download_url(),
+            "https://github.com/Staphylococcus/LG_Buddy/releases/download/v1.4.0-beta.2/lg-buddy-1.4.0-beta.2-x86_64-unknown-linux-musl.tar.gz"
+        );
+        let checksums = &release.assets()[1];
+        assert_eq!(checksums.id(), 539980872);
+        assert_eq!(checksums.name(), "sha256sums.txt");
+        assert_eq!(checksums.size(), 123);
+    }
+
+    #[test]
     fn ureq_client_rejects_oversized_release_metadata() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind local test server");
         let address = listener.local_addr().expect("read local test address");

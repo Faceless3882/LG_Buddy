@@ -85,7 +85,7 @@ jobs:
           python-version: "3.x"
 
       - name: Install release prerequisites
-        run: sudo apt-get update && sudo apt-get install -y musl-tools zenity
+        run: sudo apt-get update && sudo apt-get install -y musl-tools strace zenity
 
       - name: Build lg-buddy
         env:
@@ -106,6 +106,30 @@ jobs:
               --expected-channel "${{ needs.validate.outputs.channel }}" \
               --expected-target x86_64-unknown-linux-musl \
               --expected-commit "${{ needs.validate.outputs.head_sha }}"
+
+      - name: Download pinned cross-version baseline
+        run: |
+          curl --fail --silent --show-error --location \
+              --proto '=https' --tlsv1.2 \
+              --output "$RUNNER_TEMP/lg-buddy-1.4.0-beta.2-x86_64-unknown-linux-musl.tar.gz" \
+              https://github.com/Staphylococcus/LG_Buddy/releases/download/v1.4.0-beta.2/lg-buddy-1.4.0-beta.2-x86_64-unknown-linux-musl.tar.gz
+
+      - name: Smoke test cross-version upgrade
+        run: |
+          ./scripts/test-cross-version-upgrade.sh \
+              --previous-archive "$RUNNER_TEMP/lg-buddy-1.4.0-beta.2-x86_64-unknown-linux-musl.tar.gz" \
+              --previous-sha256 883e6cb869cbe60988a195acac2e15864d904797edfefbb7d90052eff9a17d32 \
+              --previous-tag v1.4.0-beta.2 \
+              --previous-version 1.4.0-beta.2 \
+              --previous-channel prerelease \
+              --previous-target x86_64-unknown-linux-musl \
+              --previous-commit 77c8f46c66b9e385f3d90c15dee33d775639bbeb \
+              --candidate-archive "dist/lg-buddy-${{ needs.validate.outputs.version }}-x86_64-unknown-linux-musl.tar.gz" \
+              --candidate-tag "${{ needs.validate.outputs.tag }}" \
+              --candidate-version "${{ needs.validate.outputs.version }}" \
+              --candidate-channel "${{ needs.validate.outputs.channel }}" \
+              --candidate-target x86_64-unknown-linux-musl \
+              --candidate-commit "${{ needs.validate.outputs.head_sha }}"
 
       - name: Generate checksums
         run: |
@@ -239,3 +263,71 @@ jobs:
           verify_dir="$(mktemp -d)"
           gh release download "$RELEASE_TAG" --dir "$verify_dir"
           (cd "$verify_dir" && sha256sum -c sha256sums.txt)
+
+  production-prerelease-canary:
+    name: production-prerelease-canary
+    if: needs.validate.outputs.publish == 'true' && needs.validate.outputs.channel == 'prerelease'
+    runs-on: ubuntu-latest
+    needs:
+      - validate
+      - publish
+
+    steps:
+      - name: Check out published prerelease
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.head_sha }}
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install canary prerequisites
+        run: sudo apt-get update && sudo apt-get install -y python3-venv util-linux zenity
+
+      - name: Download pinned updater-capable baseline
+        run: |
+          curl --fail --silent --show-error --location \
+              --proto '=https' --tlsv1.2 \
+              --output "$RUNNER_TEMP/lg-buddy-1.4.0-beta.2-x86_64-unknown-linux-musl.tar.gz" \
+              https://github.com/Staphylococcus/LG_Buddy/releases/download/v1.4.0-beta.2/lg-buddy-1.4.0-beta.2-x86_64-unknown-linux-musl.tar.gz
+
+      - name: Exercise production GitHub upgrade path
+        run: |
+          ./scripts/test-production-upgrade-canary.sh \
+              --work-dir "$RUNNER_TEMP/production-canary" \
+              --previous-archive "$RUNNER_TEMP/lg-buddy-1.4.0-beta.2-x86_64-unknown-linux-musl.tar.gz" \
+              --previous-sha256 883e6cb869cbe60988a195acac2e15864d904797edfefbb7d90052eff9a17d32 \
+              --previous-tag v1.4.0-beta.2 \
+              --previous-version 1.4.0-beta.2 \
+              --previous-channel prerelease \
+              --previous-target x86_64-unknown-linux-musl \
+              --previous-commit 77c8f46c66b9e385f3d90c15dee33d775639bbeb \
+              --expected-tag "${{ needs.validate.outputs.tag }}" \
+              --expected-version "${{ needs.validate.outputs.version }}" \
+              --expected-channel prerelease \
+              --expected-target x86_64-unknown-linux-musl \
+              --expected-commit "${{ needs.validate.outputs.head_sha }}"
+
+      - name: Record sanitized production GitHub responses
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/record_github_release_responses.py \
+              --repository "$GITHUB_REPOSITORY" \
+              --tag "${{ needs.validate.outputs.tag }}" \
+              --output "$RUNNER_TEMP/production-canary/github-responses.json"
+
+      - name: Upload canary evidence for the offline mock
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-upgrade-canary-${{ needs.validate.outputs.tag }}
+          path: |
+            ${{ runner.temp }}/production-canary/production-upgrade-canary.output
+            ${{ runner.temp }}/production-canary/github-responses.json
+          if-no-files-found: warn
+          retention-days: 30
