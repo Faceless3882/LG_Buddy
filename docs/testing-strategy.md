@@ -355,11 +355,13 @@ candidate-owned file replacement, service action order, and final identity.
 
 After a prerelease is public, `production-prerelease-canary` installs the same
 baseline and drives its real `updates install` command through a PTY against
-GitHub. The canary records a sanitized release list, release-by-tag response,
-tag ref, and asset redirects as a workflow artifact. Signed redirect queries
-and URL userinfo are never retained. The observed beta.2 release-list fields
-also live in `crates/lg-buddy/testdata/github/` and are replayed by the normal
-offline Rust suite. A successful canary on the exact prerelease commit is a
+GitHub. It then clears the update cache and proves that the newly installed
+candidate sees itself as GitHub's newest published release. The canary records
+that sanitized newest-release response, the release-by-tag response, tag ref,
+and asset redirects as a workflow artifact. Signed redirect queries and URL
+userinfo are never retained. The observed beta.2 newest-release fields also
+live in `crates/lg-buddy/testdata/github/` and are replayed by the normal offline
+Rust suite. A successful canary on the exact prerelease commit is a
 stable-promotion prerequisite.
 
 ## Current Practical Gaps

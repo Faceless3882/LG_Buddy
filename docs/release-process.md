@@ -38,6 +38,11 @@ Required promotion checks prove that:
 - a stable promotion has a successful production upgrade canary on the exact
   prerelease commit
 
+Requiring every candidate to advance both release-channel heads keeps release
+publication globally monotonic. The newest published release is therefore also
+the highest semantic version and prerelease-channel clients do not scan release
+history to determine ordering.
+
 The tag, binary, archive, and GitHub release all use the Cargo package version.
 There is no separate version input.
 
@@ -55,9 +60,10 @@ There is no separate version input.
    verifies its complete asset set, and publishes it. Repository release
    immutability then locks the tag and assets.
 7. A published prerelease then runs `v1.4.0-beta.2` through the real production
-   `lg-buddy updates install` path. The canary records sanitized GitHub response
-   evidence for the deterministic mock. Stable promotion remains blocked until
-   this exact prerelease commit has a successful canary.
+   `lg-buddy updates install` path. The newly installed candidate performs a
+   cold-cache production update check, and the canary records sanitized GitHub
+   response evidence for the deterministic mock. Stable promotion remains
+   blocked until this exact prerelease commit has a successful canary.
 
 Do not push version tags manually. Protected `v*` tags and stream-alignment
 writes permit bypass only to the dedicated release App. A failed post-merge

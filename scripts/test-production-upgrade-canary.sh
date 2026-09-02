@@ -209,4 +209,18 @@ cmp -s "$TOKEN_SNAPSHOT" "$NATIVE_TOKEN_FILE" || fail "Production upgrade change
 [ -e "$VENV_MARKER" ] || fail "Production native upgrade recreated the Python environment."
 "$INSTALLED_BINARY" settings get updates.channel | grep -q '^prerelease$'
 
+CANDIDATE_CHECK_OUTPUT="$WORK_DIR/candidate-update-check.output"
+UPDATE_CACHE_FILE="$XDG_CACHE_HOME/lg-buddy/update-check.json"
+rm -f "$UPDATE_CACHE_FILE"
+"$INSTALLED_BINARY" updates check >"$CANDIDATE_CHECK_OUTPUT"
+grep -F -q "status: up to date" "$CANDIDATE_CHECK_OUTPUT"
+grep -F -q "current: $EXPECTED_VERSION ($EXPECTED_CHANNEL)" "$CANDIDATE_CHECK_OUTPUT"
+grep -F -q "latest: $EXPECTED_VERSION ($EXPECTED_CHANNEL)" "$CANDIDATE_CHECK_OUTPUT"
+grep -F -q "url: https://github.com/Staphylococcus/LG_Buddy/releases/tag/$EXPECTED_TAG" "$CANDIDATE_CHECK_OUTPUT"
+{
+    echo
+    echo "Published candidate update check:"
+    cat "$CANDIDATE_CHECK_OUTPUT"
+} >>"$CANARY_OUTPUT"
+
 echo "Production GitHub upgrade canary passed: $PREVIOUS_VERSION -> $EXPECTED_VERSION"

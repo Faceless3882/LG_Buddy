@@ -103,7 +103,9 @@ class GitHubRecorder:
         except urllib.error.HTTPError as error:
             response = error
         body = response.read()
-        response_headers = {key.lower(): value for key, value in response.headers.items()}
+        response_headers = {
+            key.lower(): value for key, value in response.headers.items()
+        }
         parsed: Any = None
         if body:
             content_type = response_headers.get("content-type", "")
@@ -151,8 +153,15 @@ def record_responses(
     )
     encoded_tag = urllib.parse.quote(tag, safe="")
     releases, releases_response = recorder.api_json(
-        f"repos/{encoded_repository}/releases?per_page=20"
+        f"repos/{encoded_repository}/releases?per_page=1"
     )
+    latest_release = (
+        releases[0] if isinstance(releases, list) and len(releases) == 1 else None
+    )
+    if not isinstance(latest_release, dict) or latest_release.get("tag_name") != tag:
+        raise RuntimeError(
+            f"newly published release {tag} is not GitHub's newest release"
+        )
     release, release_response = recorder.api_json(
         f"repos/{encoded_repository}/releases/tags/{encoded_tag}"
     )
@@ -166,7 +175,9 @@ def record_responses(
         "sha256sums.txt",
     }
     selected_assets = [
-        asset for asset in release.get("assets", []) if asset.get("name") in expected_assets
+        asset
+        for asset in release.get("assets", [])
+        if asset.get("name") in expected_assets
     ]
     if {asset.get("name") for asset in selected_assets} != expected_assets:
         raise RuntimeError(f"release {tag} does not expose the expected upgrade assets")

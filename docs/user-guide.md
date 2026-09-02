@@ -236,8 +236,9 @@ lg-buddy updates install
 
 The saved `updates.channel` setting controls every check, regardless of the
 installed binary's own release channel. `stable` checks stable releases only;
-`prerelease` considers both stable and prerelease releases and selects the
-highest semantic version.
+`prerelease` accepts GitHub's newest published stable or prerelease. Release
+promotion requires every version to advance both release-channel heads, so the
+newest published release is also the highest semantic version.
 
 `updates install` is an assisted, foreground upgrade. It checks whether the
 current host and installation are safely upgradeable before discovery, shows
