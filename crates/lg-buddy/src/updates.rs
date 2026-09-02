@@ -2,6 +2,8 @@ use std::error::Error;
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
+#[cfg(unix)]
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -1084,18 +1086,19 @@ impl UpdateCacheStore for FileUpdateCacheStore {
 fn atomic_write_file(path: &Path, contents: &[u8]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)?;
+            ensure_cache_parent(parent)?;
         }
     }
 
     let mut last_error = None;
     for attempt in 0..100 {
         let temp_path = atomic_temp_path(path, attempt);
-        let mut file = match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp_path)
-        {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+
+        let mut file = match options.open(&temp_path) {
             Ok(file) => file,
             Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
                 last_error = Some(err);
@@ -1126,6 +1129,49 @@ fn atomic_write_file(path: &Path, contents: &[u8]) -> io::Result<()> {
             "could not create unique update cache temporary file",
         )
     }))
+}
+
+#[cfg(unix)]
+fn ensure_cache_parent(parent: &Path) -> io::Result<()> {
+    let mut current = PathBuf::new();
+    for component in parent.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_dir() => {}
+            Ok(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotADirectory,
+                    format!(
+                        "cache path component `{}` is not a directory",
+                        current.display()
+                    ),
+                ))
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                match fs::DirBuilder::new().mode(0o700).create(&current) {
+                    Ok(()) => {}
+                    Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
+                    Err(err) => return Err(err),
+                }
+                if !fs::symlink_metadata(&current)?.file_type().is_dir() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotADirectory,
+                        format!(
+                            "cache path component `{}` is not a directory",
+                            current.display()
+                        ),
+                    ));
+                }
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_cache_parent(parent: &Path) -> io::Result<()> {
+    fs::create_dir_all(parent)
 }
 
 fn atomic_temp_path(path: &Path, attempt: u8) -> PathBuf {
@@ -1520,6 +1566,8 @@ mod tests {
     use std::fs;
     use std::io::{self, Read, Write};
     use std::net::TcpListener;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
     use std::process;
     use std::sync::{
@@ -1970,6 +2018,27 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
+    #[cfg(unix)]
+    struct UmaskGuard {
+        previous: libc::mode_t,
+    }
+
+    #[cfg(unix)]
+    impl UmaskGuard {
+        fn set(mask: libc::mode_t) -> Self {
+            Self {
+                previous: unsafe { libc::umask(mask) },
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for UmaskGuard {
+        fn drop(&mut self) {
+            unsafe { libc::umask(self.previous) };
+        }
+    }
+
     #[test]
     fn cache_path_resolver_prefers_xdg_cache_home() {
         let xdg_cache_home = PathBuf::from("/tmp/xdg-cache");
@@ -2117,6 +2186,63 @@ mod tests {
         assert_eq!(
             loaded.entry(UpdateChannel::Prerelease),
             cache.entry(UpdateChannel::Prerelease)
+        );
+
+        fs::remove_dir_all(dir).expect("remove test temp dir");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_cache_creates_private_path_and_file_under_group_writable_umask() {
+        const CHILD_ENV: &str = "LG_BUDDY_TEST_CACHE_PERMISSIONS_CHILD";
+        if std::env::var_os(CHILD_ENV).is_none() {
+            let status = std::process::Command::new(
+                std::env::current_exe().expect("resolve current test executable"),
+            )
+            .arg("file_cache_creates_private_path_and_file_under_group_writable_umask")
+            .arg("--nocapture")
+            .env(CHILD_ENV, "1")
+            .status()
+            .expect("run isolated cache-permissions regression");
+            assert!(status.success(), "isolated cache-permissions test failed");
+            return;
+        }
+
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = unique_temp_dir("cache-permissions");
+        let home = dir.join("home");
+        fs::create_dir(&home).expect("create test home");
+        fs::set_permissions(&home, fs::Permissions::from_mode(0o750))
+            .expect("set test home permissions");
+        let path = home
+            .join(".cache")
+            .join("lg-buddy")
+            .join("update-check.json");
+
+        let _umask = UmaskGuard::set(0o002);
+        FileUpdateCacheStore::new(path.clone())
+            .save(&UpdateCheckCache::default())
+            .expect("save cache");
+
+        for directory in [home.join(".cache"), home.join(".cache").join("lg-buddy")] {
+            assert_eq!(
+                fs::symlink_metadata(directory)
+                    .expect("cache directory metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+        }
+        assert_eq!(
+            fs::symlink_metadata(path)
+                .expect("cache file metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
         );
 
         fs::remove_dir_all(dir).expect("remove test temp dir");
