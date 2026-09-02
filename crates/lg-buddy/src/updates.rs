@@ -24,7 +24,6 @@ const GITHUB_CONNECT_TIMEOUT_SECONDS: u64 = 5;
 const GITHUB_REQUEST_TIMEOUT_SECONDS: u64 = 20;
 const MAX_GITHUB_RESPONSE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_GITHUB_ERROR_BYTES: u64 = 16 * 1024;
-const PRERELEASE_PAGE_SIZE: u8 = 20;
 const CACHE_DIR_NAME: &str = "lg-buddy";
 const UPDATE_CHECK_CACHE_FILE_NAME: &str = "update-check.json";
 
@@ -903,21 +902,21 @@ enum GitHubReleaseResponse {
 #[derive(Debug, Clone, Copy)]
 enum ReleaseEndpoint {
     LatestStable,
-    ReleasesList { per_page: u8 },
+    LatestPublished,
 }
 
 impl ReleaseEndpoint {
     fn url(self, base: &str) -> String {
         match self {
             Self::LatestStable => format!("{base}/latest"),
-            Self::ReleasesList { per_page } => format!("{base}?per_page={per_page}"),
+            Self::LatestPublished => format!("{base}?per_page=1"),
         }
     }
 
     fn label(self) -> &'static str {
         match self {
             Self::LatestStable => "latest",
-            Self::ReleasesList { .. } => "releases",
+            Self::LatestPublished => "releases",
         }
     }
 }
@@ -1379,9 +1378,7 @@ fn fetch_latest_release<C: GitHubReleasesClient>(
             })
         }
         UpdateChannel::Prerelease => {
-            let endpoint = ReleaseEndpoint::ReleasesList {
-                per_page: PRERELEASE_PAGE_SIZE,
-            };
+            let endpoint = ReleaseEndpoint::LatestPublished;
             let response = client.get(endpoint, &user_agent, cached_etag)?;
 
             latest_from_response(channel, response, cache, now_unix_seconds, |body| {
@@ -1393,8 +1390,8 @@ fn fetch_latest_release<C: GitHubReleasesClient>(
 
                 releases
                     .into_iter()
-                    .filter_map(|release| release_info_from_api_release(release, channel))
-                    .max_by(|left, right| left.version.cmp(&right.version))
+                    .next()
+                    .and_then(|release| release_info_from_api_release(release, channel))
                     .ok_or(UpdatesError::NoMatchingRelease { channel })
             })
         }
@@ -1510,7 +1507,7 @@ mod tests {
         UpdateChannel, UpdateCheckCache, UpdateNotificationDecision, UpdateNotificationPolicyInput,
         UpdateNotificationReason, UpdateNotificationSkipReason, UpdateSettings, UpdatesCommand,
         UpdatesDeferredFailure, UpdatesError, UpdatesRunContext, UreqGitHubReleasesClient,
-        MAX_GITHUB_RESPONSE_BYTES, PRERELEASE_PAGE_SIZE,
+        MAX_GITHUB_RESPONSE_BYTES,
     };
     use crate::session_notifications::{
         UpdateNotificationError, UpdateNotificationHandoff, UpdateNotificationOutcome,
@@ -1725,18 +1722,14 @@ mod tests {
     fn channel_response(channel: UpdateChannel) -> String {
         match channel {
             UpdateChannel::Stable => stable_release("v1.1.1"),
-            UpdateChannel::Prerelease => format!(
-                "[{},{}]",
-                stable_release("v1.1.1"),
-                prerelease("v1.2.0-beta.1")
-            ),
+            UpdateChannel::Prerelease => format!("[{}]", prerelease("v1.2.0-beta.1")),
         }
     }
 
     fn channel_endpoint(channel: UpdateChannel) -> &'static str {
         match channel {
             UpdateChannel::Stable => "https://api.example.test/releases/latest",
-            UpdateChannel::Prerelease => "https://api.example.test/releases?per_page=20",
+            UpdateChannel::Prerelease => "https://api.example.test/releases?per_page=1",
         }
     }
 
@@ -2223,7 +2216,7 @@ mod tests {
             let length = stream.read(&mut buffer).expect("read request");
             let request = String::from_utf8_lossy(&buffer[..length]);
 
-            assert!(request.starts_with("GET /releases?per_page=20 "));
+            assert!(request.starts_with("GET /releases?per_page=1 "));
             assert!(request.contains("If-None-Match: \"cached-etag\""));
 
             stream
@@ -2242,9 +2235,7 @@ mod tests {
 
         let response = client
             .get(
-                ReleaseEndpoint::ReleasesList {
-                    per_page: PRERELEASE_PAGE_SIZE,
-                },
+                ReleaseEndpoint::LatestPublished,
                 "lg-buddy/1.1.0-alpha.0",
                 Some("\"cached-etag\""),
             )
@@ -2321,6 +2312,44 @@ mod tests {
             asset.digest(),
             Some("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         );
+    }
+
+    #[test]
+    fn observed_beta_2_response_is_replayed_as_the_upgrade_baseline() {
+        // Reduced to the fields consumed by GitHubRelease from the production
+        // response recorded in https://github.com/Staphylococcus/LG_Buddy/issues/99.
+        let body = include_str!("../testdata/github/releases-v1.4.0-beta.2.json");
+        let client = MockGitHubReleasesClient::new(vec![Ok(body.to_string())]);
+        let release = discover_install_candidate_with(
+            version_info("1.4.0-beta.1", ReleaseChannel::Prerelease),
+            &client,
+            &StaticUpdateSettings::enabled(UpdateChannel::Prerelease),
+        )
+        .expect("observed prerelease response should select beta.2");
+
+        assert_eq!(release.version(), &Version::parse("1.4.0-beta.2").unwrap());
+        assert_eq!(release.channel(), UpdateChannel::Prerelease);
+        assert_eq!(release.tag_name(), "v1.4.0-beta.2");
+        assert_eq!(release.assets().len(), 2);
+        let archive = &release.assets()[0];
+        assert_eq!(archive.id(), 539980839);
+        assert_eq!(archive.size(), 3_051_471);
+        assert_eq!(
+            archive.digest(),
+            Some("sha256:883e6cb869cbe60988a195acac2e15864d904797edfefbb7d90052eff9a17d32")
+        );
+        assert_eq!(
+            archive.api_url(),
+            "https://api.github.com/repos/Staphylococcus/LG_Buddy/releases/assets/539980839"
+        );
+        assert_eq!(
+            archive.download_url(),
+            "https://github.com/Staphylococcus/LG_Buddy/releases/download/v1.4.0-beta.2/lg-buddy-1.4.0-beta.2-x86_64-unknown-linux-musl.tar.gz"
+        );
+        let checksums = &release.assets()[1];
+        assert_eq!(checksums.id(), 539980872);
+        assert_eq!(checksums.name(), "sha256sums.txt");
+        assert_eq!(checksums.size(), 123);
     }
 
     #[test]
@@ -2429,7 +2458,7 @@ mod tests {
         assert_eq!(
             client.requests_with_etags(),
             vec![(
-                "https://api.example.test/releases?per_page=20".to_string(),
+                "https://api.example.test/releases?per_page=1".to_string(),
                 "lg-buddy/1.2.0-beta.1".to_string(),
                 Some("\"prerelease-etag\"".to_string())
             )]
@@ -2622,11 +2651,8 @@ mod tests {
 
     #[test]
     fn background_update_check_uses_configured_prerelease_channel() {
-        let client = MockGitHubReleasesClient::new(vec![Ok(format!(
-            "[{},{}]",
-            stable_release("v1.1.0"),
-            prerelease("v1.2.0-beta.1")
-        ))]);
+        let client =
+            MockGitHubReleasesClient::new(vec![Ok(format!("[{}]", prerelease("v1.2.0-beta.1")))]);
         let notifier = RecordingNotifier::default();
         let cache_store = MemoryUpdateCacheStore::default();
         let update_settings = StaticUpdateSettings::enabled(UpdateChannel::Prerelease);
@@ -2651,7 +2677,7 @@ mod tests {
         assert_eq!(
             client.requests(),
             vec![(
-                "https://api.example.test/releases?per_page=20".to_string(),
+                "https://api.example.test/releases?per_page=1".to_string(),
                 "lg-buddy/1.1.0".to_string()
             )]
         );
@@ -3004,11 +3030,8 @@ mod tests {
 
     #[test]
     fn manual_update_check_uses_saved_prerelease_channel_when_auto_check_is_disabled() {
-        let client = MockGitHubReleasesClient::new(vec![Ok(format!(
-            "[{},{}]",
-            stable_release("v1.1.0"),
-            prerelease("v1.2.0-beta.1")
-        ))]);
+        let client =
+            MockGitHubReleasesClient::new(vec![Ok(format!("[{}]", prerelease("v1.2.0-beta.1")))]);
         let notifier = RecordingNotifier::default();
         let cache_store = MemoryUpdateCacheStore::default();
         let update_settings = StaticUpdateSettings::disabled(UpdateChannel::Prerelease);
@@ -3032,7 +3055,7 @@ mod tests {
         assert_eq!(
             client.requests(),
             vec![(
-                "https://api.example.test/releases?per_page=20".to_string(),
+                "https://api.example.test/releases?per_page=1".to_string(),
                 "lg-buddy/1.1.0".to_string()
             )]
         );
@@ -3040,11 +3063,8 @@ mod tests {
 
     #[test]
     fn install_discovery_uses_saved_channel_and_ignores_automatic_check_gate() {
-        let client = MockGitHubReleasesClient::new(vec![Ok(format!(
-            "[{},{}]",
-            stable_release("v1.1.0"),
-            prerelease("v1.2.0-beta.1")
-        ))]);
+        let client =
+            MockGitHubReleasesClient::new(vec![Ok(format!("[{}]", prerelease("v1.2.0-beta.1")))]);
         let update_settings = StaticUpdateSettings::disabled(UpdateChannel::Prerelease);
 
         let release = discover_install_candidate_with(
@@ -3059,7 +3079,7 @@ mod tests {
         assert_eq!(
             client.requests(),
             vec![(
-                "https://api.example.test/releases?per_page=20".to_string(),
+                "https://api.example.test/releases?per_page=1".to_string(),
                 "lg-buddy/1.1.0".to_string()
             )]
         );
@@ -3554,14 +3574,9 @@ mod tests {
     }
 
     #[test]
-    fn prerelease_channel_includes_stable_releases_and_picks_highest_semver() {
-        let client = MockGitHubReleasesClient::new(vec![Ok(format!(
-            "[{},{},{},{}]",
-            draft_prerelease("v1.3.0-beta.1"),
-            stable_release("v1.2.0"),
-            prerelease("release-0.6"),
-            prerelease("v1.2.0-beta.2")
-        ))]);
+    fn prerelease_channel_accepts_the_newest_published_stable_release() {
+        let client =
+            MockGitHubReleasesClient::new(vec![Ok(format!("[{}]", stable_release("v1.2.0")))]);
 
         let result = check_updates(
             UpdateChannel::Prerelease,
@@ -3578,15 +3593,9 @@ mod tests {
     }
 
     #[test]
-    fn prerelease_channel_uses_semver_ordering_across_release_stages() {
-        let client = MockGitHubReleasesClient::new(vec![Ok(format!(
-            "[{},{},{},{},{}]",
-            stable_release("v1.2.0"),
-            prerelease("v1.2.0-rc.1"),
-            prerelease("v1.3.0-alpha.1"),
-            prerelease("v1.2.0-beta.1"),
-            prerelease("v1.2.0-alpha.1")
-        ))]);
+    fn prerelease_channel_accepts_the_newest_published_prerelease() {
+        let client =
+            MockGitHubReleasesClient::new(vec![Ok(format!("[{}]", prerelease("v1.3.0-alpha.1")))]);
 
         let result = check_updates(
             UpdateChannel::Prerelease,
@@ -3688,25 +3697,27 @@ mod tests {
 
     #[test]
     fn missing_release_candidate_for_prerelease_channel_is_reported() {
-        let client = MockGitHubReleasesClient::new(vec![Ok(format!(
-            "[{},{}]",
-            prerelease("release-0.6"),
-            draft_prerelease("v1.2.0-beta.1")
-        ))]);
+        for response in [
+            "[]".to_string(),
+            format!("[{}]", prerelease("release-0.6")),
+            format!("[{}]", draft_prerelease("v1.2.0-beta.1")),
+        ] {
+            let client = MockGitHubReleasesClient::new(vec![Ok(response)]);
 
-        let err = check_updates(
-            UpdateChannel::Prerelease,
-            version_info("1.1.0-beta.1", ReleaseChannel::Prerelease),
-            &client,
-        )
-        .expect_err("missing prerelease candidate should fail update check");
+            let err = check_updates(
+                UpdateChannel::Prerelease,
+                version_info("1.1.0-beta.1", ReleaseChannel::Prerelease),
+                &client,
+            )
+            .expect_err("missing prerelease candidate should fail update check");
 
-        assert!(matches!(
-            err,
-            UpdatesError::NoMatchingRelease {
-                channel: UpdateChannel::Prerelease
-            }
-        ));
+            assert!(matches!(
+                err,
+                UpdatesError::NoMatchingRelease {
+                    channel: UpdateChannel::Prerelease
+                }
+            ));
+        }
     }
 
     #[test]

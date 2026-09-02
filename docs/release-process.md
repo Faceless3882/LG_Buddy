@@ -33,7 +33,15 @@ Required promotion checks prove that:
 - the version advances both existing release-channel heads
 - the persistent branches have not moved or diverged before merge
 - the derived `v<crate-version>` tag is absent before merge
-- normal CI and the release-bundle smoke test pass
+- normal CI and the release-bundle smoke test pass; the bundle smoke includes a
+  pinned cross-version upgrade from `v1.4.0-beta.2`
+- a stable promotion has a successful production upgrade canary on the exact
+  prerelease commit
+
+Requiring every candidate to advance both release-channel heads keeps release
+publication globally monotonic. The newest published release is therefore also
+the highest semantic version and prerelease-channel clients do not scan release
+history to determine ordering.
 
 The tag, binary, archive, and GitHub release all use the Cargo package version.
 There is no separate version input.
@@ -45,15 +53,31 @@ There is no separate version input.
 3. Wait for `verify`, `bundle-smoke-test`, and `validate-promotion` to pass.
 4. Merge the promotion PR. This is the release authorization.
 5. The resulting push starts the serialized release workflow, which builds and
-   smoke-tests the merged release commit without write credentials.
+   smoke-tests the merged release commit without write credentials, including
+   an archive-driven upgrade from the pinned public baseline.
 6. The final job obtains a short-lived token from the dedicated repository-only
-   GitHub App, aligns the remaining release streams, publishes the immutable tag
-   and release, and verifies the published checksums.
+   GitHub App, aligns the remaining release streams, creates or resumes a draft,
+   verifies its complete asset set, and publishes it. Repository release
+   immutability then locks the tag and assets.
+7. A published prerelease then runs `v1.4.0-beta.2` through the real production
+   `lg-buddy updates install` path. The newly installed candidate performs a
+   cold-cache production update check, and the canary records sanitized GitHub
+   response evidence for the deterministic mock. Stable promotion remains
+   blocked until this exact prerelease commit has a successful canary.
 
 Do not push version tags manually. Protected `v*` tags and stream-alignment
 writes permit bypass only to the dedicated release App. A failed post-merge
-release run can be rerun safely, but an existing tag or asset is accepted only
-when it is byte-for-byte consistent with the merged release commit.
+release run can be rerun safely: an incomplete draft remains private and is
+resumed only when its tag, classification, and existing assets match the merged
+release commit. A published release is accepted only when its expected asset set
+is complete and byte-for-byte identical.
+
+Repository release immutability must remain enabled. GitHub applies it only when
+a draft is published, so the publisher uploads and verifies every expected asset
+before making the release visible. Each stored asset must report the expected
+name, uploaded state, byte size, and server-computed SHA-256 digest. Unexpected
+draft assets block publication; published releases are verification-only and are
+never repaired in place.
 
 ## What the release workflow validates
 
@@ -65,10 +89,15 @@ The workflow:
 3. Generates a versioned identity manifest and packages the release bundle.
 4. Validates the manifest and installs the bundle in an isolated smoke-test root.
 5. Verifies the built and installed binary's exact version, channel, and commit.
-6. Generates and verifies `sha256sums.txt`.
-7. Keeps `main`, `prerelease`, and `dev` aligned for the next promotion.
-8. Publishes the tag and GitHub release without replacing conflicting assets.
-9. Downloads the published assets and verifies their checksums independently.
+6. Upgrades a pinned real previous archive to the candidate and verifies
+   preserved user state plus replaced owned integration files.
+7. Generates and verifies `sha256sums.txt`.
+8. Keeps `main`, `prerelease`, and `dev` aligned for the next promotion.
+9. Stages the exact release assets privately, then publishes them together under
+   the repository's immutable-release policy.
+10. Downloads the published assets and verifies their checksums independently.
+11. For prereleases, exercises production GitHub discovery, acquisition,
+    confirmation, installation, and final identity from the pinned baseline.
 
 `install.sh` is only an installer. It does not build the runtime.
 
@@ -120,6 +149,19 @@ integrations and verifies that the installed binary matches the candidate.
 This is intentionally a conservative and evolving refusal boundary. It does
 not migrate legacy layouts, declare broad host support, or guarantee that a
 later privileged operation cannot fail.
+
+## Cross-version upgrade baseline
+
+`v1.4.0-beta.2` is the first public updater-capable release and is the pinned
+previous archive for the initial cross-version contract. Its
+`x86_64-unknown-linux-musl` archive SHA-256 is
+`883e6cb869cbe60988a195acac2e15864d904797edfefbb7d90052eff9a17d32`.
+CI verifies that digest and the full release identity before extracting or
+executing the baseline.
+
+Versions before `v1.4.0-beta.2` do not contain `updates install`. They require
+one normal manual installation of an updater-capable release before assisted
+upgrades become available. Arbitrary historical upgrade support is not implied.
 
 ## Nix source selection
 

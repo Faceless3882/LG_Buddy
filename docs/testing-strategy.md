@@ -345,6 +345,25 @@ The initial and candidate checks are deliberately non-mutating. Orchestration
 tests for their consumers must separately prove that a refusal prevents release
 client, confirmation, sudo, and installer effects.
 
+The cross-version bundle smoke test adds the real release boundary that a
+same-bundle reinstall cannot cover. It verifies the pinned public
+`v1.4.0-beta.2` digest and identity before extraction, installs it into an
+isolated root and home, populates non-default settings and native credentials,
+and upgrades to an explicit candidate archive. It checks initial and candidate
+refusals before network, sudo, or mutation, then verifies preserved user state,
+candidate-owned file replacement, service action order, and final identity.
+
+After a prerelease is public, `production-prerelease-canary` installs the same
+baseline and drives its real `updates install` command through a PTY against
+GitHub. It then clears the update cache and proves that the newly installed
+candidate sees itself as GitHub's newest published release. The canary records
+that sanitized newest-release response, the release-by-tag response, tag ref,
+and asset redirects as a workflow artifact. Signed redirect queries and URL
+userinfo are never retained. The observed beta.2 newest-release fields also
+live in `crates/lg-buddy/testdata/github/` and are replayed by the normal offline
+Rust suite. A successful canary on the exact prerelease commit is a
+stable-promotion prerequisite.
+
 ## Current Practical Gaps
 
 The most important remaining gaps are:

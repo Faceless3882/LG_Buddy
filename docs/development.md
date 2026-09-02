@@ -84,8 +84,9 @@ Useful checks during development:
 cargo test -p lg-buddy --lib
 cargo test -p lg-buddy --test cucumber
 cargo clippy -p lg-buddy --all-targets --all-features -- -D warnings
-bash -n install.sh uninstall.sh configure.sh bin/LG_Buddy_Common scripts/build-release-bundle.sh scripts/test-release-bundle.sh scripts/publish-release-assets.sh
+bash -n install.sh uninstall.sh configure.sh bin/LG_Buddy_Common scripts/build-release-bundle.sh scripts/test-release-bundle.sh scripts/test-cross-version-upgrade.sh scripts/test-production-upgrade-canary.sh scripts/publish-release-assets.sh
 python3 scripts/test_release_promotion.py
+python3 scripts/test_record_github_release_responses.py
 ```
 
 Optional hardware smoke for gamepad activity:
@@ -136,10 +137,35 @@ root and exercises upgrade refusal, preservation, Python repair, owned-file
 replacement, service ordering, installed identity, lifecycle topology, and
 uninstall cleanup without mutating the host installation.
 
+Run the cross-version smoke with explicit previous and candidate archives:
+
+```bash
+./scripts/test-cross-version-upgrade.sh \
+  --previous-archive /path/to/previous.tar.gz \
+  --previous-sha256 <pinned-digest> \
+  --previous-tag <tag> --previous-version <version> \
+  --previous-channel <channel> --previous-target <target> \
+  --previous-commit <sha> \
+  --candidate-archive /path/to/candidate.tar.gz \
+  --candidate-tag <tag> --candidate-version <version> \
+  --candidate-channel <channel> --candidate-target <target> \
+  --candidate-commit <sha>
+```
+
+The production upgrade canary is CI-only because it requires the candidate to
+already be published. It records sanitized GitHub responses as a workflow
+artifact so the observed production shapes can be replayed offline.
+
 Run the focused manifest contract tests with:
 
 ```bash
 python3 scripts/test_release_bundle_manifest.py
+```
+
+Run the mock-backed draft publication and retry contract tests with:
+
+```bash
+python3 scripts/test_publish_release_assets.py
 ```
 
 Dry-run the GitHub release publish step with:
@@ -181,6 +207,9 @@ the branch contract and recovery process, see
 | `scripts/release_bundle_manifest.py` | Release-bundle identity manifest creator and validator |
 | `scripts/build-release-bundle.sh` | Release bundle builder |
 | `scripts/test-release-bundle.sh` | Release bundle smoke test |
+| `scripts/test-cross-version-upgrade.sh` | Pinned previous-to-candidate archive upgrade smoke test |
+| `scripts/test-production-upgrade-canary.sh` | Post-publication production GitHub upgrade canary |
+| `scripts/record_github_release_responses.py` | Sanitized production response recorder for offline mocks |
 | `scripts/publish-release-assets.sh` | GitHub release publish helper |
 | `scripts/release_promotion.py` | Promotion version, branch, and tag validator |
 | `.github/workflows/ci.yml` | CI validation workflow |

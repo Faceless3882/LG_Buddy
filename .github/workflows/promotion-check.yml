@@ -12,6 +12,7 @@ on:
       - ready_for_review
 
 permissions:
+  checks: read
   contents: read
   pull-requests: read
 
@@ -95,3 +96,23 @@ jobs:
               [ "$CHANNEL" = "stable" ] || expected_prerelease="true"
               [ "$(printf '%s' "$release_state" | jq -r .isPrerelease)" = "$expected_prerelease" ]
           fi
+
+      - name: Require production prerelease upgrade canary
+        if: github.event.pull_request.base.ref == 'main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAIN_SHA: ${{ steps.contract.outputs.main_sha }}
+          PRERELEASE_SHA: ${{ steps.contract.outputs.prerelease_sha }}
+        run: |
+          [ "$PRERELEASE_SHA" != "$MAIN_SHA" ] || {
+              echo "Stable promotion requires a distinct prerelease candidate."
+              exit 1
+          }
+          matching_checks="$(gh api \
+              -H 'Accept: application/vnd.github+json' \
+              "repos/$GITHUB_REPOSITORY/commits/$PRERELEASE_SHA/check-runs?per_page=100" \
+              --jq '[.check_runs[] | select(.name == "production-prerelease-canary" and .status == "completed" and .conclusion == "success" and .app.slug == "github-actions")] | length')"
+          [ "$matching_checks" -gt 0 ] || {
+              echo "No successful production-prerelease canary exists for $PRERELEASE_SHA."
+              exit 1
+          }
