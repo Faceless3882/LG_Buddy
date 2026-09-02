@@ -17,6 +17,15 @@ Feature: GNOME monitor
     And the TV client did not receive "turn_screen_off"
     And the TV client did not receive "turn_screen_on"
 
+  Scenario: unavailable idle backends do not suppress the session notification service
+    Given a temporary LG Buddy config using input HDMI_2
+    And the executable PATH is isolated
+    And GNOME monitor stays open for 0.1 seconds
+    When I run the command "monitor"
+    Then the command succeeds
+    And stdout contains "session notification service unavailable"
+    And stdout contains "screen idle backend unavailable"
+
   Scenario: GNOME ScreenSaver idle does not bypass the LG Buddy timeout
     Given a temporary LG Buddy config using input HDMI_2
     And the idle timeout is 2 seconds

@@ -27,11 +27,13 @@ binary, so normal installation does not require a Rust toolchain.
 | Brightness, volume, settings, and update commands | ✅ | ✅ | ✅ | ✅ |
 | Brightness desktop dialog | ✅ | ✅ | ✅ | ✅ |
 
-The default `auto` backend uses GNOME when compatible, then falls back to
-`swayidle` when installed. Native Wayland is currently opt-in:
+The default `auto` backend prefers a complete GNOME session, then native
+Wayland when the compositor provides `ext_idle_notifier_v1` version 2 or newer
+and at least one seat. It uses `swayidle` only as a deprecated compatibility
+fallback when native monitoring is unavailable. Inspect the decision with:
 
 ```bash
-lg-buddy settings set screen.backend wayland
+lg-buddy settings describe screen.backend
 ```
 
 See the [user guide](docs/user-guide.md#automatic-screen-blanking) for backend
@@ -44,14 +46,14 @@ The native `lg_webos` control path does not require Python. Native-only packages
 can omit the Python client, `venv`, and `pip`. The current fresh-install flow
 still provisions `bscpylgtv` as a compatibility fallback and installs the
 brightness dialog, so release-bundle installation checks for Python 3 with a
-`venv` that provisions `pip`, plus `zenity`. `swayidle` is required only when
-using that desktop backend.
+`venv` that provisions `pip`, plus `zenity`. `swayidle` is needed only by an
+existing explicit selection or as the deprecated compatibility fallback.
 
 ### Debian, Ubuntu, and Pop!_OS
 
 ```bash
 sudo apt install python3-venv python3-pip zenity
-# Optional swayidle backend:
+# Deprecated compatibility fallback only:
 sudo apt install swayidle
 ```
 
@@ -59,7 +61,7 @@ sudo apt install swayidle
 
 ```bash
 sudo dnf install python3 python3-pip python3-virtualenv zenity
-# Optional swayidle backend:
+# Deprecated compatibility fallback only:
 sudo dnf install swayidle
 ```
 
@@ -67,7 +69,7 @@ sudo dnf install swayidle
 
 ```bash
 sudo pacman -S python python-pip python-virtualenv zenity
-# Optional swayidle backend:
+# Deprecated compatibility fallback only:
 sudo pacman -S swayidle
 ```
 

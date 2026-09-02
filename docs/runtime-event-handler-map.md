@@ -97,8 +97,8 @@ Examples:
 
 ### Native Inactivity Path
 
-The native inactivity path is used by GNOME and the explicit native Wayland
-backend. Both feed activity facts into the same inactivity model instead of
+The native inactivity path is used by GNOME and native Wayland, including
+Wayland selected by `auto`. Both feed activity facts into the same inactivity model instead of
 delegating blank/restore commands to an external tool.
 
 ```text
@@ -153,8 +153,9 @@ swayidle timeout/resume
 currently starts `swayidle` with direct `screen off` and `screen on` commands.
 Those richer hook events are not consumed by the monitor runner.
 
-This path exists for current non-GNOME Wayland support. It is delegated, but it
-is not a separate screen-policy quirks mode: `swayidle` re-enters LG Buddy
+This deprecated path remains for existing explicit selections and as an
+automatic compatibility fallback on unsupported native sessions. It is
+delegated, but it is not a separate screen-policy quirks mode: `swayidle` re-enters LG Buddy
 through the same CLI/API command surface as manual `screen off` and `screen on`.
 Retiring it means replacing delegated timeout/resume execution with native
 idle/activity facts that feed the same inactivity engine used by the current
@@ -283,9 +284,9 @@ The current architecture has the Linux lifecycle sources, screen policy,
 lifecycle policy, runtime phase guard, and source adapter namespace in place.
 Remaining work should stay scoped:
 
-1. Keep native Wayland idle replacement separate from the logind lifecycle path.
-2. Keep `swayidle` available while native Wayland remains explicit opt-in;
-   automatic promotion and deprecation are separate work.
+1. Keep native Wayland monitoring separate from the logind lifecycle path.
+2. Keep `swayidle` working without rewriting existing configuration throughout
+   the documented 1.x compatibility window.
 3. Preserve the one-lifecycle-owner invariant in installer, release-bundle, and
    uninstall tests.
 4. Treat future platform lifecycle providers, such as a possible macOS provider,

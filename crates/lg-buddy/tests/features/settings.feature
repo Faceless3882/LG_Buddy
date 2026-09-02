@@ -45,34 +45,51 @@ Feature: Settings CLI
     And stdout contains "settings"
     And stdout does not contain "detect-backend"
 
-  Scenario: settings describe annotates auto with the resolved GNOME backend
+  Scenario: settings describe distinguishes auto from the resolved GNOME backend
     Given a temporary LG Buddy config using input HDMI_2
     And GNOME Shell is available
     And the executable PATH is isolated
     When I run the command "settings describe screen.backend"
     Then the command succeeds
-    And stdout contains "current: auto (gnome)"
-    And stdout contains "allowed values: auto (gnome), gnome, wayland, swayidle"
+    And stdout contains "current: auto"
+    And stdout contains "resolved backend: gnome"
+    And stdout contains "fallback reason: none; preferred backend is available"
+    And stdout contains "allowed values: auto, gnome, wayland, swayidle (deprecated compatibility backend)"
     When I run the command "settings get screen.backend"
     Then the command succeeds
     And stdout is "auto"
 
-  Scenario: settings describe annotates auto with the swayidle fallback
+  Scenario: settings describe explains the swayidle compatibility fallback
     Given a temporary LG Buddy config using input HDMI_2
     And the executable PATH is isolated
     And swayidle is installed
     When I run the command "settings describe screen.backend"
     Then the command succeeds
-    And stdout contains "current: auto (swayidle)"
-    And stdout contains "allowed values: auto (swayidle), gnome, wayland, swayidle"
+    And stdout contains "current: auto"
+    And stdout contains "resolved backend: swayidle"
+    And stdout contains "native Wayland unavailable"
+    And stdout contains "allowed values: auto, gnome, wayland, swayidle (deprecated compatibility backend)"
 
   Scenario: settings describe remains available without a detected backend
     Given a temporary LG Buddy config using input HDMI_2
     And the executable PATH is isolated
     When I run the command "settings describe screen.backend"
     Then the command succeeds
-    And stdout contains "current: auto (no backend currently available)"
-    And stdout contains "allowed values: auto (no backend currently available), gnome, wayland, swayidle"
+    And stdout contains "current: auto"
+    And stdout contains "resolved backend: unavailable"
+    And stdout contains "native Wayland unavailable"
+    And stdout contains "allowed values: auto, gnome, wayland, swayidle (deprecated compatibility backend)"
+
+  Scenario: settings describe marks an explicit swayidle selection as deprecated
+    Given a temporary LG Buddy config using input HDMI_2
+    And the executable PATH is isolated
+    And systemd apply actions are skipped
+    When I run the command "settings set screen.backend swayidle"
+    Then the command succeeds
+    When I run the command "settings describe screen.backend"
+    Then the command succeeds
+    And stdout contains "current: swayidle (deprecated compatibility backend)"
+    And stdout contains "planned for removal in LG Buddy 2.0.0"
 
   Scenario: settings describe shows required TV operations
     Given a temporary LG Buddy config using input HDMI_2

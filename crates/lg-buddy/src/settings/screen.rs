@@ -1,4 +1,4 @@
-use crate::backend::detect_backend_from_system;
+use crate::backend::{resolve_backend_from_system, BackendResolution, SWAYIDLE_DEPRECATION_NOTICE};
 use crate::config::{ScreenBackend, DEFAULT_IDLE_TIMEOUT, MAX_IDLE_TIMEOUT};
 
 use super::{
@@ -77,40 +77,69 @@ pub(super) const RESTORE_POLICY: SettingDefinition = SettingDefinition {
     description: "Screen restore policy after LG Buddy blanks the configured screen.",
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum BackendPresentation {
     Raw,
-    Resolved(Option<ScreenBackend>),
+    Resolved(Result<BackendResolution, String>),
 }
 
-pub(super) fn presentation_for_command(command: &SettingsCommand) -> BackendPresentation {
+pub(super) fn presentation_for_command(
+    command: &SettingsCommand,
+    configured: Option<&str>,
+) -> BackendPresentation {
     let describes_backend = match command {
         SettingsCommand::Describe(None) => true,
         SettingsCommand::Describe(Some(key)) => key == "screen.backend",
         _ => false,
     };
 
-    if describes_backend {
-        BackendPresentation::Resolved(detect_backend_from_system(ScreenBackend::Auto).ok())
+    let Some(configured) = configured.and_then(|value| value.parse::<ScreenBackend>().ok()) else {
+        return BackendPresentation::Raw;
+    };
+    if !describes_backend {
+        return BackendPresentation::Raw;
+    }
+
+    BackendPresentation::Resolved(
+        resolve_backend_from_system(configured).map_err(|err| err.to_string()),
+    )
+}
+
+pub(super) fn format_backend_choice(value: &str) -> String {
+    if value == ScreenBackend::Swayidle.as_str() {
+        format!("{value} (deprecated compatibility backend)")
     } else {
-        BackendPresentation::Raw
+        value.to_string()
     }
 }
 
-pub(super) fn format_backend_choice(value: &str, presentation: BackendPresentation) -> String {
-    if value != ScreenBackend::Auto.as_str() {
-        return value.to_string();
-    }
-
+pub(super) fn resolution_details(
+    configured: &str,
+    presentation: &BackendPresentation,
+) -> Option<(String, String)> {
     match presentation {
-        BackendPresentation::Raw => value.to_string(),
-        BackendPresentation::Resolved(Some(backend)) => {
-            format!("{value} ({})", backend.as_str())
-        }
-        BackendPresentation::Resolved(None) => {
-            format!("{value} (no backend currently available)")
+        BackendPresentation::Raw => None,
+        BackendPresentation::Resolved(Ok(resolution)) => Some((
+            resolution.backend().as_str().to_string(),
+            resolution
+                .fallback_reason()
+                .unwrap_or_else(|| {
+                    if configured == ScreenBackend::Auto.as_str() {
+                        "none; preferred backend is available"
+                    } else {
+                        "none; explicit selection does not fall back"
+                    }
+                })
+                .to_string(),
+        )),
+        BackendPresentation::Resolved(Err(reason)) => {
+            Some(("unavailable".to_string(), reason.clone()))
         }
     }
+}
+
+pub(super) fn deprecation_notice(configured: &str) -> Option<&'static str> {
+    (configured == ScreenBackend::Swayidle.as_str()).then_some(SWAYIDLE_DEPRECATION_NOTICE)
 }
 
 pub(super) fn apply_service_restart<C: ServiceController>(
@@ -175,10 +204,14 @@ mod tests {
     }
 
     #[test]
-    fn settings_runner_describe_annotates_auto_backend_without_changing_get() {
+    fn settings_runner_describe_distinguishes_auto_resolution_without_changing_get() {
         let store = ConfigEnvReader::parse("/tmp/config.env", "screen_backend=auto\n").into_store();
-        let runner = SettingsCommandRunner::new(store)
-            .with_screen_backend_resolution(Some(ScreenBackend::Gnome));
+        let runner = SettingsCommandRunner::new(store).with_screen_backend_presentation(
+            BackendPresentation::Resolved(Ok(BackendResolution::selected(
+                ScreenBackend::Gnome,
+                None,
+            ))),
+        );
         let mut output = Vec::new();
 
         runner
@@ -189,8 +222,12 @@ mod tests {
             .unwrap();
 
         let output = String::from_utf8(output).unwrap();
-        assert!(output.contains("  current: auto (gnome)\n"));
-        assert!(output.contains("  allowed values: auto (gnome), gnome, wayland, swayidle\n"));
+        assert!(output.contains("  current: auto\n"));
+        assert!(output.contains("  resolved backend: gnome\n"));
+        assert!(output.contains("  fallback reason: none; preferred backend is available\n"));
+        assert!(output.contains(
+            "  allowed values: auto, gnome, wayland, swayidle (deprecated compatibility backend)\n"
+        ));
 
         let mut raw_output = Vec::new();
         runner
@@ -205,7 +242,11 @@ mod tests {
     #[test]
     fn settings_runner_describe_reports_when_auto_has_no_available_backend() {
         let store = ConfigEnvReader::parse("/tmp/config.env", "screen_backend=auto\n").into_store();
-        let runner = SettingsCommandRunner::new(store).with_screen_backend_resolution(None);
+        let runner = SettingsCommandRunner::new(store).with_screen_backend_presentation(
+            BackendPresentation::Resolved(
+                Err("native Wayland protocol is unavailable".to_string()),
+            ),
+        );
         let mut output = Vec::new();
 
         runner
@@ -216,10 +257,63 @@ mod tests {
             .unwrap();
 
         let output = String::from_utf8(output).unwrap();
-        assert!(output.contains("  current: auto (no backend currently available)\n"));
+        assert!(output.contains("  current: auto\n"));
+        assert!(output.contains("  resolved backend: unavailable\n"));
+        assert!(output.contains("  fallback reason: native Wayland protocol is unavailable\n"));
         assert!(output.contains(
-            "  allowed values: auto (no backend currently available), gnome, wayland, swayidle\n"
+            "  allowed values: auto, gnome, wayland, swayidle (deprecated compatibility backend)\n"
         ));
+    }
+
+    #[test]
+    fn settings_runner_marks_explicit_swayidle_as_deprecated() {
+        let store =
+            ConfigEnvReader::parse("/tmp/config.env", "screen_backend=swayidle\n").into_store();
+        let runner = SettingsCommandRunner::new(store).with_screen_backend_presentation(
+            BackendPresentation::Resolved(Ok(BackendResolution::selected(
+                ScreenBackend::Swayidle,
+                None,
+            ))),
+        );
+        let mut output = Vec::new();
+
+        runner
+            .run(
+                SettingsCommand::Describe(Some("screen.backend".to_string())),
+                &mut output,
+            )
+            .unwrap();
+
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("  current: swayidle (deprecated compatibility backend)\n"));
+        assert!(output.contains("  resolved backend: swayidle\n"));
+        assert!(output.contains("  fallback reason: none; explicit selection does not fall back\n"));
+        assert!(output.contains("  deprecation: swayidle is a deprecated compatibility backend planned for removal in LG Buddy 2.0.0; use auto or wayland.\n"));
+    }
+
+    #[test]
+    fn settings_runner_reports_an_explicit_wayland_capability_limit() {
+        let store =
+            ConfigEnvReader::parse("/tmp/config.env", "screen_backend=wayland\n").into_store();
+        let runner = SettingsCommandRunner::new(store).with_screen_backend_presentation(
+            BackendPresentation::Resolved(Err(
+                "backend `wayland` is unavailable: the compositor advertises ext_idle_notifier_v1 version 1; version 2 or newer is required"
+                    .to_string(),
+            )),
+        );
+        let mut output = Vec::new();
+
+        runner
+            .run(
+                SettingsCommand::Describe(Some("screen.backend".to_string())),
+                &mut output,
+            )
+            .unwrap();
+
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("  current: wayland\n"));
+        assert!(output.contains("  resolved backend: unavailable\n"));
+        assert!(output.contains("ext_idle_notifier_v1 version 1; version 2 or newer is required\n"));
     }
 
     #[test]

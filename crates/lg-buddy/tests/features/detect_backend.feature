@@ -10,7 +10,7 @@ Feature: Detect backend
     Then the command succeeds
     And stdout is "gnome"
 
-  Scenario: swayidle is selected when GNOME is unavailable
+  Scenario: swayidle is selected when GNOME and native Wayland are unavailable
     Given a temporary LG Buddy config using input HDMI_2
     And the executable PATH is isolated
     And swayidle is installed
@@ -35,3 +35,4 @@ Feature: Detect backend
     When I run the command "detect-backend"
     Then the command fails
     And stderr contains "org.gnome.Mutter.IdleMonitor"
+    And stderr contains "native Wayland unavailable"

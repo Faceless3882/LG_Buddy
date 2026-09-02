@@ -302,6 +302,32 @@ where
     }
 }
 
+#[derive(Default)]
+struct WaylandCapabilityProbeState {
+    registry_facts: RegistryFacts,
+}
+
+impl Dispatch<wl_registry::WlRegistry, ()> for WaylandCapabilityProbeState {
+    fn event(
+        state: &mut Self,
+        _: &wl_registry::WlRegistry,
+        event: wl_registry::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_registry::Event::Global {
+                name,
+                interface,
+                version,
+            } => state.registry_facts.add(name, interface.as_str(), version),
+            wl_registry::Event::GlobalRemove { name } => state.registry_facts.remove(name),
+            _ => {}
+        }
+    }
+}
+
 impl<F> Dispatch<wl_seat::WlSeat, u32> for WaylandProviderState<F>
 where
     F: FnMut(Instant) -> bool + 'static,
@@ -390,11 +416,18 @@ pub(crate) fn connect_wayland() -> Result<Connection, WaylandProviderError> {
     Connection::connect_to_env().map_err(|err| WaylandProviderError::Connection(err.to_string()))
 }
 
-pub(crate) fn probe_wayland_capabilities(
+pub(crate) fn probe_wayland_capabilities_on(
+    connection: Connection,
 ) -> Result<WaylandProviderCapabilities, WaylandProviderError> {
-    let connection = connect_wayland()?;
-    let (_, _, capabilities) = initialize_provider(connection, |_| true)?;
-    Ok(capabilities)
+    let display = connection.display();
+    let mut event_queue = connection.new_event_queue();
+    let queue_handle = event_queue.handle();
+    let _registry = display.get_registry(&queue_handle, ());
+    let mut state = WaylandCapabilityProbeState::default();
+    event_queue
+        .roundtrip(&mut state)
+        .map_err(|err| WaylandProviderError::Dispatch(err.to_string()))?;
+    state.registry_facts.capabilities()
 }
 
 pub(crate) fn run_wayland_activity_monitor<F>(

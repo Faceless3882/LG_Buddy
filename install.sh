@@ -453,8 +453,10 @@ else
             fi
             ;;
         swayidle)
-            if command -v swayidle &>/dev/null; then
-                echo "  [OK]      swayidle (configured backend)"
+            echo "  [WARNING] swayidle is a deprecated compatibility backend planned for removal in LG Buddy 2.0.0"
+            echo "            Select auto or wayland when the compositor supports ext_idle_notifier_v1 version 2 or newer."
+            if command -v swayidle >/dev/null 2>&1; then
+                echo "  [OK]      swayidle (configured compatibility backend)"
                 SCREEN_MONITOR_AVAILABLE=1
                 SCREEN_MONITOR_RUNTIME_BACKEND="swayidle"
             else
@@ -463,19 +465,23 @@ else
             fi
             ;;
         *)
-            if command -v swayidle &>/dev/null; then
-                echo "  [OK]      swayidle (wlroots/COSMIC backend)"
-                SCREEN_MONITOR_AVAILABLE=1
-            else
-                echo "  [OPTIONAL] swayidle (required for wlroots/COSMIC backend)"
-            fi
-
-            SCREEN_MONITOR_RUNTIME_BACKEND="$("$RUNTIME_BINARY" detect-backend 2>/dev/null || true)"
-            if [ -n "$SCREEN_MONITOR_RUNTIME_BACKEND" ]; then
+            SCREEN_MONITOR_DIAGNOSTICS="$("$RUNTIME_BINARY" settings describe screen.backend 2>/dev/null || true)"
+            SCREEN_MONITOR_RUNTIME_BACKEND="$(printf '%s\n' "$SCREEN_MONITOR_DIAGNOSTICS" | sed -n 's/^  resolved backend: //p' | tail -n1)"
+            SCREEN_MONITOR_FALLBACK_REASON="$(printf '%s\n' "$SCREEN_MONITOR_DIAGNOSTICS" | sed -n 's/^  fallback reason: //p' | tail -n1)"
+            if [ -n "$SCREEN_MONITOR_RUNTIME_BACKEND" ] && [ "$SCREEN_MONITOR_RUNTIME_BACKEND" != "unavailable" ]; then
                 SCREEN_MONITOR_AVAILABLE=1
                 echo "  [OK]      current session backend: $SCREEN_MONITOR_RUNTIME_BACKEND"
+                if [ -n "$SCREEN_MONITOR_FALLBACK_REASON" ] && [ "$SCREEN_MONITOR_FALLBACK_REASON" != "none; preferred backend is available" ]; then
+                    echo "  [INFO]    fallback reason: $SCREEN_MONITOR_FALLBACK_REASON"
+                fi
+                if [ "$SCREEN_MONITOR_RUNTIME_BACKEND" = "swayidle" ]; then
+                    echo "  [WARNING] using deprecated swayidle compatibility fallback; planned for removal in LG Buddy 2.0.0"
+                fi
             else
                 echo "  [INFO]    no supported backend detected in the current session"
+                if [ -n "$SCREEN_MONITOR_FALLBACK_REASON" ]; then
+                    echo "            $SCREEN_MONITOR_FALLBACK_REASON"
+                fi
                 echo "            The user-session service will retry until a supported backend is available."
             fi
             ;;

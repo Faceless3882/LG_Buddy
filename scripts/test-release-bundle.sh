@@ -342,6 +342,26 @@ printf '%s\n' "$VERSION_OUTPUT" | grep -q "^version: "
 printf '%s\n' "$VERSION_OUTPUT" | grep -q "^channel: "
 printf '%s\n' "$VERSION_OUTPUT" | grep -q "^commit: "
 
+FRESH_CONFIG_HOME="$WORK_DIR/fresh-config-home"
+FRESH_CONFIG_OUTPUT="$WORK_DIR/fresh-config.output"
+mkdir -p "$FRESH_CONFIG_HOME"
+(
+    unset LG_BUDDY_NONINTERACTIVE LG_BUDDY_SCREEN_BACKEND LG_BUDDY_CONFIG
+    export HOME="$FRESH_CONFIG_HOME"
+    export XDG_CONFIG_HOME="$FRESH_CONFIG_HOME/.config"
+    export LG_BUDDY_RUNTIME_BINARY="$BUNDLE_DIR/lg-buddy"
+    export LG_BUDDY_SKIP_SYSTEMD_ACTIONS="1"
+    printf '%s\n' \
+        '192.0.2.10' 'aa:bb:cc:dd:ee:ff' '2' '1' 'Y' '1' '300' '1' 'Y' \
+        | "$BUNDLE_DIR/configure.sh" >"$FRESH_CONFIG_OUTPUT" 2>&1
+)
+grep -F -q '  3) wayland' "$FRESH_CONFIG_OUTPUT"
+if grep -F -q 'swayidle' "$FRESH_CONFIG_OUTPUT"; then
+    echo "Fresh interactive configuration presented swayidle."
+    exit 1
+fi
+grep -q '^screen_backend=auto$' "$FRESH_CONFIG_HOME/.config/lg-buddy/config.env"
+
 export HOME="$HOME_DIR"
 export XDG_CONFIG_HOME="$XDG_CONFIG_HOME"
 export LG_BUDDY_INSTALL_ROOT="$INSTALL_ROOT"
@@ -445,7 +465,7 @@ printf '%s\n' "$NATIVE_PLATFORM_OUTPUT" | grep -F -q 'No stored native TV creden
 "$INSTALLED_BINARY" settings set tv.platform bscpylgtv
 grep -q '^tvs_primary_platform=bscpylgtv$' "$CONFIG_FILE"
 
-"$INSTALLED_BINARY" settings set screen.backend gnome
+"$INSTALLED_BINARY" settings set screen.backend swayidle
 "$INSTALLED_BINARY" settings set screen.idle_timeout 900
 "$INSTALLED_BINARY" settings set screen.idle_timeout 90000
 grep -q '^screen_idle_timeout=86400$' "$CONFIG_FILE"
@@ -460,7 +480,7 @@ grep -q '^screen_idle_timeout=86400$' "$CONFIG_FILE"
 "$INSTALLED_BINARY" settings set updates.channel prerelease
 BACKGROUND_UPDATE_OUTPUT="$("$INSTALLED_BINARY" updates background-check)"
 printf '%s\n' "$BACKGROUND_UPDATE_OUTPUT" | grep -F -q 'background: skipped (automatic update checks disabled)'
-grep -q '^screen_backend=gnome$' "$CONFIG_FILE"
+grep -q '^screen_backend=swayidle$' "$CONFIG_FILE"
 grep -q '^screen_idle_blank=disabled$' "$CONFIG_FILE"
 grep -q '^screen_idle_timeout=900$' "$CONFIG_FILE"
 grep -q '^screen_restore_policy=aggressive$' "$CONFIG_FILE"
@@ -475,6 +495,7 @@ grep -q '^updates_channel=prerelease$' "$CONFIG_FILE"
 # semantics as the Rust config parser, then persist the sanitized choice.
 sed -i 's/^tvs_primary_platform=bscpylgtv$/  tvs_primary_platform = bscpylgtv # legacy/' "$CONFIG_FILE"
 printf '%s\n' 'tvs_primary_platform =  lg_webos # experimental' >>"$CONFIG_FILE"
+LEGACY_CONFIGURE_OUTPUT="$WORK_DIR/legacy-configure.output"
 
 (
     unset LG_BUDDY_SCREEN_BACKEND
@@ -485,14 +506,16 @@ printf '%s\n' 'tvs_primary_platform =  lg_webos # experimental' >>"$CONFIG_FILE"
     export LG_BUDDY_TV_MAC="11:22:33:44:55:66"
     export LG_BUDDY_INPUT="HDMI_3"
     cd "$BUNDLE_DIR"
-    ./configure.sh
+    ./configure.sh >"$LEGACY_CONFIGURE_OUTPUT" 2>&1
 )
+
+grep -F -q 'Warning: swayidle is a deprecated compatibility backend planned for removal in LG Buddy 2.0.0' "$LEGACY_CONFIGURE_OUTPUT"
 
 grep -q '^tvs_primary_ip=192.168.1.11$' "$CONFIG_FILE"
 grep -q '^tvs_primary_mac=11:22:33:44:55:66$' "$CONFIG_FILE"
 grep -q '^tvs_primary_input=HDMI_3$' "$CONFIG_FILE"
 grep -q '^tvs_primary_platform=lg_webos$' "$CONFIG_FILE"
-grep -q '^screen_backend=gnome$' "$CONFIG_FILE"
+grep -q '^screen_backend=swayidle$' "$CONFIG_FILE"
 grep -q '^screen_idle_blank=disabled$' "$CONFIG_FILE"
 grep -q '^screen_idle_timeout=900$' "$CONFIG_FILE"
 grep -q '^screen_restore_policy=aggressive$' "$CONFIG_FILE"
@@ -717,6 +740,8 @@ cmp -s "$CONFIG_SNAPSHOT" "$CONFIG_FILE" || {
     echo "Upgrade changed the user configuration."
     exit 1
 }
+"$INSTALLED_BINARY" settings describe screen.backend \
+    | grep -F -q 'deprecation: swayidle is a deprecated compatibility backend planned for removal in LG Buddy 2.0.0'
 cmp -s "$CONFIG_POINTER_SNAPSHOT" "$INSTALLED_POINTER" || {
     echo "Upgrade changed the installed config pointer."
     exit 1

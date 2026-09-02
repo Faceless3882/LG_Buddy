@@ -73,7 +73,7 @@ pub struct SystemSwayidleProbe;
 
 impl SwayidleProbe for SystemSwayidleProbe {
     fn swayidle_available(&self) -> bool {
-        let probe = SystemBackendProbe;
+        let probe = SystemBackendProbe::default();
         probe.has_command("swayidle")
     }
 

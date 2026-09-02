@@ -249,7 +249,7 @@ do
 done
 
 export LG_BUDDY_CONFIG="$CONFIG_FILE"
-"$INSTALLED_BINARY" settings set screen.backend gnome
+"$INSTALLED_BINARY" settings set screen.backend swayidle
 "$INSTALLED_BINARY" settings set screen.idle_timeout 900
 "$INSTALLED_BINARY" settings set screen.restore_policy aggressive
 "$INSTALLED_BINARY" settings set screen.idle_blank disabled
@@ -421,7 +421,7 @@ do
     grep -F -q "LG_BUDDY_CONFIG=$CONFIG_FILE" "$override"
 done
 
-grep -q '^screen_backend=gnome$' "$CONFIG_FILE"
+grep -q '^screen_backend=swayidle$' "$CONFIG_FILE"
 grep -q '^screen_idle_timeout=900$' "$CONFIG_FILE"
 grep -q '^screen_restore_policy=aggressive$' "$CONFIG_FILE"
 grep -q '^screen_idle_blank=disabled$' "$CONFIG_FILE"
@@ -432,6 +432,8 @@ grep -q '^tvs_primary_input=HDMI_4$' "$CONFIG_FILE"
 grep -q '^tvs_primary_platform=lg_webos$' "$CONFIG_FILE"
 grep -q '^updates_auto_check=disabled$' "$CONFIG_FILE"
 grep -q '^updates_channel=prerelease$' "$CONFIG_FILE"
+"$INSTALLED_BINARY" settings describe screen.backend \
+    | grep -F -q 'deprecation: swayidle is a deprecated compatibility backend planned for removal in LG Buddy 2.0.0'
 
 python3 "$SCRIPT_DIR/release_bundle_manifest.py" validate \
     --manifest "$CANDIDATE_BUNDLE/release-manifest.json" \

@@ -43,14 +43,14 @@ impl SettingsFormatter {
         writer: &mut W,
         settings: &[EffectiveSetting],
     ) -> Result<(), SettingsError> {
-        self.write_describe_with_backend(writer, settings, screen::BackendPresentation::Raw)
+        self.write_describe_with_backend(writer, settings, &screen::BackendPresentation::Raw)
     }
 
     pub(super) fn write_describe_with_backend<W: io::Write>(
         &self,
         writer: &mut W,
         settings: &[EffectiveSetting],
-        screen_backend: screen::BackendPresentation,
+        screen_backend: &screen::BackendPresentation,
     ) -> Result<(), SettingsError> {
         for (index, setting) in settings.iter().enumerate() {
             if index > 0 {
@@ -124,19 +124,26 @@ impl SettingsFormatter {
         &self,
         writer: &mut W,
         setting: &EffectiveSetting,
-        screen_backend: screen::BackendPresentation,
+        screen_backend: &screen::BackendPresentation,
     ) -> Result<(), SettingsError> {
         let definition = setting.definition();
 
         writeln!(writer, "{}", setting.key_name()).map_err(output_error)?;
         writeln!(writer, "  storage key: {}", setting.storage_key()).map_err(output_error)?;
         writeln!(writer, "  type: {}", definition.value_type().as_str()).map_err(output_error)?;
-        writeln!(
-            writer,
-            "  current: {}",
-            format_described_value(setting, screen_backend)
-        )
-        .map_err(output_error)?;
+        writeln!(writer, "  current: {}", format_described_value(setting)).map_err(output_error)?;
+        if setting.key_name() == "screen.backend" {
+            let configured = format_effective_value(setting);
+            if let Some((resolved, fallback_reason)) =
+                screen::resolution_details(&configured, screen_backend)
+            {
+                writeln!(writer, "  resolved backend: {resolved}").map_err(output_error)?;
+                writeln!(writer, "  fallback reason: {fallback_reason}").map_err(output_error)?;
+            }
+            if let Some(notice) = screen::deprecation_notice(&configured) {
+                writeln!(writer, "  deprecation: {notice}.").map_err(output_error)?;
+            }
+        }
         writeln!(writer, "  source: {}", setting.source().as_str()).map_err(output_error)?;
         writeln!(writer, "  default: {}", definition.default_value_label())
             .map_err(output_error)?;
@@ -154,7 +161,7 @@ impl SettingsFormatter {
                 writeln!(
                     writer,
                     "  allowed values: {}",
-                    format_described_enum_values(setting, enum_type.values(), screen_backend)
+                    format_described_enum_values(setting, enum_type.values())
                 )
                 .map_err(output_error)?;
                 if !enum_type.aliases().is_empty() {
@@ -200,30 +207,23 @@ pub(super) fn format_effective_value(setting: &EffectiveSetting) -> String {
         .unwrap_or_else(|| "<missing>".to_string())
 }
 
-fn format_described_value(
-    setting: &EffectiveSetting,
-    screen_backend: screen::BackendPresentation,
-) -> String {
+fn format_described_value(setting: &EffectiveSetting) -> String {
     let value = format_effective_value(setting);
     if setting.key_name() == "screen.backend" {
-        screen::format_backend_choice(&value, screen_backend)
+        screen::format_backend_choice(&value)
     } else {
         value
     }
 }
 
-fn format_described_enum_values(
-    setting: &EffectiveSetting,
-    values: &[&str],
-    screen_backend: screen::BackendPresentation,
-) -> String {
+fn format_described_enum_values(setting: &EffectiveSetting, values: &[&str]) -> String {
     if setting.key_name() != "screen.backend" {
         return values.join(", ");
     }
 
     values
         .iter()
-        .map(|value| screen::format_backend_choice(value, screen_backend))
+        .map(|value| screen::format_backend_choice(value))
         .collect::<Vec<_>>()
         .join(", ")
 }
