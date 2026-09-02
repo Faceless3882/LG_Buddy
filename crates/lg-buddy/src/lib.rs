@@ -9,6 +9,7 @@ pub mod lifecycle;
 pub mod notifications;
 pub mod platform_access_token;
 pub mod policy;
+pub mod release_bundle;
 pub mod runtime_phase;
 pub mod screen;
 pub mod session;
@@ -18,7 +19,9 @@ pub mod settings;
 pub mod sources;
 pub mod state;
 pub mod tv;
+pub mod update_install;
 pub mod updates;
+pub mod upgrade_preflight;
 pub mod version;
 pub mod web_os;
 pub mod wol;
@@ -45,9 +48,12 @@ use crate::tv::{
     OledBrightness, OledBrightnessParseError, TvClientBuildError, VolumeLevel,
     VolumeLevelParseError,
 };
+use crate::update_install::{run_update_install, UpdateInstallError};
 use crate::updates::{run_updates_command, UpdatesCommand, UpdatesError, UpdatesParseError};
+use crate::upgrade_preflight::CompatibilityReport;
 use std::fmt;
 use std::io::{self, Write};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -68,6 +74,10 @@ pub enum Command {
     Dev(DevCommand),
     Settings(SettingsCommand),
     Updates(UpdatesCommand),
+    UpgradePreflight {
+        candidate_root: PathBuf,
+        repair_python: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,12 +142,14 @@ impl SettingsHelpTopic {
 pub enum UpdatesHelpTopic {
     Root,
     Check,
+    Install,
 }
 
 impl UpdatesHelpTopic {
     fn from_subcommand(subcommand: &str) -> Option<Self> {
         match subcommand {
             "check" => Some(Self::Check),
+            "install" => Some(Self::Install),
             _ => None,
         }
     }
@@ -204,6 +216,7 @@ pub enum ParseError {
     Dev(DevParseError),
     Settings(SettingsParseError),
     Updates(UpdatesParseError),
+    MissingUpgradePreflightRoot,
     UnexpectedArguments {
         command: Command,
         arguments: Vec<String>,
@@ -254,6 +267,9 @@ impl fmt::Display for ParseError {
             Self::Dev(err) => write!(f, "{err}"),
             Self::Settings(err) => write!(f, "{err}"),
             Self::Updates(err) => write!(f, "{err}"),
+            Self::MissingUpgradePreflightRoot => {
+                write!(f, "missing candidate root for `upgrade-preflight`")
+            }
             Self::UnexpectedArguments { command, arguments } => {
                 write!(
                     f,
@@ -279,6 +295,8 @@ pub enum RunError {
     Dev(DevError),
     Settings(SettingsError),
     Updates(UpdatesError),
+    UpdateInstall(UpdateInstallError),
+    UpgradePreflight(CompatibilityReport),
     NotificationAfterPrimary {
         primary: Box<RunError>,
         notification: NotificationError,
@@ -299,6 +317,8 @@ impl fmt::Display for RunError {
             Self::Dev(err) => write!(f, "{err}"),
             Self::Settings(err) => write!(f, "{err}"),
             Self::Updates(err) => write!(f, "{err}"),
+            Self::UpdateInstall(err) => write!(f, "{err}"),
+            Self::UpgradePreflight(report) => write!(f, "{report}"),
             Self::NotificationAfterPrimary {
                 primary,
                 notification,
@@ -324,6 +344,8 @@ impl std::error::Error for RunError {
             Self::Dev(err) => Some(err),
             Self::Settings(err) => Some(err),
             Self::Updates(err) => Some(err),
+            Self::UpdateInstall(err) => Some(err),
+            Self::UpgradePreflight(_) => None,
             Self::NotificationAfterPrimary { primary, .. } => Some(primary.as_ref()),
         }
     }
@@ -412,6 +434,7 @@ impl Command {
             Self::Dev(command) => command.as_str(),
             Self::Settings(_) => "settings",
             Self::Updates(_) => "updates",
+            Self::UpgradePreflight { .. } => "upgrade-preflight",
         }
     }
 
@@ -434,6 +457,7 @@ impl Command {
             Self::Dev(_) => "TODO: implemented via temporary dev command handler",
             Self::Settings(_) => "TODO: implemented via command handler",
             Self::Updates(_) => "TODO: implemented via command handler",
+            Self::UpgradePreflight { .. } => "TODO: implemented via command handler",
         }
     }
 }
@@ -466,7 +490,7 @@ Commands:
   screen off      Blank the configured TV output if active
   screen on       Restore the TV output after an LG Buddy screen blank
   settings        Inspect and edit structured LG Buddy settings
-  updates         Check for LG Buddy releases
+  updates         Check for and install LG Buddy releases
   help [COMMAND...]
                   Show global or scoped command help
 
@@ -479,6 +503,7 @@ Settings:
 
 Updates:
   updates check [--notify]
+  updates install
 "
     )
 }
@@ -620,14 +645,16 @@ pub fn updates_usage(program: &str, topic: UpdatesHelpTopic) -> String {
     match topic {
         UpdatesHelpTopic::Root => format!(
             "\
-LG Buddy update checks
+LG Buddy updates
 
 Usage:
   {program} updates check [--notify]
+  {program} updates install
   {program} updates --help
 
 Commands:
   check           Check GitHub releases for an available update
+  install         Interactively verify and install an available update
 "
         ),
         UpdatesHelpTopic::Check => format!(
@@ -639,6 +666,17 @@ Usage:
 
 Options:
   --notify        Request a desktop notification when an update is available
+"
+        ),
+        UpdatesHelpTopic::Install => format!(
+            "\
+LG Buddy update installation
+
+Usage:
+  {program} updates install
+
+Installs the next release from the saved updates.channel after host checks and
+explicit confirmation. Channel and version arguments are not accepted.
 "
         ),
     }
@@ -700,6 +738,33 @@ where
         }
         "settings" => return parse_settings_command(args),
         "updates" => return parse_updates_command(args),
+        "upgrade-preflight" => {
+            let candidate_root = PathBuf::from(
+                args.next()
+                    .ok_or(ParseError::MissingUpgradePreflightRoot)?
+                    .as_ref(),
+            );
+            let mut repair_python = false;
+            let mut unexpected = Vec::new();
+            for argument in args {
+                if argument.as_ref() == "--repair-python" && !repair_python {
+                    repair_python = true;
+                } else {
+                    unexpected.push(argument.as_ref().to_string());
+                }
+            }
+            let command = Command::UpgradePreflight {
+                candidate_root,
+                repair_python,
+            };
+            if !unexpected.is_empty() {
+                return Err(ParseError::UnexpectedArguments {
+                    command,
+                    arguments: unexpected,
+                });
+            }
+            return Ok(ParseOutcome::Command(command));
+        }
         "dev" => {
             return DevCommand::parse(args)
                 .map(|command| ParseOutcome::Command(Command::Dev(command)))
@@ -754,8 +819,24 @@ pub fn run_command<W: Write>(command: Command, writer: &mut W) -> Result<(), Run
         Command::Settings(command) => {
             run_settings_command(command, writer).map_err(RunError::Settings)
         }
+        Command::Updates(UpdatesCommand::Install) => {
+            run_update_install(writer).map_err(RunError::UpdateInstall)
+        }
         Command::Updates(command) => {
             run_updates_command(command, writer).map_err(RunError::Updates)
+        }
+        Command::UpgradePreflight {
+            candidate_root,
+            repair_python,
+        } => {
+            let report =
+                crate::upgrade_preflight::candidate_host_preflight(&candidate_root, repair_python);
+            if report.compatible() {
+                write!(writer, "{report}")?;
+                Ok(())
+            } else {
+                Err(RunError::UpgradePreflight(report))
+            }
         }
     }
 }
@@ -852,10 +933,10 @@ where
                     ))
                 }),
             [subcommand, arguments @ ..] => {
-                if UpdatesHelpTopic::from_subcommand(subcommand).is_some() {
+                if let Some(topic) = UpdatesHelpTopic::from_subcommand(subcommand) {
                     Err(ParseError::Updates(
                         UpdatesParseError::UnexpectedArguments {
-                            subcommand: "check",
+                            subcommand: updates_help_subcommand(topic),
                             arguments: arguments.to_vec(),
                         },
                     ))
@@ -867,6 +948,14 @@ where
             }
         },
         other => Err(ParseError::UnknownCommand(other.to_string())),
+    }
+}
+
+fn updates_help_subcommand(topic: UpdatesHelpTopic) -> &'static str {
+    match topic {
+        UpdatesHelpTopic::Root => "updates",
+        UpdatesHelpTopic::Check => "check",
+        UpdatesHelpTopic::Install => "install",
     }
 }
 
@@ -935,14 +1024,13 @@ where
         )));
     }
 
-    if UpdatesHelpTopic::from_subcommand(subcommand).is_some()
-        && arguments[1..]
+    if let Some(topic) = UpdatesHelpTopic::from_subcommand(subcommand) {
+        if arguments[1..]
             .iter()
             .any(|argument| matches!(argument.as_str(), "-h" | "--help"))
-    {
-        return Ok(ParseOutcome::Help(HelpTopic::Updates(
-            UpdatesHelpTopic::Check,
-        )));
+        {
+            return Ok(ParseOutcome::Help(HelpTopic::Updates(topic)));
+        }
     }
 
     UpdatesCommand::parse(arguments)
@@ -1175,6 +1263,7 @@ mod tests {
     use crate::{notifications::NotificationError, RunError};
     use std::error::Error;
     use std::io;
+    use std::path::PathBuf;
 
     #[test]
     fn no_args_prints_help() {
@@ -1307,6 +1396,12 @@ mod tests {
             )))
         );
         assert_eq!(
+            parse_args(["help", "updates", "install"]),
+            Ok(ParseOutcome::Help(HelpTopic::Updates(
+                UpdatesHelpTopic::Install
+            )))
+        );
+        assert_eq!(
             parse_args(["updates", "--help"]),
             Ok(ParseOutcome::Help(HelpTopic::Updates(
                 UpdatesHelpTopic::Root
@@ -1316,6 +1411,12 @@ mod tests {
             parse_args(["updates", "check", "--help"]),
             Ok(ParseOutcome::Help(HelpTopic::Updates(
                 UpdatesHelpTopic::Check
+            )))
+        );
+        assert_eq!(
+            parse_args(["updates", "install", "--help"]),
+            Ok(ParseOutcome::Help(HelpTopic::Updates(
+                UpdatesHelpTopic::Install
             )))
         );
     }
@@ -1546,10 +1647,34 @@ mod tests {
             )))
         );
         assert_eq!(
+            parse_args(["updates", "install"]),
+            Ok(ParseOutcome::Command(Command::Updates(
+                UpdatesCommand::Install
+            )))
+        );
+        assert_eq!(
             parse_args(["updates", "background-check"]),
             Ok(ParseOutcome::Command(Command::Updates(
                 UpdatesCommand::BackgroundCheck
             )))
+        );
+        assert_eq!(
+            parse_args(["upgrade-preflight", "/tmp/lg-buddy-candidate"]),
+            Ok(ParseOutcome::Command(Command::UpgradePreflight {
+                candidate_root: PathBuf::from("/tmp/lg-buddy-candidate"),
+                repair_python: false,
+            }))
+        );
+        assert_eq!(
+            parse_args([
+                "upgrade-preflight",
+                "/tmp/lg-buddy-candidate",
+                "--repair-python"
+            ]),
+            Ok(ParseOutcome::Command(Command::UpgradePreflight {
+                candidate_root: PathBuf::from("/tmp/lg-buddy-candidate"),
+                repair_python: true,
+            }))
         );
     }
 
@@ -1811,6 +1936,18 @@ mod tests {
                 }
             ))
         );
+        let error = parse_args(["updates", "install", "stable"]).unwrap_err();
+        assert_eq!(
+            error,
+            ParseError::Updates(UpdatesParseError::UnexpectedArguments {
+                subcommand: "install",
+                arguments: vec!["stable".to_string()]
+            })
+        );
+        assert_eq!(
+            error.help_topic(),
+            HelpTopic::Updates(UpdatesHelpTopic::Install)
+        );
         assert_eq!(
             parse_args(["updates", "check", "--notify", "--notify"]),
             Err(ParseError::Updates(UpdatesParseError::DuplicateNotify))
@@ -1823,6 +1960,39 @@ mod tests {
                     arguments: vec!["extra".to_string()]
                 }
             ))
+        );
+    }
+
+    #[test]
+    fn invalid_upgrade_preflight_command_is_rejected() {
+        assert_eq!(
+            parse_args(["upgrade-preflight"]),
+            Err(ParseError::MissingUpgradePreflightRoot)
+        );
+        assert_eq!(
+            parse_args(["upgrade-preflight", "/tmp/candidate", "extra"]),
+            Err(ParseError::UnexpectedArguments {
+                command: Command::UpgradePreflight {
+                    candidate_root: PathBuf::from("/tmp/candidate"),
+                    repair_python: false,
+                },
+                arguments: vec!["extra".to_string()],
+            })
+        );
+        assert_eq!(
+            parse_args([
+                "upgrade-preflight",
+                "/tmp/candidate",
+                "--repair-python",
+                "--repair-python"
+            ]),
+            Err(ParseError::UnexpectedArguments {
+                command: Command::UpgradePreflight {
+                    candidate_root: PathBuf::from("/tmp/candidate"),
+                    repair_python: true,
+                },
+                arguments: vec!["--repair-python".to_string()],
+            })
         );
     }
 
@@ -1867,6 +2037,7 @@ mod tests {
             "screen-on",
             "detect-backend",
             "updates background-check",
+            "upgrade-preflight",
             "webos-auth-probe",
             "webos-read-probe",
         ] {
@@ -1940,6 +2111,7 @@ mod tests {
     fn updates_usage_is_scoped_and_hides_the_timer_entrypoint() {
         let root = updates_usage("lg-buddy", UpdatesHelpTopic::Root);
         assert!(root.contains("lg-buddy updates check [--notify]"));
+        assert!(root.contains("lg-buddy updates install"));
         assert!(!root.contains("--channel"));
         assert!(!root.contains("background-check"));
 
@@ -1947,6 +2119,11 @@ mod tests {
         assert!(!check.contains("--channel"));
         assert!(check.contains("--notify"));
         assert!(!check.contains("background-check"));
+
+        let install = updates_usage("lg-buddy", UpdatesHelpTopic::Install);
+        assert!(install.contains("lg-buddy updates install"));
+        assert!(install.contains("saved updates.channel"));
+        assert!(!install.contains("--channel"));
     }
 
     #[test]

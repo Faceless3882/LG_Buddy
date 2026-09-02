@@ -83,6 +83,9 @@ This is the place for integration tests and contract tests.
 - logind lifecycle and NetworkManager gate behavior against a private system-bus
   harness
 - desktop and auxiliary gamepad activity resetting one LG Buddy-owned deadline
+- update-install orchestration ordering against an injected runtime, including
+  refusal, decline, concurrent acquisition, candidate preflight, installer,
+  identity mismatch, cleanup, and success paths
 
 ### How to test it
 
@@ -145,8 +148,10 @@ It is useful when we want to express scenarios like:
 - when the user returns after LG Buddy blanked the TV, LG Buddy restores the screen
 - when aggressive restore policy is enabled, wake/activity can restore even without a marker
 - when GNOME is available, backend detection resolves to `gnome`
-- when the user chooses `lg_webos` during initial configuration, pairing stores
-  the credential before setup completes
+- when fresh configuration accepts the default `lg_webos` platform, pairing
+  stores the credential before setup completes
+- when an existing profile has no platform value, configuration preserves and
+  materializes the `bscpylgtv` compatibility fallback
 - when native credentials are missing or stale, ordinary TV commands pair or
   repair them as part of the operation
 - when native credentials are missing, shutdown and suspend-related commands
@@ -239,12 +244,13 @@ Examples:
 - gamepad activity integration with the LG Buddy inactivity deadline
 - screen runtime-phase eligibility over the private logind system-bus seam
 
-Native Wayland changes also require manual opt-in checks on Plasma/KWin and at
-least one other target compositor. Verify that explicit `wayland` detection and
-monitor startup succeed, unsupported capability or connection cases fail with
-a precise diagnostic, and `auto` retains its existing GNOME-then-`swayidle`
-selection. Release-facing changes must keep the static x86_64 musl build and
-release-bundle smoke test green.
+Native Wayland changes also require manual checks on Plasma/KWin and at least
+one other target compositor. Verify that explicit and automatic `wayland`
+detection and monitor startup succeed, unsupported capability or connection
+cases report a precise fallback reason, and `auto` retains the
+GNOME-then-native-Wayland-then-`swayidle` order. Release-facing changes must
+keep the static x86_64 musl build and release-bundle smoke test green, including
+preservation and deprecation reporting for an existing `swayidle` config.
 
 ### Gamepad activity
 
@@ -295,10 +301,71 @@ These should not dominate the Rust test suite, but they still matter because ins
 
 The release-bundle smoke test covers the current installed lifecycle topology:
 the logind lifecycle service remains installed, the NetworkManager pre-down hook
-remains installed, and legacy systemd sleep hooks are absent. It also verifies
-that a missing TV platform remains `bscpylgtv`, explicit platform values survive
-reconfiguration, and `lg_webos` routes to the stored-credential-only native path
-and reports a missing credential without initiating background pairing.
+remains installed, and legacy systemd sleep hooks are absent. Its upgrade phase
+proves refusal before sudo, skips configuration, preserves config and native
+credentials byte-for-byte, conditionally preserves or repairs the Python
+environment, replaces the owned bundle assets, checks service action order, and
+verifies the installed runtime against the candidate bytes and identity.
+
+The focused release-manifest suite covers deterministic serialization, schema
+and critical-field handling, duplicate and missing fields, canonical identity
+formats, archive layout, and binary version/channel/commit mismatches. The
+bundle smoke test then exercises the same validator against the generated and
+installed release binary.
+
+The Rust release-bundle acquisition suite covers exact asset selection, fresh
+release metadata, bounded responses and downloads, GitHub and published digest
+agreement, lightweight and annotated tags, restrictive staging and locking,
+hostile archive types and paths, manifest identity, non-executing embedded
+binary identity, and cleanup on success or failure. Run it with:
+
+```bash
+cargo test -p lg-buddy release_bundle::tests --lib
+```
+
+The normal suite replays GitHub release-response shapes through both a valid
+current-contract bundle and the observed historical `v1.4.0-beta.1` metadata.
+The historical payload is reduced to a deterministic pre-manifest archive and
+must still be rejected at the manifest boundary without contacting GitHub.
+
+The upgrade-preflight module uses injected process, service-manager,
+filesystem, and ownership facts around a real temporary-root installation
+fixture. Its focused suite covers a passing mutable FHS layout plus symlinked,
+mounted, incompletely or wrongly owned, untrusted-writable, read-only,
+hard-linked, legacy, conflicting-drop-in, malformed-candidate, and
+unavailable-service-manager refusals. Table-driven cases exercise every path
+policy's permission contract and every declared candidate input. Candidate
+containment cases reject untrusted and non-sticky shared-writable ancestors
+while preserving root-owned sticky temporary directories. Virtualenv mutation
+checks are conditional on an actual compatibility-environment repair and refuse
+unsafe roots or nested mount points before clearing. Run it with:
+
+```bash
+cargo test -p lg-buddy upgrade_preflight::tests --lib
+```
+
+The initial and candidate checks are deliberately non-mutating. Orchestration
+tests for their consumers must separately prove that a refusal prevents release
+client, confirmation, sudo, and installer effects.
+
+The cross-version bundle smoke test adds the real release boundary that a
+same-bundle reinstall cannot cover. It verifies the pinned public
+`v1.4.0-beta.2` digest and identity before extraction, installs it into an
+isolated root and home, populates non-default settings and native credentials,
+and upgrades to an explicit candidate archive. It checks initial and candidate
+refusals before network, sudo, or mutation, then verifies preserved user state,
+candidate-owned file replacement, service action order, and final identity.
+
+After a prerelease is public, `production-prerelease-canary` installs the same
+baseline and drives its real `updates install` command through a PTY against
+GitHub. It then clears the update cache and proves that the newly installed
+candidate sees itself as GitHub's newest published release. The canary records
+that sanitized newest-release response, the release-by-tag response, tag ref,
+and asset redirects as a workflow artifact. Signed redirect queries and URL
+userinfo are never retained. The observed beta.2 newest-release fields also
+live in `crates/lg-buddy/testdata/github/` and are replayed by the normal offline
+Rust suite. A successful canary on the exact prerelease commit is a
+stable-promotion prerequisite.
 
 ## Current Practical Gaps
 

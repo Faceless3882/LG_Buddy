@@ -1,91 +1,46 @@
 name: Release promotion
 
 on:
-  pull_request_target:
+  push:
     branches:
       - main
       - prerelease
-    types:
-      - labeled
 
 permissions:
   actions: read
-  checks: read
   contents: read
-  pull-requests: read
 
 concurrency:
   group: release-promotion
   cancel-in-progress: false
 
 jobs:
-  authorize:
-    if: github.event.label.name == 'release:promote'
-    runs-on: ubuntu-latest
-    outputs:
-      base_ref: ${{ steps.authorize.outputs.base_ref }}
-      base_sha: ${{ steps.authorize.outputs.base_sha }}
-      head_sha: ${{ steps.authorize.outputs.head_sha }}
-      pr_number: ${{ steps.authorize.outputs.pr_number }}
-
-    steps:
-      - name: Authorize promotion request
-        id: authorize
-        env:
-          ACTOR: ${{ github.actor }}
-          BASE_REF: ${{ github.event.pull_request.base.ref }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          GH_TOKEN: ${{ github.token }}
-          HEAD_REF: ${{ github.event.pull_request.head.ref }}
-          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          IS_DRAFT: ${{ github.event.pull_request.draft }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          [ "$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$ACTOR/permission" --jq .permission)" = "admin" ] || {
-              echo "Only a repository administrator may request release promotion."
-              exit 1
-          }
-          [ "$HEAD_REPOSITORY" = "$GITHUB_REPOSITORY" ]
-          [ "$HEAD_REF" = "dev" ]
-          [ "$IS_DRAFT" = "false" ]
-          case "$BASE_REF" in
-              main|prerelease) ;;
-              *) exit 1 ;;
-          esac
-          gh pr checks "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --required
-          {
-              echo "base_ref=$BASE_REF"
-              echo "base_sha=$BASE_SHA"
-              echo "head_sha=$HEAD_SHA"
-              echo "pr_number=$PR_NUMBER"
-          } >> "$GITHUB_OUTPUT"
-
   validate:
     runs-on: ubuntu-latest
-    needs: authorize
     outputs:
+      base_sha: ${{ steps.contract.outputs.base_sha }}
       channel: ${{ steps.contract.outputs.channel }}
       head_sha: ${{ steps.contract.outputs.head_sha }}
-      main_sha: ${{ steps.contract.outputs.main_sha }}
       prerelease_sha: ${{ steps.contract.outputs.prerelease_sha }}
+      publish: ${{ steps.contract.outputs.publish }}
+      source_sha: ${{ steps.contract.outputs.source_sha }}
       tag: ${{ steps.contract.outputs.tag }}
       version: ${{ steps.contract.outputs.version }}
 
     steps:
-      - name: Check out trusted promotion validator
-        uses: actions/checkout@v4
+      - name: Check out merged release commit
+        uses: actions/checkout@v5
         with:
-          ref: ${{ needs.authorize.outputs.base_sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.x"
 
-      - name: Fetch channel refs and release tags
+      - name: Fetch release refs and tags
         run: |
           git fetch --force origin \
               +refs/heads/main:refs/remotes/origin/main \
@@ -93,24 +48,28 @@ jobs:
               +refs/heads/dev:refs/remotes/origin/dev \
               +refs/tags/*:refs/tags/*
 
-      - name: Validate promotion contract
+      - name: Validate merged promotion
         id: contract
+        env:
+          BASE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+          TARGET: ${{ github.ref_name }}
         run: |
           python3 scripts/release_promotion.py \
-              --target "${{ needs.authorize.outputs.base_ref }}" \
-              --head-ref "${{ needs.authorize.outputs.head_sha }}" \
-              --base-sha "${{ needs.authorize.outputs.base_sha }}" \
+              --merged \
+              --target "$TARGET" \
+              --head-ref "$HEAD_SHA" \
+              --base-sha "$BASE_SHA" \
               --github-output "$GITHUB_OUTPUT"
 
   build-release-bundle:
+    if: needs.validate.outputs.publish == 'true'
     runs-on: ubuntu-latest
-    needs:
-      - authorize
-      - validate
+    needs: validate
 
     steps:
-      - name: Check out exact reviewed dev commit
-        uses: actions/checkout@v4
+      - name: Check out merged release commit
+        uses: actions/checkout@v5
         with:
           ref: ${{ needs.validate.outputs.head_sha }}
           persist-credentials: false
@@ -121,12 +80,12 @@ jobs:
           targets: x86_64-unknown-linux-musl
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.x"
 
       - name: Install release prerequisites
-        run: sudo apt-get update && sudo apt-get install -y musl-tools zenity
+        run: sudo apt-get update && sudo apt-get install -y musl-tools strace zenity
 
       - name: Build lg-buddy
         env:
@@ -142,9 +101,35 @@ jobs:
           ./scripts/test-release-bundle.sh \
               --skip-pip-install \
               --archive "dist/lg-buddy-${{ needs.validate.outputs.version }}-x86_64-unknown-linux-musl.tar.gz" \
+              --expected-tag "${{ needs.validate.outputs.tag }}" \
               --expected-version "${{ needs.validate.outputs.version }}" \
               --expected-channel "${{ needs.validate.outputs.channel }}" \
+              --expected-target x86_64-unknown-linux-musl \
               --expected-commit "${{ needs.validate.outputs.head_sha }}"
+
+      - name: Download pinned cross-version baseline
+        run: |
+          curl --fail --silent --show-error --location \
+              --proto '=https' --tlsv1.2 \
+              --output "$RUNNER_TEMP/lg-buddy-1.4.0-beta.2-x86_64-unknown-linux-musl.tar.gz" \
+              https://github.com/Staphylococcus/LG_Buddy/releases/download/v1.4.0-beta.2/lg-buddy-1.4.0-beta.2-x86_64-unknown-linux-musl.tar.gz
+
+      - name: Smoke test cross-version upgrade
+        run: |
+          ./scripts/test-cross-version-upgrade.sh \
+              --previous-archive "$RUNNER_TEMP/lg-buddy-1.4.0-beta.2-x86_64-unknown-linux-musl.tar.gz" \
+              --previous-sha256 883e6cb869cbe60988a195acac2e15864d904797edfefbb7d90052eff9a17d32 \
+              --previous-tag v1.4.0-beta.2 \
+              --previous-version 1.4.0-beta.2 \
+              --previous-channel prerelease \
+              --previous-target x86_64-unknown-linux-musl \
+              --previous-commit 77c8f46c66b9e385f3d90c15dee33d775639bbeb \
+              --candidate-archive "dist/lg-buddy-${{ needs.validate.outputs.version }}-x86_64-unknown-linux-musl.tar.gz" \
+              --candidate-tag "${{ needs.validate.outputs.tag }}" \
+              --candidate-version "${{ needs.validate.outputs.version }}" \
+              --candidate-channel "${{ needs.validate.outputs.channel }}" \
+              --candidate-target x86_64-unknown-linux-musl \
+              --candidate-commit "${{ needs.validate.outputs.head_sha }}"
 
       - name: Generate checksums
         run: |
@@ -157,7 +142,7 @@ jobs:
           sha256sum -c sha256sums.txt
 
       - name: Upload workflow artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: lg-buddy-release-${{ needs.validate.outputs.tag }}
           path: |
@@ -166,29 +151,28 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  finalize:
+  publish:
+    if: needs.validate.outputs.publish == 'true'
     runs-on: ubuntu-latest
     environment: release-promotion
     needs:
-      - authorize
       - validate
       - build-release-bundle
 
     steps:
-      - name: Check out trusted finalizer
-        uses: actions/checkout@v4
+      - name: Check out merged release commit
+        uses: actions/checkout@v5
         with:
-          ref: ${{ needs.authorize.outputs.base_sha }}
+          ref: ${{ needs.validate.outputs.head_sha }}
           fetch-depth: 0
           persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.x"
 
-      - name: Fetch and revalidate current refs
-        id: recheck
+      - name: Fetch and revalidate release refs
         run: |
           git fetch --force origin \
               +refs/heads/main:refs/remotes/origin/main \
@@ -196,19 +180,13 @@ jobs:
               +refs/heads/dev:refs/remotes/origin/dev \
               +refs/tags/*:refs/tags/*
           python3 scripts/release_promotion.py \
-              --target "${{ needs.authorize.outputs.base_ref }}" \
-              --head-ref "${{ needs.authorize.outputs.head_sha }}" \
-              --base-sha "${{ needs.authorize.outputs.base_sha }}" \
-              --github-output "$GITHUB_OUTPUT"
-          [ "$(git rev-parse refs/remotes/origin/dev)" = "${{ needs.validate.outputs.head_sha }}" ]
-
-      - name: Revalidate required PR checks
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh pr checks "${{ needs.authorize.outputs.pr_number }}" --repo "$GITHUB_REPOSITORY" --required
+              --merged \
+              --target "${{ github.ref_name }}" \
+              --head-ref "${{ needs.validate.outputs.head_sha }}" \
+              --base-sha "${{ needs.validate.outputs.base_sha }}"
 
       - name: Download verified release bundle
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: lg-buddy-release-${{ needs.validate.outputs.tag }}
           path: dist
@@ -216,47 +194,24 @@ jobs:
       - name: Verify downloaded checksums
         run: cd dist && sha256sum -c sha256sums.txt
 
-      - name: Create repository-scoped promotion token
-        id: promotion-token
+      - name: Create repository-scoped release token
+        id: release-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
         with:
-          app-id: ${{ vars.RELEASE_PROMOTION_APP_ID }}
+          client-id: ${{ vars.RELEASE_PROMOTION_APP_CLIENT_ID }}
           private-key: ${{ secrets.RELEASE_PROMOTION_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: LG_Buddy
           permission-contents: write
 
-      - name: Publish release and advance channel refs
+      - name: Align release streams
         env:
-          BASE_REF: ${{ needs.authorize.outputs.base_ref }}
-          EXPECTED_MAIN_SHA: ${{ needs.validate.outputs.main_sha }}
-          EXPECTED_PRERELEASE_SHA: ${{ needs.validate.outputs.prerelease_sha }}
-          GH_TOKEN: ${{ steps.promotion-token.outputs.token }}
+          GH_TOKEN: ${{ steps.release-token.outputs.token }}
           HEAD_SHA: ${{ needs.validate.outputs.head_sha }}
-          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+          PRERELEASE_SHA: ${{ needs.validate.outputs.prerelease_sha }}
+          SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+          TARGET: ${{ github.ref_name }}
         run: |
-          remote_tag_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq .object.sha 2>/dev/null || true)"
-          if [ -z "$remote_tag_sha" ]; then
-              gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
-                  -f ref="refs/tags/$RELEASE_TAG" \
-                  -f sha="$HEAD_SHA" >/dev/null
-          elif [ "$remote_tag_sha" != "$HEAD_SHA" ]; then
-              echo "Tag $RELEASE_TAG points to $remote_tag_sha, expected $HEAD_SHA."
-              exit 1
-          fi
-
-          if ! git rev-parse --verify "refs/tags/$RELEASE_TAG" >/dev/null 2>&1; then
-              git tag "$RELEASE_TAG" "$HEAD_SHA"
-          fi
-          ./scripts/publish-release-assets.sh \
-              --dist-dir dist \
-              --tag "$RELEASE_TAG" \
-              --commit "$HEAD_SHA"
-
-          verify_dir="$(mktemp -d)"
-          gh release download "$RELEASE_TAG" --dir "$verify_dir"
-          (cd "$verify_dir" && sha256sum -c sha256sums.txt)
-
           update_ref() {
               local ref_name="$1"
               local expected_sha="$2"
@@ -275,11 +230,104 @@ jobs:
                   -F force=false >/dev/null
           }
 
-          if [ "$BASE_REF" = "main" ]; then
-              update_ref prerelease "$EXPECTED_PRERELEASE_SHA"
-              update_ref main "$EXPECTED_MAIN_SHA"
+          if [ "$TARGET" = "main" ]; then
+              update_ref prerelease "$PRERELEASE_SHA"
+          fi
+          update_ref dev "$SOURCE_SHA"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ steps.release-token.outputs.token }}
+          HEAD_SHA: ${{ needs.validate.outputs.head_sha }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          if remote_tag_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq .object.sha 2>/dev/null)"; then
+              [ "$remote_tag_sha" = "$HEAD_SHA" ] || {
+                  echo "Tag $RELEASE_TAG points to $remote_tag_sha, expected $HEAD_SHA."
+                  exit 1
+              }
           else
-              update_ref prerelease "$EXPECTED_PRERELEASE_SHA"
+              gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+                  -f ref="refs/tags/$RELEASE_TAG" \
+                  -f sha="$HEAD_SHA" >/dev/null
           fi
 
-          [ "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$BASE_REF" --jq .object.sha)" = "$HEAD_SHA" ]
+          if ! git rev-parse --verify "refs/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+              git tag "$RELEASE_TAG" "$HEAD_SHA"
+          fi
+          ./scripts/publish-release-assets.sh \
+              --dist-dir dist \
+              --tag "$RELEASE_TAG" \
+              --commit "$HEAD_SHA"
+
+          verify_dir="$(mktemp -d)"
+          gh release download "$RELEASE_TAG" --dir "$verify_dir"
+          (cd "$verify_dir" && sha256sum -c sha256sums.txt)
+
+  production-prerelease-canary:
+    name: production-prerelease-canary
+    if: needs.validate.outputs.publish == 'true' && needs.validate.outputs.channel == 'prerelease'
+    runs-on: ubuntu-latest
+    needs:
+      - validate
+      - publish
+
+    steps:
+      - name: Check out published prerelease
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.validate.outputs.head_sha }}
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+
+      - name: Install canary prerequisites
+        run: sudo apt-get update && sudo apt-get install -y python3-venv util-linux zenity
+
+      - name: Download pinned updater-capable baseline
+        run: |
+          curl --fail --silent --show-error --location \
+              --proto '=https' --tlsv1.2 \
+              --output "$RUNNER_TEMP/lg-buddy-1.4.0-beta.2-x86_64-unknown-linux-musl.tar.gz" \
+              https://github.com/Staphylococcus/LG_Buddy/releases/download/v1.4.0-beta.2/lg-buddy-1.4.0-beta.2-x86_64-unknown-linux-musl.tar.gz
+
+      - name: Exercise production GitHub upgrade path
+        run: |
+          ./scripts/test-production-upgrade-canary.sh \
+              --work-dir "$RUNNER_TEMP/production-canary" \
+              --previous-archive "$RUNNER_TEMP/lg-buddy-1.4.0-beta.2-x86_64-unknown-linux-musl.tar.gz" \
+              --previous-sha256 883e6cb869cbe60988a195acac2e15864d904797edfefbb7d90052eff9a17d32 \
+              --previous-tag v1.4.0-beta.2 \
+              --previous-version 1.4.0-beta.2 \
+              --previous-channel prerelease \
+              --previous-target x86_64-unknown-linux-musl \
+              --previous-commit 77c8f46c66b9e385f3d90c15dee33d775639bbeb \
+              --expected-tag "${{ needs.validate.outputs.tag }}" \
+              --expected-version "${{ needs.validate.outputs.version }}" \
+              --expected-channel prerelease \
+              --expected-target x86_64-unknown-linux-musl \
+              --expected-commit "${{ needs.validate.outputs.head_sha }}"
+
+      - name: Record sanitized production GitHub responses
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/record_github_release_responses.py \
+              --repository "$GITHUB_REPOSITORY" \
+              --tag "${{ needs.validate.outputs.tag }}" \
+              --output "$RUNNER_TEMP/production-canary/github-responses.json"
+
+      - name: Upload canary evidence for the offline mock
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: production-upgrade-canary-${{ needs.validate.outputs.tag }}
+          path: |
+            ${{ runner.temp }}/production-canary/production-upgrade-canary.output
+            ${{ runner.temp }}/production-canary/github-responses.json
+          if-no-files-found: warn
+          retention-days: 30

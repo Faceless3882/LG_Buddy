@@ -93,7 +93,9 @@ normalize_restore_policy() {
 current_tv_ip=""
 current_tv_mac=""
 current_input="HDMI_1"
-current_tv_platform="$LG_BUDDY_DEFAULT_TV_PLATFORM"
+# A missing platform in an existing profile remains the bscpylgtv compatibility
+# default. Only a genuinely fresh profile starts from the native platform.
+current_tv_platform="lg_webos"
 current_screen_backend="$LG_BUDDY_DEFAULT_SCREEN_BACKEND"
 current_screen_idle_blank="$LG_BUDDY_DEFAULT_SCREEN_IDLE_BLANK"
 current_screen_idle_timeout="$LG_BUDDY_DEFAULT_IDLE_TIMEOUT"
@@ -161,7 +163,7 @@ if [ "${LG_BUDDY_NONINTERACTIVE:-0}" = "1" ]; then
         exit 1
     }
     validate_backend "$screen_backend" || {
-        echo "LG_BUDDY_SCREEN_BACKEND must be one of auto, gnome, wayland, or swayidle."
+        echo "LG_BUDDY_SCREEN_BACKEND must be auto, gnome, wayland, or the deprecated compatibility value swayidle."
         exit 1
     }
     validate_screen_idle_blank "$screen_idle_blank" || {
@@ -272,20 +274,20 @@ else
     done
 
     echo "Choose the TV control platform:"
-    echo "  1) bscpylgtv  (Python compatibility platform)"
-    echo "  2) lg_webos   (native LG Buddy platform)"
+    echo "  1) lg_webos   (native LG Buddy platform; recommended)"
+    echo "  2) bscpylgtv  (Python compatibility fallback)"
 
     case "$current_tv_platform" in
-        bscpylgtv) default_platform_choice="1" ;;
-        lg_webos) default_platform_choice="2" ;;
+        lg_webos) default_platform_choice="1" ;;
+        bscpylgtv) default_platform_choice="2" ;;
         *) default_platform_choice="1" ;;
     esac
 
     while true; do
         PLATFORM_CHOICE="$(prompt_with_default "Enter number (1-2)" "$default_platform_choice")"
         case "$PLATFORM_CHOICE" in
-            1) tv_platform="bscpylgtv"; break ;;
-            2) tv_platform="lg_webos"; break ;;
+            1) tv_platform="lg_webos"; break ;;
+            2) tv_platform="bscpylgtv"; break ;;
             *) echo "  Please enter 1 or 2." ;;
         esac
     done
@@ -310,7 +312,11 @@ else
         echo "  1) auto"
         echo "  2) gnome"
         echo "  3) wayland"
-        echo "  4) swayidle"
+        backend_choice_range="1-3"
+        if [ "$existing_config_loaded" -eq 1 ] && [ "$current_screen_backend" = "swayidle" ]; then
+            echo "  4) swayidle (deprecated compatibility backend; preserve existing selection)"
+            backend_choice_range="1-4"
+        fi
 
         case "$current_screen_backend" in
             auto) default_backend_choice="1" ;;
@@ -321,13 +327,19 @@ else
         esac
 
         while true; do
-            BACKEND_CHOICE="$(prompt_with_default "Enter number (1-4)" "$default_backend_choice")"
+            BACKEND_CHOICE="$(prompt_with_default "Enter number ($backend_choice_range)" "$default_backend_choice")"
             case "$BACKEND_CHOICE" in
                 1) screen_backend="auto"; break ;;
                 2) screen_backend="gnome"; break ;;
                 3) screen_backend="wayland"; break ;;
-                4) screen_backend="swayidle"; break ;;
-                *) echo "  Please enter a number between 1 and 4." ;;
+                4)
+                    if [ "$backend_choice_range" = "1-4" ]; then
+                        screen_backend="swayidle"
+                        break
+                    fi
+                    echo "  Please enter a number between 1 and 3."
+                    ;;
+                *) echo "  Please enter a number in $backend_choice_range." ;;
             esac
         done
 
@@ -383,6 +395,9 @@ echo "  System Sleep/Wake:   $system_sleep_wake_policy"
 echo "  Update Checks:       $update_auto_check"
 echo "  Update Channel:      $update_channel"
 echo "  Config File:         $CONFIG_FILE"
+if [ "$screen_backend" = "swayidle" ]; then
+    echo "  Warning: swayidle is a deprecated compatibility backend planned for removal in LG Buddy 2.0.0; use auto or wayland."
+fi
 echo ""
 
 if [ "${LG_BUDDY_NONINTERACTIVE:-0}" != "1" ]; then

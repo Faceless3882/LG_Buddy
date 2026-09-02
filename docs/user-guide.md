@@ -82,8 +82,8 @@ Current settings are:
 | `tv.ip` | TV network address. |
 | `tv.mac` | TV MAC address used for Wake-on-LAN. |
 | `tv.input` | Input LG Buddy manages, such as `HDMI_2`. |
-| `tv.platform` | TV control implementation: `bscpylgtv` or experimental `lg_webos`. |
-| `screen.backend` | Desktop idle backend: `auto`, `gnome`, `wayland`, or `swayidle`. |
+| `tv.platform` | TV control implementation: native `lg_webos` or the `bscpylgtv` compatibility fallback. |
+| `screen.backend` | Desktop idle backend: `auto`, `gnome`, `wayland`, or deprecated compatibility value `swayidle`. |
 | `screen.idle_blank` | Enable or disable automatic idle blanking. |
 | `screen.idle_timeout` | Seconds of inactivity before blanking; defaults to 300. |
 | `screen.restore_policy` | `conservative` or `aggressive` restore behavior. |
@@ -129,10 +129,10 @@ The restore policies are:
 
 | Backend | When to use it |
 | --- | --- |
-| `auto` | Default. Uses GNOME when the session is compatible, otherwise `swayidle` when installed. It does not select native Wayland yet. |
+| `auto` | Default. Prefers compatible GNOME, then compatible native Wayland, then the deprecated `swayidle` fallback when installed. |
 | `gnome` | A GNOME Shell session with the required GNOME idle services. |
-| `wayland` | A compatible recent Wayland compositor. This backend is currently opt-in. |
-| `swayidle` | A Wayland session with `swayidle` installed. |
+| `wayland` | Force native monitoring on a compositor that advertises `ext_idle_notifier_v1` version 2 or newer and at least one `wl_seat`. |
+| `swayidle` | Deprecated compatibility backend for existing installations and older compositors. Fresh interactive configuration does not offer it. |
 
 Select a backend persistently:
 
@@ -147,8 +147,9 @@ lg-buddy settings unset screen.backend
 ```
 
 An explicitly selected backend reports a compatibility error rather than
-silently switching to another backend. If native Wayland is unavailable, use
-`auto` or `swayidle` instead.
+silently switching to another backend. `auto` reports why it moved past GNOME
+or native Wayland. Existing explicit `swayidle` selections remain valid and are
+never silently rewritten, but emit a deprecation notice.
 
 Check the selected backend and user service:
 
@@ -158,8 +159,16 @@ systemctl --user status LG_Buddy_screen.service
 journalctl --user -u LG_Buddy_screen.service --since today
 ```
 
-For `auto`, `settings describe` also shows the backend currently detected, such
-as `auto (gnome)` or `auto (swayidle)`.
+For `auto`, `settings describe` prints the configured selection, resolved
+backend, and fallback reason separately. Unsupported native sessions report
+the compositor connection or protocol limitation before using `swayidle` or
+reporting that no backend is available.
+
+The `swayidle` compatibility window lasts through the 1.x release line, with
+removal planned for 2.0.0. Removal requires native Wayland monitoring to remain
+field-validated on supported non-GNOME compositors, precise unsupported-session
+diagnostics, and a released migration window in which existing configurations
+continue to run without being rewritten.
 
 ### Gamepad Activity
 
@@ -176,10 +185,16 @@ input paths and hardware troubleshooting.
 
 `tv.platform` selects the TV control implementation:
 
-- `bscpylgtv`: the compatibility default.
-- `lg_webos`: the experimental native Rust webOS implementation.
+- `lg_webos`: the native Rust implementation and fresh-profile default.
+- `bscpylgtv`: the explicit Python compatibility fallback.
 
-Select the native implementation with:
+Fresh configuration verifies native pairing before it saves the profile.
+Existing profiles retain their selected platform. If an older profile has no
+platform key, it continues to resolve to `bscpylgtv`; rewriting that profile
+through the configurator materializes the compatibility choice instead of
+silently moving it to native control.
+
+Move an existing profile to the native implementation with:
 
 ```bash
 lg-buddy settings set tv.platform lg_webos
@@ -191,11 +206,27 @@ commands can pair or repair credentials when necessary; unattended startup,
 shutdown, suspend, and resume handling use an existing credential and do not
 open a pairing prompt.
 
-Return to the default with:
+Select and persist the compatibility fallback with:
 
 ```bash
-lg-buddy settings unset tv.platform
+lg-buddy settings set tv.platform bscpylgtv
 ```
+
+`settings unset tv.platform` removes the explicit choice and therefore resolves
+to `bscpylgtv` for legacy compatibility; it does not apply the fresh-profile
+default.
+
+For support and troubleshooting, inspect the effective platform, its source,
+and accepted values with:
+
+```bash
+lg-buddy settings describe tv.platform
+```
+
+If native pairing or its power-state verification fails, setup leaves the
+profile unsaved. Confirm that the TV is reachable and accept its pairing prompt,
+then rerun configuration or `settings set tv.platform lg_webos`. Select
+`bscpylgtv` explicitly if native control is not usable on that TV.
 
 ## System Sleep And Wake
 
@@ -231,12 +262,26 @@ lg-buddy updates check
 lg-buddy updates check --notify
 lg-buddy settings set updates.channel prerelease
 lg-buddy updates check
+lg-buddy updates install
 ```
 
 The saved `updates.channel` setting controls every check, regardless of the
 installed binary's own release channel. `stable` checks stable releases only;
-`prerelease` considers both stable and prerelease releases and selects the
-highest semantic version.
+`prerelease` accepts GitHub's newest published stable or prerelease. Release
+promotion requires every version to advance both release-channel heads, so the
+newest published release is also the highest semantic version.
+
+`updates install` is an assisted, foreground upgrade. It checks whether the
+current host and installation are safely upgradeable before discovery, shows
+the current and target version/channel/commit, and requires you to type `yes`
+in a terminal before downloading the release bundle. It then verifies the
+bundle, reruns preflight from the candidate, invokes `install.sh --upgrade`,
+and verifies the installed release identity. It does not accept channel or
+version arguments, downgrade, migrate legacy installations, or run unattended.
+
+`v1.4.0-beta.2` is the first release that contains `updates install`. Older
+installations require one normal manual installation of an updater-capable
+release before this assisted path is available.
 
 `--notify` sends a desktop notification through the running user service. When
 supported by the desktop, the notification includes actions to open the release
@@ -251,7 +296,8 @@ lg-buddy settings set updates.auto_check enabled
 lg-buddy settings set updates.channel prerelease
 ```
 
-Disabling automatic checks does not disable manual `updates check` commands.
+Disabling automatic checks does not disable manual `updates check` or
+`updates install` commands. Both use the saved `updates.channel` setting.
 
 ## Technical References
 

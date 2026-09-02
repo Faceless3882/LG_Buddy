@@ -27,11 +27,13 @@ binary, so normal installation does not require a Rust toolchain.
 | Brightness, volume, settings, and update commands | ✅ | ✅ | ✅ | ✅ |
 | Brightness desktop dialog | ✅ | ✅ | ✅ | ✅ |
 
-The default `auto` backend uses GNOME when compatible, then falls back to
-`swayidle` when installed. Native Wayland is currently opt-in:
+The default `auto` backend prefers a complete GNOME session, then native
+Wayland when the compositor provides `ext_idle_notifier_v1` version 2 or newer
+and at least one seat. It uses `swayidle` only as a deprecated compatibility
+fallback when native monitoring is unavailable. Inspect the decision with:
 
 ```bash
-lg-buddy settings set screen.backend wayland
+lg-buddy settings describe screen.backend
 ```
 
 See the [user guide](docs/user-guide.md#automatic-screen-blanking) for backend
@@ -40,18 +42,19 @@ selection and troubleshooting. Protocol and event details are documented in the
 
 ## Before You Install
 
-The native `lg_webos` control path does not require Python. Native-only packages
-can omit the Python client, `venv`, and `pip`. The current `install.sh` flow
-still provisions `bscpylgtv` as a compatibility fallback and installs the
-brightness dialog, so release-bundle installation checks for Python 3 with
-`venv` and `pip`, plus `zenity`. `swayidle` is required only when using that
-desktop backend.
+Fresh installation selects the native `lg_webos` control path, which does not
+require Python. Native-only packages can omit the Python client, `venv`, and
+`pip`. The release-bundle installer still provisions `bscpylgtv` as an explicit
+compatibility fallback and installs the brightness dialog, so it checks for
+Python 3 with a `venv` that provisions `pip`, plus `zenity`. `swayidle` is needed
+only by an existing explicit selection or as the deprecated compatibility
+fallback.
 
 ### Debian, Ubuntu, and Pop!_OS
 
 ```bash
 sudo apt install python3-venv python3-pip zenity
-# Optional swayidle backend:
+# Deprecated compatibility fallback only:
 sudo apt install swayidle
 ```
 
@@ -59,7 +62,7 @@ sudo apt install swayidle
 
 ```bash
 sudo dnf install python3 python3-pip python3-virtualenv zenity
-# Optional swayidle backend:
+# Deprecated compatibility fallback only:
 sudo dnf install swayidle
 ```
 
@@ -67,7 +70,7 @@ sudo dnf install swayidle
 
 ```bash
 sudo pacman -S python python-pip python-virtualenv zenity
-# Optional swayidle backend:
+# Deprecated compatibility fallback only:
 sudo pacman -S swayidle
 ```
 
@@ -90,10 +93,22 @@ Do not run the installer with `sudo`; it requests elevated access when needed.
 The installer asks for the TV's IP address, MAC address, HDMI input, control
 platform, and desktop idle preferences, then installs the required services.
 
-If you select the native `lg_webos` control platform, accept the pairing prompt
-during setup. With the default `bscpylgtv` platform, the prompt may instead
-appear on first use; see the
+Fresh setup defaults to the native `lg_webos` platform and verifies pairing
+before saving the configuration, so accept the prompt on the TV. You can
+instead select the explicit `bscpylgtv` compatibility fallback; its prompt may
+appear on first use. See the
 [bscpylgtv first-use guide](https://github.com/chros73/bscpylgtv/blob/master/docs/guides/first_use.md).
+
+To check, verify, and install the next release from your saved update channel,
+run `lg-buddy updates install` as your regular user. It checks host
+compatibility, shows the exact target identity, asks for explicit confirmation,
+and then runs the verified bundle's upgrade installer. Upgrade mode preserves
+configuration and credentials and does not repeat setup or pairing;
+incompatible and legacy layouts are refused rather than migrated.
+
+`v1.4.0-beta.2` is the first release with `updates install`; older versions
+need one normal manual release-bundle installation before assisted upgrades are
+available.
 
 The shell installer targets conventional Linux installations with mutable
 system locations. First-class NixOS packaging is tracked in
@@ -118,6 +133,7 @@ lg-buddy volume mute
 lg-buddy settings list
 lg-buddy settings describe screen.backend
 lg-buddy updates check
+lg-buddy updates install
 lg-buddy --version
 ```
 

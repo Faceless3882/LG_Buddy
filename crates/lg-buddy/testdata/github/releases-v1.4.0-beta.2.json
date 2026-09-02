@@ -1,0 +1,28 @@
+[
+  {
+    "tag_name": "v1.4.0-beta.2",
+    "html_url": "https://github.com/Staphylococcus/LG_Buddy/releases/tag/v1.4.0-beta.2",
+    "draft": false,
+    "prerelease": true,
+    "assets": [
+      {
+        "id": 539980839,
+        "name": "lg-buddy-1.4.0-beta.2-x86_64-unknown-linux-musl.tar.gz",
+        "state": "uploaded",
+        "size": 3051471,
+        "digest": "sha256:883e6cb869cbe60988a195acac2e15864d904797edfefbb7d90052eff9a17d32",
+        "url": "https://api.github.com/repos/Staphylococcus/LG_Buddy/releases/assets/539980839",
+        "browser_download_url": "https://github.com/Staphylococcus/LG_Buddy/releases/download/v1.4.0-beta.2/lg-buddy-1.4.0-beta.2-x86_64-unknown-linux-musl.tar.gz"
+      },
+      {
+        "id": 539980872,
+        "name": "sha256sums.txt",
+        "state": "uploaded",
+        "size": 123,
+        "digest": "sha256:581c539163fc8477b464d05c598fdcb19f654c83b124c9986665b1a531093dd1",
+        "url": "https://api.github.com/repos/Staphylococcus/LG_Buddy/releases/assets/539980872",
+        "browser_download_url": "https://github.com/Staphylococcus/LG_Buddy/releases/download/v1.4.0-beta.2/sha256sums.txt"
+      }
+    ]
+  }
+]

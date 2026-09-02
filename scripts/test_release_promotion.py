@@ -7,7 +7,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from release_promotion import PromotionError, SemVer, validate_promotion
+from release_promotion import (
+    PromotionError,
+    SemVer,
+    validate_merged_promotion,
+    validate_promotion,
+)
 
 
 class RepositoryFixture:
@@ -55,7 +60,7 @@ class RepositoryFixture:
         self.git("switch", "dev")
         self.write_version(version, lock_version)
         self.git("add", ".")
-        self.git("commit", "-m", f"prepare {version}")
+        self.git("commit", "--allow-empty", "-m", f"prepare {version}")
         return self.git("rev-parse", "HEAD")
 
     def validate(self, target: str, head_sha: str) -> dict[str, object]:
@@ -68,6 +73,25 @@ class RepositoryFixture:
             main_ref="main",
             prerelease_ref="prerelease",
             dev_ref="dev",
+        )
+
+    def merge_promotion(self, target: str) -> tuple[str, str, str]:
+        source_sha = self.git("rev-parse", "dev")
+        base_sha = self.git("rev-parse", target)
+        self.git("switch", target)
+        self.git("merge", "--no-ff", "dev", "-m", f"promote dev to {target}")
+        return base_sha, source_sha, self.git("rev-parse", "HEAD")
+
+    def validate_merged(
+        self, target: str, head_sha: str, base_sha: str
+    ) -> dict[str, object]:
+        return validate_merged_promotion(
+            self.path,
+            target=target,
+            head_ref=head_sha,
+            base_sha=base_sha,
+            main_ref="main",
+            prerelease_ref="prerelease",
         )
 
 
@@ -137,6 +161,28 @@ class PromotionTests(unittest.TestCase):
         with self.assertRaisesRegex(PromotionError, "does not match Cargo.lock"):
             self.repository.validate("prerelease", head)
 
+    def test_stable_version_must_strictly_advance_main(self) -> None:
+        for version in ("1.3.0", "1.2.9"):
+            with self.subTest(version=version):
+                head = self.repository.candidate(version)
+                with self.assertRaisesRegex(
+                    PromotionError, f"candidate {version} must advance main from 1.3.0"
+                ):
+                    self.repository.validate("main", head)
+
+    def test_prerelease_version_must_strictly_advance_prerelease(self) -> None:
+        current = self.repository.candidate("1.4.0-beta.2")
+        self.repository.git("branch", "-f", "prerelease", current)
+
+        for version in ("1.4.0-beta.2", "1.4.0-beta.1"):
+            with self.subTest(version=version):
+                head = self.repository.candidate(version)
+                with self.assertRaisesRegex(
+                    PromotionError,
+                    f"candidate {version} must advance prerelease from 1.4.0-beta.2",
+                ):
+                    self.repository.validate("prerelease", head)
+
     def test_stale_target_is_rejected(self) -> None:
         head = self.repository.candidate("1.4.0-beta.1")
         with self.assertRaisesRegex(PromotionError, "promotion target moved"):
@@ -160,13 +206,12 @@ class PromotionTests(unittest.TestCase):
         with self.assertRaisesRegex(PromotionError, "is not an ancestor"):
             self.repository.validate("prerelease", head)
 
-    def test_matching_existing_tag_is_an_idempotent_retry(self) -> None:
+    def test_existing_candidate_tag_is_rejected_before_merge(self) -> None:
         head = self.repository.candidate("1.4.0-beta.1")
         self.repository.git("tag", "v1.4.0-beta.1", head)
 
-        result = self.repository.validate("prerelease", head)
-
-        self.assertTrue(result["retry"])
+        with self.assertRaisesRegex(PromotionError, "already exists before promotion merge"):
+            self.repository.validate("prerelease", head)
 
     def test_conflicting_existing_tag_is_rejected(self) -> None:
         head = self.repository.candidate("1.4.0-beta.1")
@@ -174,6 +219,87 @@ class PromotionTests(unittest.TestCase):
 
         with self.assertRaisesRegex(PromotionError, "already points"):
             self.repository.validate("prerelease", head)
+
+    def test_merged_prerelease_is_publishable(self) -> None:
+        self.repository.candidate("1.4.0-beta.1")
+        base, source, merged = self.repository.merge_promotion("prerelease")
+
+        result = self.repository.validate_merged("prerelease", merged, base)
+
+        self.assertTrue(result["publish"])
+        self.assertEqual(result["head_sha"], merged)
+        self.assertEqual(result["source_sha"], source)
+        self.assertEqual(result["tag"], "v1.4.0-beta.1")
+        self.assertEqual(result["channel"], "prerelease")
+
+    def test_merged_stable_release_after_prerelease_is_publishable(self) -> None:
+        prerelease = self.repository.candidate("1.4.0-beta.1")
+        self.repository.git("branch", "-f", "prerelease", prerelease)
+        self.repository.write_version("1.4.0")
+        self.repository.git("add", ".")
+        self.repository.git("commit", "-m", "prepare stable")
+        base, source, merged = self.repository.merge_promotion("main")
+
+        result = self.repository.validate_merged("main", merged, base)
+
+        self.assertTrue(result["publish"])
+        self.assertEqual(result["source_sha"], source)
+        self.assertEqual(result["tag"], "v1.4.0")
+        self.assertEqual(result["channel"], "stable")
+
+    def test_stable_alignment_push_to_prerelease_does_not_publish_again(self) -> None:
+        prerelease = self.repository.candidate("1.4.0-beta.1")
+        self.repository.git("branch", "-f", "prerelease", prerelease)
+        self.repository.write_version("1.4.0")
+        self.repository.git("add", ".")
+        self.repository.git("commit", "-m", "prepare stable")
+        _, _, merged = self.repository.merge_promotion("main")
+        self.repository.git("branch", "-f", "prerelease", merged)
+
+        result = self.repository.validate_merged("prerelease", merged, prerelease)
+
+        self.assertFalse(result["publish"])
+        self.assertEqual(result["head_sha"], merged)
+        self.assertEqual(result["base_sha"], prerelease)
+        self.assertEqual(result["channel"], "stable")
+
+    def test_release_branch_fast_forward_without_a_merge_is_rejected(self) -> None:
+        head = self.repository.candidate("1.4.0-beta.1")
+        self.repository.git("branch", "-f", "prerelease", head)
+
+        with self.assertRaisesRegex(PromotionError, "two-parent merge commit"):
+            self.repository.validate_merged("prerelease", head, self.repository.stable_sha)
+
+    def test_matching_merged_release_tag_is_an_idempotent_retry(self) -> None:
+        self.repository.candidate("1.4.0-beta.1")
+        base, _, merged = self.repository.merge_promotion("prerelease")
+        self.repository.git("tag", "v1.4.0-beta.1", merged)
+
+        result = self.repository.validate_merged("prerelease", merged, base)
+
+        self.assertTrue(result["retry"])
+
+    def test_merged_release_lockfile_mismatch_is_rejected(self) -> None:
+        self.repository.candidate("1.4.0-beta.1", "1.3.0")
+        base, _, merged = self.repository.merge_promotion("prerelease")
+
+        with self.assertRaisesRegex(PromotionError, "does not match Cargo.lock"):
+            self.repository.validate_merged("prerelease", merged, base)
+
+    def test_merged_release_channel_mismatch_is_rejected(self) -> None:
+        self.repository.candidate("1.4.0")
+        base, _, merged = self.repository.merge_promotion("prerelease")
+
+        with self.assertRaisesRegex(PromotionError, "requires a prerelease version"):
+            self.repository.validate_merged("prerelease", merged, base)
+
+    def test_conflicting_merged_release_tag_is_rejected(self) -> None:
+        self.repository.candidate("1.4.0-beta.1")
+        base, _, merged = self.repository.merge_promotion("prerelease")
+        self.repository.git("tag", "v1.4.0-beta.1", self.repository.stable_sha)
+
+        with self.assertRaisesRegex(PromotionError, "already points"):
+            self.repository.validate_merged("prerelease", merged, base)
 
 
 if __name__ == "__main__":

@@ -168,8 +168,8 @@ facts; it does not acquire gamepad responsibility.
 
 ### Native Wayland
 
-The explicit `wayland` backend requires `ext_idle_notifier_v1` version 2 or
-newer and at least one advertised `wl_seat`. It monitors every seat, including
+The native `wayland` backend requires `ext_idle_notifier_v1` version 2 or newer
+and at least one advertised `wl_seat`. It monitors every seat, including
 seats that currently advertise no input capabilities, using zero-timeout idle
 notifications. `resumed` maps to desktop activity; `idled` remains
 observational, so only LG Buddy's inactivity deadline can trigger blanking.
@@ -177,8 +177,8 @@ observational, so only LG Buddy's inactivity deadline can trigger blanking.
 Seats are added and removed dynamically. Connection or dispatch loss, removal
 of the bound notifier, or removal of the last seat is fatal to the provider and
 causes the user service to retry. Explicit selection reports capability errors
-without falling back. `auto` does not select this backend yet, and `swayidle`
-remains available.
+without falling back. `auto` selects native Wayland after the complete GNOME
+contract and before the deprecated `swayidle` compatibility backend.
 
 ### `swayidle`
 
@@ -195,6 +195,9 @@ Current mapping:
 
 Notes:
 
+- `swayidle` is deprecated, remains accepted for existing explicit selections,
+  and is planned for removal in 2.0.0 after the native provider remains
+  field-validated across supported compositors and the 1.x migration window.
 - `swayidle` does not provide a clear equivalent of GNOME's `WakeRequested`.
 - `swayidle` does not provide a Mutter-style early activity surface.
 - LG Buddy owns the configured timeout value for this backend.
