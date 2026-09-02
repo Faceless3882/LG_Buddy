@@ -42,12 +42,13 @@ selection and troubleshooting. Protocol and event details are documented in the
 
 ## Before You Install
 
-The native `lg_webos` control path does not require Python. Native-only packages
-can omit the Python client, `venv`, and `pip`. The current fresh-install flow
-still provisions `bscpylgtv` as a compatibility fallback and installs the
-brightness dialog, so release-bundle installation checks for Python 3 with a
-`venv` that provisions `pip`, plus `zenity`. `swayidle` is needed only by an
-existing explicit selection or as the deprecated compatibility fallback.
+Fresh installation selects the native `lg_webos` control path, which does not
+require Python. Native-only packages can omit the Python client, `venv`, and
+`pip`. The release-bundle installer still provisions `bscpylgtv` as an explicit
+compatibility fallback and installs the brightness dialog, so it checks for
+Python 3 with a `venv` that provisions `pip`, plus `zenity`. `swayidle` is needed
+only by an existing explicit selection or as the deprecated compatibility
+fallback.
 
 ### Debian, Ubuntu, and Pop!_OS
 
@@ -92,9 +93,10 @@ Do not run the installer with `sudo`; it requests elevated access when needed.
 The installer asks for the TV's IP address, MAC address, HDMI input, control
 platform, and desktop idle preferences, then installs the required services.
 
-If you select the native `lg_webos` control platform, accept the pairing prompt
-during setup. With the default `bscpylgtv` platform, the prompt may instead
-appear on first use; see the
+Fresh setup defaults to the native `lg_webos` platform and verifies pairing
+before saving the configuration, so accept the prompt on the TV. You can
+instead select the explicit `bscpylgtv` compatibility fallback; its prompt may
+appear on first use. See the
 [bscpylgtv first-use guide](https://github.com/chros73/bscpylgtv/blob/master/docs/guides/first_use.md).
 
 To check, verify, and install the next release from your saved update channel,

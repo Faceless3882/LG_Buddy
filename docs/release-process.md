@@ -65,6 +65,10 @@ There is no separate version input.
    response evidence for the deterministic mock. Stable promotion remains
    blocked until this exact prerelease commit has a successful canary.
 
+Replace the publisher's generic release description with concise,
+release-specific notes for user-visible default or compatibility changes before
+announcing the release.
+
 Do not push version tags manually. Protected `v*` tags and stream-alignment
 writes permit bypass only to the dedicated release App. A failed post-merge
 release run can be rerun safely: an incomplete draft remains private and is
