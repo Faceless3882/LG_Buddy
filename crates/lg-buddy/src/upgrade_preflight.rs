@@ -920,14 +920,14 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
                 );
             }
             InstallerPathPolicy::MutateDirectory => {
-                self.check_mutable_directory(path, &facts, check, 0o300);
+                self.check_mutable_directory(path, &facts, owner_uid, check, 0o300);
             }
             InstallerPathPolicy::RecursiveClear => {
-                self.check_mutable_directory(path, &facts, check, 0o300);
+                self.check_mutable_directory(path, &facts, owner_uid, check, 0o300);
                 self.check_recursive_clear_mounts(path, check);
             }
             InstallerPathPolicy::ExactDropInDirectory { expected_entry } => {
-                self.check_mutable_directory(path, &facts, check, 0o700);
+                self.check_mutable_directory(path, &facts, owner_uid, check, 0o700);
                 self.check_exact_directory(path, expected_entry, check);
             }
             InstallerPathPolicy::ReadableInput => self.check_permissions(
@@ -1016,6 +1016,7 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
         &mut self,
         path: &Path,
         facts: &PathFacts,
+        owner_uid: u32,
         check: &'static str,
         required_permissions: u32,
     ) {
@@ -1035,15 +1036,21 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
                 "replace the mounted path with an ordinary installation directory before upgrading",
             );
         }
+        let required_permissions = if owner_uid == 0 && facts.owner_uid == 0 {
+            required_permissions & !0o200
+        } else {
+            required_permissions
+        };
         self.check_permissions(
             path,
             facts,
             required_permissions,
             check,
-            if required_permissions & 0o400 != 0 {
-                "directory is not readable, writable, and searchable by its owner"
-            } else {
-                "directory is not writable and searchable by its owner"
+            match required_permissions {
+                0o100 => "directory is not searchable by its owner",
+                0o500 => "directory is not readable and searchable by its owner",
+                0o700 => "directory is not readable, writable, and searchable by its owner",
+                _ => "directory is not writable and searchable by its owner",
             },
         );
     }
@@ -1935,6 +1942,55 @@ mod tests {
             "path-containment",
             &directory,
             "writable by its group or by other users",
+        );
+    }
+
+    #[test]
+    fn root_owned_mutation_directory_may_rely_on_privileged_write_access() {
+        let fixture = InstalledFixture::new("root-owned-read-only-mode");
+        let directory = fixture.facts.layout.system_path("/usr/bin");
+
+        let root_owned = OverriddenFilesystem {
+            path: directory.clone(),
+            owner_uid: Some(0),
+            mode: Some(0o555),
+            read_only: None,
+            mount_point: None,
+        };
+        let mut root_checker = Checker::new(&root_owned);
+        root_checker.check_requirement(
+            &directory,
+            0,
+            None,
+            InstallerPathPolicy::MutateDirectory,
+            "policy-contract",
+        );
+        assert!(
+            root_checker.report.compatible(),
+            "{}",
+            root_checker.report.render()
+        );
+
+        let user_owned = OverriddenFilesystem {
+            path: directory.clone(),
+            owner_uid: Some(fixture.facts.user_owner_uid),
+            mode: Some(0o555),
+            read_only: None,
+            mount_point: None,
+        };
+        let mut user_checker = Checker::new(&user_owned);
+        user_checker.check_requirement(
+            &directory,
+            fixture.facts.user_owner_uid,
+            None,
+            InstallerPathPolicy::MutateDirectory,
+            "policy-contract",
+        );
+        assert_failure(
+            &user_checker.report,
+            "policy-contract",
+            &directory,
+            "not writable and searchable",
         );
     }
 
