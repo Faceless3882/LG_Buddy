@@ -679,9 +679,12 @@ remain inside the adapter. Wake-on-LAN keeps the configured network identity at
 
 ### TV Implementations
 
-`tv.platform` selects the production TV implementation. `bscpylgtvcommand`
-remains the compatibility default, including when an existing profile has no
-platform value. `lg_webos` explicitly selects the native Rust implementation.
+`tv.platform` selects the production TV implementation. Fresh profiles select
+the native Rust `lg_webos` implementation and verify pairing before the profile
+is saved. Existing profiles retain their explicit choice; a missing platform
+value continues to resolve to `bscpylgtv` and is materialized as that
+compatibility choice when configuration is rewritten. `bscpylgtvcommand`
+remains available as an explicit fallback.
 
 The Rust runtime talks to it through `BscpylgtvCommandClient`, which:
 

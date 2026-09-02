@@ -77,7 +77,7 @@ Good shapes:
 tvs_primary_ip=192.168.1.100
 tvs_primary_mac=aa:bb:cc:dd:ee:ff
 tvs_primary_input=HDMI_2
-tvs_primary_platform=bscpylgtv
+tvs_primary_platform=lg_webos
 screen_restore_policy=conservative
 screen_idle_blank=enabled
 system_sleep_wake_policy=enabled
@@ -109,12 +109,14 @@ choice.
 
 `tvs_primary_platform` selects the control platform for the active TV profile:
 
-- `bscpylgtv` remains the default, including for existing profiles where the
-  key is absent
-- `lg_webos` is the experimental native Rust platform and can be selected
-  during initial configuration or with `lg-buddy settings set tv.platform lg_webos`
-- initial native selection pairs before it is saved; ordinary TV operations
-  can also pair or repair credentials when needed
+- fresh profiles select `lg_webos` and pair before the configuration is saved
+- existing profiles keep their explicit platform; a missing platform continues
+  to resolve to `bscpylgtv` and is materialized as such when configuration is
+  rewritten
+- `bscpylgtv` remains an accepted explicit compatibility fallback
+- existing users can opt into native control with
+  `lg-buddy settings set tv.platform lg_webos`; ordinary foreground TV
+  operations can also pair or repair credentials when needed
 - shutdown, suspend, resume, startup, and network-teardown handling use stored
   credentials only and skip promptly when no credential is available
 - this is the only platform selector; there is no separate backend, adapter,

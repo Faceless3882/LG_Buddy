@@ -609,13 +609,13 @@ exit 1\n",
         });
     }
 
-    pub fn run_native_initial_configuration(&mut self) {
+    pub fn run_default_initial_configuration(&mut self) {
         self.ensure_env().set("LG_BUDDY_NONINTERACTIVE", "1");
         self.ensure_env().set("LG_BUDDY_TV_IP", "127.0.0.1");
         self.ensure_env()
             .set("LG_BUDDY_TV_MAC", "22:33:44:55:66:77");
         self.ensure_env().set("LG_BUDDY_INPUT", "HDMI_2");
-        self.ensure_env().set("LG_BUDDY_TV_PLATFORM", "lg_webos");
+        self.ensure_env().remove("LG_BUDDY_TV_PLATFORM");
         self.ensure_env()
             .set("LG_BUDDY_RUNTIME_BINARY", env!("CARGO_BIN_EXE_lg-buddy"));
         self.ensure_env().set("LG_BUDDY_SKIP_SYSTEMD_ACTIONS", "1");
@@ -624,7 +624,8 @@ exit 1\n",
             .join("../..")
             .join("configure.sh");
         let started = std::time::Instant::now();
-        let output = ProcessCommand::new(configure)
+        let output = ProcessCommand::new("bash")
+            .arg(configure)
             .output()
             .expect("run initial configuration");
         let duration = started.elapsed();

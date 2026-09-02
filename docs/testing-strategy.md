@@ -148,8 +148,10 @@ It is useful when we want to express scenarios like:
 - when the user returns after LG Buddy blanked the TV, LG Buddy restores the screen
 - when aggressive restore policy is enabled, wake/activity can restore even without a marker
 - when GNOME is available, backend detection resolves to `gnome`
-- when the user chooses `lg_webos` during initial configuration, pairing stores
-  the credential before setup completes
+- when fresh configuration accepts the default `lg_webos` platform, pairing
+  stores the credential before setup completes
+- when an existing profile has no platform value, configuration preserves and
+  materializes the `bscpylgtv` compatibility fallback
 - when native credentials are missing or stale, ordinary TV commands pair or
   repair them as part of the operation
 - when native credentials are missing, shutdown and suspend-related commands

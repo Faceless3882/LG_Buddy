@@ -82,7 +82,7 @@ Current settings are:
 | `tv.ip` | TV network address. |
 | `tv.mac` | TV MAC address used for Wake-on-LAN. |
 | `tv.input` | Input LG Buddy manages, such as `HDMI_2`. |
-| `tv.platform` | TV control implementation: `bscpylgtv` or experimental `lg_webos`. |
+| `tv.platform` | TV control implementation: native `lg_webos` or the `bscpylgtv` compatibility fallback. |
 | `screen.backend` | Desktop idle backend: `auto`, `gnome`, `wayland`, or deprecated compatibility value `swayidle`. |
 | `screen.idle_blank` | Enable or disable automatic idle blanking. |
 | `screen.idle_timeout` | Seconds of inactivity before blanking; defaults to 300. |
@@ -185,10 +185,16 @@ input paths and hardware troubleshooting.
 
 `tv.platform` selects the TV control implementation:
 
-- `bscpylgtv`: the compatibility default.
-- `lg_webos`: the experimental native Rust webOS implementation.
+- `lg_webos`: the native Rust implementation and fresh-profile default.
+- `bscpylgtv`: the explicit Python compatibility fallback.
 
-Select the native implementation with:
+Fresh configuration verifies native pairing before it saves the profile.
+Existing profiles retain their selected platform. If an older profile has no
+platform key, it continues to resolve to `bscpylgtv`; rewriting that profile
+through the configurator materializes the compatibility choice instead of
+silently moving it to native control.
+
+Move an existing profile to the native implementation with:
 
 ```bash
 lg-buddy settings set tv.platform lg_webos
@@ -200,11 +206,27 @@ commands can pair or repair credentials when necessary; unattended startup,
 shutdown, suspend, and resume handling use an existing credential and do not
 open a pairing prompt.
 
-Return to the default with:
+Select and persist the compatibility fallback with:
 
 ```bash
-lg-buddy settings unset tv.platform
+lg-buddy settings set tv.platform bscpylgtv
 ```
+
+`settings unset tv.platform` removes the explicit choice and therefore resolves
+to `bscpylgtv` for legacy compatibility; it does not apply the fresh-profile
+default.
+
+For support and troubleshooting, inspect the effective platform, its source,
+and accepted values with:
+
+```bash
+lg-buddy settings describe tv.platform
+```
+
+If native pairing or its power-state verification fails, setup leaves the
+profile unsaved. Confirm that the TV is reachable and accept its pairing prompt,
+then rerun configuration or `settings set tv.platform lg_webos`. Select
+`bscpylgtv` explicitly if native control is not usable on that TV.
 
 ## System Sleep And Wake
 

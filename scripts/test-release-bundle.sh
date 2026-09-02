@@ -344,17 +344,51 @@ printf '%s\n' "$VERSION_OUTPUT" | grep -q "^commit: "
 
 FRESH_CONFIG_HOME="$WORK_DIR/fresh-config-home"
 FRESH_CONFIG_OUTPUT="$WORK_DIR/fresh-config.output"
+FRESH_NATIVE_RUNTIME="$WORK_DIR/fresh-native-runtime"
+FRESH_NATIVE_PAIRING_MARKER="$WORK_DIR/fresh-native-pairing"
+FRESH_NATIVE_TOKEN="$FRESH_CONFIG_HOME/.config/lg-buddy/tvs/primary/access-token.json"
+cat >"$FRESH_NATIVE_RUNTIME" <<'EOF'
+#!/bin/sh
+set -eu
+
+[ "$#" -eq 4 ] &&
+    [ "$1" = "settings" ] &&
+    [ "$2" = "set" ] &&
+    [ "$3" = "tv.platform" ] &&
+    [ "$4" = "lg_webos" ] || exit 2
+
+config_path="${LG_BUDDY_CONFIG:?}"
+token_dir="$(dirname "$config_path")/tvs/primary"
+sed -i 's/^tvs_primary_platform=bscpylgtv$/tvs_primary_platform=lg_webos/' "$config_path"
+mkdir -p "$token_dir"
+chmod 700 "$(dirname "$token_dir")" "$token_dir"
+printf '{\n  "access_token": "release-smoke-native-token"\n}\n' >"$token_dir/access-token.json"
+chmod 600 "$token_dir/access-token.json"
+: >"${LG_BUDDY_NATIVE_PAIRING_MARKER:?}"
+echo "LG Buddy native webOS preflight: pairing required; accept the prompt on the TV."
+echo "LG Buddy native webOS preflight: stored access token at $token_dir/access-token.json"
+echo "LG Buddy native webOS preflight succeeded: power_state=Active"
+EOF
+chmod 755 "$FRESH_NATIVE_RUNTIME"
 mkdir -p "$FRESH_CONFIG_HOME"
 (
-    unset LG_BUDDY_NONINTERACTIVE LG_BUDDY_SCREEN_BACKEND LG_BUDDY_CONFIG
+    unset LG_BUDDY_NONINTERACTIVE LG_BUDDY_TV_PLATFORM LG_BUDDY_SCREEN_BACKEND LG_BUDDY_CONFIG
     export HOME="$FRESH_CONFIG_HOME"
     export XDG_CONFIG_HOME="$FRESH_CONFIG_HOME/.config"
-    export LG_BUDDY_RUNTIME_BINARY="$BUNDLE_DIR/lg-buddy"
+    export LG_BUDDY_RUNTIME_BINARY="$FRESH_NATIVE_RUNTIME"
+    export LG_BUDDY_NATIVE_PAIRING_MARKER="$FRESH_NATIVE_PAIRING_MARKER"
     export LG_BUDDY_SKIP_SYSTEMD_ACTIONS="1"
     printf '%s\n' \
-        '192.0.2.10' 'aa:bb:cc:dd:ee:ff' '2' '1' 'Y' '1' '300' '1' 'Y' \
+        '192.0.2.10' 'aa:bb:cc:dd:ee:ff' '2' '' 'Y' '1' '300' '1' 'Y' \
         | "$BUNDLE_DIR/configure.sh" >"$FRESH_CONFIG_OUTPUT" 2>&1
 )
+grep -F -q 'TV Platform:         lg_webos' "$FRESH_CONFIG_OUTPUT"
+grep -F -q 'pairing required; accept the prompt on the TV' "$FRESH_CONFIG_OUTPUT"
+grep -q '^tvs_primary_platform=lg_webos$' "$FRESH_CONFIG_HOME/.config/lg-buddy/config.env"
+assert_file "$FRESH_NATIVE_PAIRING_MARKER"
+assert_file "$FRESH_NATIVE_TOKEN"
+assert_mode "$FRESH_NATIVE_TOKEN" 600
+python3 -c 'import json, sys; assert json.load(open(sys.argv[1], encoding="utf-8")) == {"access_token": "release-smoke-native-token"}' "$FRESH_NATIVE_TOKEN"
 grep -F -q '  3) wayland' "$FRESH_CONFIG_OUTPUT"
 if grep -F -q 'swayidle' "$FRESH_CONFIG_OUTPUT"; then
     echo "Fresh interactive configuration presented swayidle."
@@ -371,6 +405,7 @@ export LG_BUDDY_SKIP_SYSTEMD_ACTIONS="1"
 export LG_BUDDY_TV_IP="192.168.1.10"
 export LG_BUDDY_TV_MAC="aa:bb:cc:dd:ee:ff"
 export LG_BUDDY_INPUT="HDMI_2"
+export LG_BUDDY_TV_PLATFORM="bscpylgtv"
 export LG_BUDDY_SCREEN_BACKEND="auto"
 export LG_BUDDY_SYSTEM_SLEEP_WAKE_POLICY="enabled"
 export PIP_DISABLE_PIP_VERSION_CHECK="1"
@@ -449,12 +484,19 @@ python3 "$SCRIPT_DIR/release_bundle_manifest.py" validate \
     --binary "$INSTALLED_BINARY" \
     "${MANIFEST_EXPECTATIONS[@]}"
 
-# Existing profiles without the platform key remain on bscpylgtv. Materialize
-# that choice through settings, then use a controlled raw-config fixture to
-# prove an unpaired native shutdown skips immediately without contacting a TV.
+# Existing profiles without the platform key remain on bscpylgtv. Rewriting
+# one through configure.sh materializes that choice instead of applying the
+# fresh-profile default. Then use a controlled raw-config fixture to prove an
+# unpaired native shutdown skips immediately without contacting a TV.
 sed -i '/^tvs_primary_platform=/d' "$CONFIG_FILE"
 "$INSTALLED_BINARY" settings get tv.platform | grep -q '^bscpylgtv$'
-"$INSTALLED_BINARY" settings set tv.platform bscpylgtv
+LEGACY_MISSING_CONFIGURE_OUTPUT="$WORK_DIR/legacy-missing-configure.output"
+(
+    unset LG_BUDDY_TV_PLATFORM
+    cd "$BUNDLE_DIR"
+    ./configure.sh >"$LEGACY_MISSING_CONFIGURE_OUTPUT" 2>&1
+)
+grep -F -q 'TV Platform:         bscpylgtv' "$LEGACY_MISSING_CONFIGURE_OUTPUT"
 grep -q '^tvs_primary_platform=bscpylgtv$' "$CONFIG_FILE"
 
 sed -i 's/^tvs_primary_platform=bscpylgtv$/tvs_primary_platform=lg_webos/' "$CONFIG_FILE"
@@ -494,10 +536,11 @@ grep -q '^updates_channel=prerelease$' "$CONFIG_FILE"
 # Configure should read inline-commented platform values with the same value
 # semantics as the Rust config parser, then persist the sanitized choice.
 sed -i 's/^tvs_primary_platform=bscpylgtv$/  tvs_primary_platform = bscpylgtv # legacy/' "$CONFIG_FILE"
-printf '%s\n' 'tvs_primary_platform =  lg_webos # experimental' >>"$CONFIG_FILE"
+printf '%s\n' 'tvs_primary_platform =  lg_webos # native' >>"$CONFIG_FILE"
 LEGACY_CONFIGURE_OUTPUT="$WORK_DIR/legacy-configure.output"
 
 (
+    unset LG_BUDDY_TV_PLATFORM
     unset LG_BUDDY_SCREEN_BACKEND
     unset LG_BUDDY_SCREEN_IDLE_TIMEOUT
     unset LG_BUDDY_SCREEN_RESTORE_POLICY

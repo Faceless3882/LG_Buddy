@@ -93,7 +93,9 @@ normalize_restore_policy() {
 current_tv_ip=""
 current_tv_mac=""
 current_input="HDMI_1"
-current_tv_platform="$LG_BUDDY_DEFAULT_TV_PLATFORM"
+# A missing platform in an existing profile remains the bscpylgtv compatibility
+# default. Only a genuinely fresh profile starts from the native platform.
+current_tv_platform="lg_webos"
 current_screen_backend="$LG_BUDDY_DEFAULT_SCREEN_BACKEND"
 current_screen_idle_blank="$LG_BUDDY_DEFAULT_SCREEN_IDLE_BLANK"
 current_screen_idle_timeout="$LG_BUDDY_DEFAULT_IDLE_TIMEOUT"
@@ -272,20 +274,20 @@ else
     done
 
     echo "Choose the TV control platform:"
-    echo "  1) bscpylgtv  (Python compatibility platform)"
-    echo "  2) lg_webos   (native LG Buddy platform)"
+    echo "  1) lg_webos   (native LG Buddy platform; recommended)"
+    echo "  2) bscpylgtv  (Python compatibility fallback)"
 
     case "$current_tv_platform" in
-        bscpylgtv) default_platform_choice="1" ;;
-        lg_webos) default_platform_choice="2" ;;
+        lg_webos) default_platform_choice="1" ;;
+        bscpylgtv) default_platform_choice="2" ;;
         *) default_platform_choice="1" ;;
     esac
 
     while true; do
         PLATFORM_CHOICE="$(prompt_with_default "Enter number (1-2)" "$default_platform_choice")"
         case "$PLATFORM_CHOICE" in
-            1) tv_platform="bscpylgtv"; break ;;
-            2) tv_platform="lg_webos"; break ;;
+            1) tv_platform="lg_webos"; break ;;
+            2) tv_platform="bscpylgtv"; break ;;
             *) echo "  Please enter 1 or 2." ;;
         esac
     done
