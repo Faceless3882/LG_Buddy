@@ -9,6 +9,7 @@ from record_github_release_responses import (
     GitHubRecorder,
     project_git_object,
     project_release,
+    record_responses,
     sanitize_location,
 )
 
@@ -30,6 +31,57 @@ class RecordingOpener:
         self.request = request
         self.timeout = timeout
         return StubResponse()
+
+
+class FixtureRecorder:
+    def __init__(self, latest_tag: str = "v1.4.0-beta.2") -> None:
+        self.latest_tag = latest_tag
+        self.paths: list[str] = []
+        self.release = {
+            "tag_name": "v1.4.0-beta.2",
+            "html_url": "https://github.test/releases/tag/v1.4.0-beta.2",
+            "draft": False,
+            "prerelease": True,
+            "assets": [
+                {
+                    "id": 1,
+                    "name": "lg-buddy-1.4.0-beta.2-x86_64-unknown-linux-musl.tar.gz",
+                    "state": "uploaded",
+                    "size": 100,
+                    "digest": "sha256:archive",
+                    "url": "https://api.github.test/assets/1",
+                    "browser_download_url": "https://github.test/assets/1",
+                },
+                {
+                    "id": 2,
+                    "name": "sha256sums.txt",
+                    "state": "uploaded",
+                    "size": 10,
+                    "digest": "sha256:checksums",
+                    "url": "https://api.github.test/assets/2",
+                    "browser_download_url": "https://github.test/assets/2",
+                },
+            ],
+        }
+
+    def api_json(self, path: str):  # type: ignore[no-untyped-def]
+        self.paths.append(path)
+        if path.endswith("releases?per_page=1"):
+            return [{**self.release, "tag_name": self.latest_tag}], {"status": 200}
+        if "/releases/tags/" in path:
+            return self.release, {"status": 200}
+        if "/git/ref/tags/" in path:
+            return {
+                "object": {
+                    "type": "commit",
+                    "sha": "a" * 40,
+                }
+            }, {"status": 200}
+        raise AssertionError(f"unexpected API path: {path}")
+
+    @staticmethod
+    def asset_redirect(asset):  # type: ignore[no-untyped-def]
+        return {"asset": asset, "response": {"status": 302}}
 
 
 class ResponseRecordingTests(unittest.TestCase):
@@ -116,6 +168,47 @@ class ResponseRecordingTests(unittest.TestCase):
                     "sha": "77c8f46c66b9e385f3d90c15dee33d775639bbeb",
                 }
             },
+        )
+
+    def test_recorder_captures_only_githubs_newest_release(self) -> None:
+        recorder = FixtureRecorder()
+
+        recorded = record_responses(
+            recorder=recorder,
+            repository="Staphylococcus/LG_Buddy",
+            tag="v1.4.0-beta.2",
+            target="x86_64-unknown-linux-musl",
+        )
+
+        self.assertEqual(
+            recorder.paths[0],
+            "repos/Staphylococcus/LG_Buddy/releases?per_page=1",
+        )
+        self.assertEqual(len(recorded["release_list"]["body"]), 1)
+        self.assertEqual(
+            recorded["release_list"]["body"][0]["tag_name"],
+            "v1.4.0-beta.2",
+        )
+
+    def test_recorder_refuses_when_candidate_is_not_githubs_newest_release(
+        self,
+    ) -> None:
+        recorder = FixtureRecorder(latest_tag="v1.4.0-beta.1")
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "newly published release v1.4.0-beta.2 is not GitHub's newest release",
+        ):
+            record_responses(
+                recorder=recorder,
+                repository="Staphylococcus/LG_Buddy",
+                tag="v1.4.0-beta.2",
+                target="x86_64-unknown-linux-musl",
+            )
+
+        self.assertEqual(
+            recorder.paths,
+            ["repos/Staphylococcus/LG_Buddy/releases?per_page=1"],
         )
 
 
