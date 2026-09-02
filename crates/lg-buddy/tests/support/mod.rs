@@ -1574,6 +1574,12 @@ fn env_lock() -> &'static Mutex<()> {
     ENV_LOCK.get_or_init(|| Mutex::new(()))
 }
 
+#[allow(dead_code)]
+pub fn prime_isolated_path_dependencies() {
+    let _ = python3_path();
+    let _ = dbus_daemon_path();
+}
+
 fn python3_path() -> PathBuf {
     static PYTHON3_PATH: OnceLock<PathBuf> = OnceLock::new();
 

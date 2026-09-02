@@ -284,7 +284,7 @@ The intended split is:
   - native Wake-on-LAN packet generation and UDP send
 - `backend.rs`
   - backend selection and detection
-  - `auto`, `gnome`, explicit `wayland`, and `swayidle` support
+  - `auto`, `gnome`, native `wayland`, and deprecated `swayidle` compatibility
 - `session.rs`
   - backend-neutral session event model
   - capability surface for desktop backends
@@ -623,10 +623,10 @@ Selection order:
 Detection behavior:
 
 - `auto` prefers GNOME when the current session satisfies the full GNOME contract and the session bus is reachable
-- otherwise falls back to `swayidle` if installed
-- explicit `wayland` validates `ext_idle_notifier_v1` version 2 or newer plus
-  at least one advertised seat and does not fall back
-- `auto` does not select native Wayland yet
+- native `wayland` validates `ext_idle_notifier_v1` version 2 or newer plus at
+  least one advertised seat; explicit selection does not fall back
+- `auto` prefers complete GNOME, then compatible native Wayland, then the
+  deprecated `swayidle` compatibility backend when installed
 - other forced backends validate their required services or commands
 
 ## TV Integration Boundary
@@ -840,9 +840,11 @@ asymmetric:
   handled by the NetworkManager pre-down gate plus logind lifecycle service
   instead
 
-`swayidle` remains the external-tool compatibility backend while native
-Wayland is explicit opt-in. Automatic native selection and later deprecation of
-the delegated path are separate work.
+`swayidle` remains an explicit and automatic compatibility fallback during the
+1.x migration window, but emits a deprecation notice and is not offered by
+fresh interactive configuration. Removal is planned for 2.0.0 after native
+Wayland remains field-validated across supported compositors and unsupported
+sessions have precise diagnostics.
 
 ## Configuration and Override Surface
 

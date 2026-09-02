@@ -1,7 +1,5 @@
 use std::io;
 
-use crate::config::ScreenBackend;
-
 mod command;
 mod formatter;
 mod model;
@@ -134,8 +132,11 @@ impl<C: ServiceController, P: PlatformPreflight> SettingsCommandRunner<C, P> {
         }
     }
 
-    fn with_screen_backend_resolution(mut self, resolution: Option<ScreenBackend>) -> Self {
-        self.screen_backend = screen::BackendPresentation::Resolved(resolution);
+    fn with_screen_backend_presentation(
+        mut self,
+        presentation: screen::BackendPresentation,
+    ) -> Self {
+        self.screen_backend = presentation;
         self
     }
 
@@ -155,7 +156,7 @@ impl<C: ServiceController, P: PlatformPreflight> SettingsCommandRunner<C, P> {
                     self.formatter.write_describe_with_backend(
                         writer,
                         &[setting],
-                        self.screen_backend,
+                        &self.screen_backend,
                     )
                 }
                 None => {
@@ -163,7 +164,7 @@ impl<C: ServiceController, P: PlatformPreflight> SettingsCommandRunner<C, P> {
                     self.formatter.write_describe_with_backend(
                         writer,
                         &settings,
-                        self.screen_backend,
+                        &self.screen_backend,
                     )
                 }
             },
@@ -206,13 +207,14 @@ pub fn run_settings_command<W: io::Write>(
     writer: &mut W,
 ) -> Result<(), SettingsError> {
     let store = SettingsStore::load_from_env()?;
+    let configured_backend = store
+        .effective_by_name("screen.backend")
+        .ok()
+        .and_then(|setting| setting.value())
+        .map(|value| value.to_string());
+    let presentation = screen::presentation_for_command(&command, configured_backend.as_deref());
     let runner = SettingsCommandRunner::new(store);
-    let runner = match screen::presentation_for_command(&command) {
-        screen::BackendPresentation::Raw => runner,
-        screen::BackendPresentation::Resolved(resolution) => {
-            runner.with_screen_backend_resolution(resolution)
-        }
-    };
+    let runner = runner.with_screen_backend_presentation(presentation);
     runner.run(command, writer)
 }
 
@@ -491,7 +493,7 @@ screen.backend
   default: auto
   mutability: read-write
   supported operations: get, describe, set, unset
-  allowed values: auto, gnome, wayland, swayidle
+  allowed values: auto, gnome, wayland, swayidle (deprecated compatibility backend)
   apply: restart-user-screen-service
   description: Screen backend selection for user-session blanking and restore behavior.
 

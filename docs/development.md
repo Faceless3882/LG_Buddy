@@ -18,7 +18,7 @@ testing release bundles also requires:
 
 Backend-specific tools used in development and local testing:
 
-- `swayidle` for the `swayidle` monitor backend
+- `swayidle` only when testing the deprecated compatibility backend
 - readable `/dev/input/event*` devices for local gamepad activity testing
 - readable `/dev/hidraw*` devices when testing the Logitech G923 raw HID fallback
 

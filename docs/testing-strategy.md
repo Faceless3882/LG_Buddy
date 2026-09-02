@@ -242,12 +242,13 @@ Examples:
 - gamepad activity integration with the LG Buddy inactivity deadline
 - screen runtime-phase eligibility over the private logind system-bus seam
 
-Native Wayland changes also require manual opt-in checks on Plasma/KWin and at
-least one other target compositor. Verify that explicit `wayland` detection and
-monitor startup succeed, unsupported capability or connection cases fail with
-a precise diagnostic, and `auto` retains its existing GNOME-then-`swayidle`
-selection. Release-facing changes must keep the static x86_64 musl build and
-release-bundle smoke test green.
+Native Wayland changes also require manual checks on Plasma/KWin and at least
+one other target compositor. Verify that explicit and automatic `wayland`
+detection and monitor startup succeed, unsupported capability or connection
+cases report a precise fallback reason, and `auto` retains the
+GNOME-then-native-Wayland-then-`swayidle` order. Release-facing changes must
+keep the static x86_64 musl build and release-bundle smoke test green, including
+preservation and deprecation reporting for an existing `swayidle` config.
 
 ### Gamepad activity
 

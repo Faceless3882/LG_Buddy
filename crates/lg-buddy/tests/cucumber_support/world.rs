@@ -1,6 +1,7 @@
 use crate::support::{
-    ExecutableScript, MockBscpylgtv, MockNmOnline, MockSessionBusIdleMonitor, MockSwayidle,
-    MockSystemLogind, RuntimeStateLayout, TestConfigFile, TestEnv,
+    prime_isolated_path_dependencies, ExecutableScript, MockBscpylgtv, MockNmOnline,
+    MockSessionBusIdleMonitor, MockSwayidle, MockSystemLogind, RuntimeStateLayout, TestConfigFile,
+    TestEnv,
 };
 use crate::web_os::{MockWebOsTv, MockWebOsTvSnapshot, MockWebOsVersion, VALID_WEBOS_ACCESS_TOKEN};
 use cucumber::World;
@@ -387,7 +388,11 @@ exit 1\n",
     }
 
     pub fn isolate_path(&mut self) {
+        prime_isolated_path_dependencies();
         self.ensure_env().set("PATH", "");
+        self.ensure_env().remove("WAYLAND_DISPLAY");
+        self.ensure_env().remove("WAYLAND_SOCKET");
+        self.ensure_env().remove("XDG_RUNTIME_DIR");
     }
 
     pub fn set_backend_override(&mut self, backend: &str) {

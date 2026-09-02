@@ -12,6 +12,7 @@ Feature: swayidle monitor
     And swayidle will emit an idle timeout
     When I run the command "monitor"
     Then the command succeeds
+    And stdout contains "swayidle is a deprecated compatibility backend"
     And the TV client received "get_input"
     And the TV client received "turn_screen_off"
     And the session marker exists

@@ -172,7 +172,7 @@ VENV_MARKER="$INSTALL_ROOT/usr/bin/LG_Buddy_PIP/production-canary-native-marker"
 [ -f "$INSTALLED_POINTER" ] || fail "Baseline config pointer was not installed."
 
 export LG_BUDDY_CONFIG="$CONFIG_FILE"
-"$INSTALLED_BINARY" settings set screen.backend gnome
+"$INSTALLED_BINARY" settings set screen.backend swayidle
 "$INSTALLED_BINARY" settings set screen.idle_blank disabled
 "$INSTALLED_BINARY" settings set updates.auto_check disabled
 "$INSTALLED_BINARY" settings set updates.channel prerelease
@@ -208,6 +208,8 @@ cmp -s "$POINTER_SNAPSHOT" "$INSTALLED_POINTER" || fail "Production upgrade chan
 cmp -s "$TOKEN_SNAPSHOT" "$NATIVE_TOKEN_FILE" || fail "Production upgrade changed the native credential."
 [ -e "$VENV_MARKER" ] || fail "Production native upgrade recreated the Python environment."
 "$INSTALLED_BINARY" settings get updates.channel | grep -q '^prerelease$'
+"$INSTALLED_BINARY" settings describe screen.backend \
+    | grep -F -q 'deprecation: swayidle is a deprecated compatibility backend planned for removal in LG Buddy 2.0.0'
 
 CANDIDATE_CHECK_OUTPUT="$WORK_DIR/candidate-update-check.output"
 UPDATE_CACHE_FILE="$XDG_CACHE_HOME/lg-buddy/update-check.json"

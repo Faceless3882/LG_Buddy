@@ -83,7 +83,7 @@ Current settings are:
 | `tv.mac` | TV MAC address used for Wake-on-LAN. |
 | `tv.input` | Input LG Buddy manages, such as `HDMI_2`. |
 | `tv.platform` | TV control implementation: `bscpylgtv` or experimental `lg_webos`. |
-| `screen.backend` | Desktop idle backend: `auto`, `gnome`, `wayland`, or `swayidle`. |
+| `screen.backend` | Desktop idle backend: `auto`, `gnome`, `wayland`, or deprecated compatibility value `swayidle`. |
 | `screen.idle_blank` | Enable or disable automatic idle blanking. |
 | `screen.idle_timeout` | Seconds of inactivity before blanking; defaults to 300. |
 | `screen.restore_policy` | `conservative` or `aggressive` restore behavior. |
@@ -129,10 +129,10 @@ The restore policies are:
 
 | Backend | When to use it |
 | --- | --- |
-| `auto` | Default. Uses GNOME when the session is compatible, otherwise `swayidle` when installed. It does not select native Wayland yet. |
+| `auto` | Default. Prefers compatible GNOME, then compatible native Wayland, then the deprecated `swayidle` fallback when installed. |
 | `gnome` | A GNOME Shell session with the required GNOME idle services. |
-| `wayland` | A compatible recent Wayland compositor. This backend is currently opt-in. |
-| `swayidle` | A Wayland session with `swayidle` installed. |
+| `wayland` | Force native monitoring on a compositor that advertises `ext_idle_notifier_v1` version 2 or newer and at least one `wl_seat`. |
+| `swayidle` | Deprecated compatibility backend for existing installations and older compositors. Fresh interactive configuration does not offer it. |
 
 Select a backend persistently:
 
@@ -147,8 +147,9 @@ lg-buddy settings unset screen.backend
 ```
 
 An explicitly selected backend reports a compatibility error rather than
-silently switching to another backend. If native Wayland is unavailable, use
-`auto` or `swayidle` instead.
+silently switching to another backend. `auto` reports why it moved past GNOME
+or native Wayland. Existing explicit `swayidle` selections remain valid and are
+never silently rewritten, but emit a deprecation notice.
 
 Check the selected backend and user service:
 
@@ -158,8 +159,16 @@ systemctl --user status LG_Buddy_screen.service
 journalctl --user -u LG_Buddy_screen.service --since today
 ```
 
-For `auto`, `settings describe` also shows the backend currently detected, such
-as `auto (gnome)` or `auto (swayidle)`.
+For `auto`, `settings describe` prints the configured selection, resolved
+backend, and fallback reason separately. Unsupported native sessions report
+the compositor connection or protocol limitation before using `swayidle` or
+reporting that no backend is available.
+
+The `swayidle` compatibility window lasts through the 1.x release line, with
+removal planned for 2.0.0. Removal requires native Wayland monitoring to remain
+field-validated on supported non-GNOME compositors, precise unsupported-session
+diagnostics, and a released migration window in which existing configurations
+continue to run without being rewritten.
 
 ### Gamepad Activity
 
