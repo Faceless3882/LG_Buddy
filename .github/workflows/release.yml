@@ -29,14 +29,14 @@ jobs:
 
     steps:
       - name: Check out merged release commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.x"
 
@@ -69,7 +69,7 @@ jobs:
 
     steps:
       - name: Check out merged release commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ needs.validate.outputs.head_sha }}
           persist-credentials: false
@@ -80,7 +80,7 @@ jobs:
           targets: x86_64-unknown-linux-musl
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.x"
 
@@ -142,7 +142,7 @@ jobs:
           sha256sum -c sha256sums.txt
 
       - name: Upload workflow artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: lg-buddy-release-${{ needs.validate.outputs.tag }}
           path: |
@@ -161,14 +161,14 @@ jobs:
 
     steps:
       - name: Check out merged release commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ needs.validate.outputs.head_sha }}
           fetch-depth: 0
           persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.x"
 
@@ -186,7 +186,7 @@ jobs:
               --base-sha "${{ needs.validate.outputs.base_sha }}"
 
       - name: Download verified release bundle
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: lg-buddy-release-${{ needs.validate.outputs.tag }}
           path: dist
@@ -198,7 +198,7 @@ jobs:
         id: release-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
         with:
-          app-id: ${{ vars.RELEASE_PROMOTION_APP_ID }}
+          client-id: ${{ vars.RELEASE_PROMOTION_APP_CLIENT_ID }}
           private-key: ${{ secrets.RELEASE_PROMOTION_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: LG_Buddy
@@ -274,13 +274,13 @@ jobs:
 
     steps:
       - name: Check out published prerelease
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ needs.validate.outputs.head_sha }}
           persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.x"
 
@@ -323,7 +323,7 @@ jobs:
 
       - name: Upload canary evidence for the offline mock
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: production-upgrade-canary-${{ needs.validate.outputs.tag }}
           path: |
