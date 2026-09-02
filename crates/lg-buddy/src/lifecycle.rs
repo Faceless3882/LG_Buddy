@@ -1168,7 +1168,10 @@ fn handle_network_teardown_rail_disposition<W: Write, C: TvClient, Sl: Sleeper>(
     disposition: SuspendRailDisposition,
     outcome: &mut PolicyOutcome,
 ) -> Result<(), RunError> {
-    if disposition != SuspendRailDisposition::JoinedInProgress {
+    if !matches!(
+        disposition,
+        SuspendRailDisposition::JoinedInProgress | SuspendRailDisposition::RetryableFailure
+    ) {
         return Ok(());
     }
 

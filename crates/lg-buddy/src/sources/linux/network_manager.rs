@@ -324,6 +324,75 @@ mod tests {
     }
 
     #[test]
+    fn pre_down_retries_when_network_manager_owned_cycle_reports_retryable_failure() {
+        let temp_dir = TestDir::new("nm-pre-down-owned-retryable");
+        let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
+        let attempt_state = SystemSleepAttemptState::new(temp_dir.path().to_path_buf());
+        let mock = MockBscpylgtv::new("nm-pre-down-owned-retryable-tv");
+        mock.set_input("HDMI_2");
+        mock.queue_error("power_off", 1, "offline");
+        let client = client_for_mock(&mock);
+        let sleeper = RecordingSleeper::default();
+        let mut bus = FakeBus::preparing_for_sleep(true);
+        let mut output = Vec::new();
+
+        handle_pre_down_with(
+            &mut output,
+            &sample_config(SystemSleepWakePolicy::Enabled),
+            &marker,
+            &attempt_state,
+            &client,
+            &sleeper,
+            &mut bus,
+        )
+        .expect("pre-down should retry its own retryable rail failure");
+
+        assert_eq!(
+            attempt_state.read_outcome().expect("read cycle outcome"),
+            Some(SystemSleepCycleOutcome::Completed)
+        );
+        assert!(marker.exists());
+        assert!(!attempt_state.exists());
+        assert_call_commands(&mock, &["get_input", "power_off", "get_input", "power_off"]);
+        assert!(rendered(&output).contains("retrying before network teardown"));
+    }
+
+    #[test]
+    fn pre_down_stops_after_network_manager_owned_follow_up_failure() {
+        let temp_dir = TestDir::new("nm-pre-down-owned-follow-up-failure");
+        let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
+        let attempt_state = SystemSleepAttemptState::new(temp_dir.path().to_path_buf());
+        let mock = MockBscpylgtv::new("nm-pre-down-owned-follow-up-failure-tv");
+        mock.set_input("HDMI_2");
+        mock.queue_error("power_off", 1, "offline");
+        mock.queue_error("power_off", 1, "still offline");
+        let client = client_for_mock(&mock);
+        let sleeper = RecordingSleeper::default();
+        let mut bus = FakeBus::preparing_for_sleep(true);
+        let mut output = Vec::new();
+
+        handle_pre_down_with(
+            &mut output,
+            &sample_config(SystemSleepWakePolicy::Enabled),
+            &marker,
+            &attempt_state,
+            &client,
+            &sleeper,
+            &mut bus,
+        )
+        .expect("pre-down should release teardown after its follow-up fails");
+
+        assert_eq!(
+            attempt_state.read_outcome().expect("read cycle outcome"),
+            Some(SystemSleepCycleOutcome::RetryableTransportFailure)
+        );
+        assert!(!marker.exists());
+        assert!(!attempt_state.exists());
+        assert_call_commands(&mock, &["get_input", "power_off", "get_input", "power_off"]);
+        assert!(rendered(&output).contains("retrying before network teardown"));
+    }
+
+    #[test]
     fn pre_down_repeated_sleep_hooks_are_idempotent() {
         let temp_dir = TestDir::new("nm-pre-down-idempotent");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
