@@ -64,6 +64,12 @@ Run its current brightness window with:
 cargo run -p lg-buddy-gui -- brightness
 ```
 
+After building both workspace binaries, the stable launcher can be exercised
+with `cargo run -p lg-buddy -- brightness`; it resolves `lg-buddy-gui` beside
+the running CLI executable. `LG_BUDDY_GUI` overrides that companion path for
+relocation and subprocess tests. Only a missing path selects the temporary
+Zenity compatibility flow.
+
 The resulting `lg-buddy-gui` binary is a development artifact in the current
 GUI slice. Installer and release-bundle integration are tracked separately.
 
@@ -107,6 +113,7 @@ Useful checks during development:
 cargo test -p lg-buddy --lib
 cargo test -p lg-buddy --test cucumber
 dbus-run-session -- xvfb-run -a bash ./scripts/test-gui-launch.sh ./target/debug/lg-buddy-gui
+dbus-run-session -- xvfb-run -a bash ./scripts/test-gui-launch.sh ./target/debug/lg-buddy
 dbus-run-session -- xvfb-run -a env ADW_DISABLE_PORTAL=1 GDK_BACKEND=x11 GDK_DEBUG=no-portals NO_AT_BRIDGE=1 cargo test -p lg-buddy-gui -- --test-threads=1
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 bash -n install.sh uninstall.sh configure.sh bin/LG_Buddy_Common scripts/build-release-bundle.sh scripts/test-release-bundle.sh scripts/test-cross-version-upgrade.sh scripts/test-production-upgrade-canary.sh scripts/publish-release-assets.sh

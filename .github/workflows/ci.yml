@@ -40,8 +40,9 @@ jobs:
 
       - name: Run display-backed GTK test suite
         run: |
-          cargo build -p lg-buddy-gui
+          cargo build -p lg-buddy -p lg-buddy-gui
           dbus-run-session -- xvfb-run -a bash ./scripts/test-gui-launch.sh ./target/debug/lg-buddy-gui
+          dbus-run-session -- xvfb-run -a bash ./scripts/test-gui-launch.sh ./target/debug/lg-buddy
           dbus-run-session -- xvfb-run -a env ADW_DISABLE_PORTAL=1 GDK_BACKEND=x11 GDK_DEBUG=no-portals NO_AT_BRIDGE=1 cargo test -p lg-buddy-gui -- --test-threads=1
 
       - name: Run clippy

@@ -15,6 +15,23 @@ use support::{
 };
 
 #[test]
+fn brightness_desktop_entry_uses_the_stable_headless_launcher() {
+    let desktop_entry = fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("LG_Buddy_Brightness.desktop"),
+    )
+    .expect("read brightness desktop entry");
+    let lines = desktop_entry.lines().collect::<Vec<_>>();
+
+    assert!(lines.contains(&"Exec=/usr/bin/lg-buddy brightness"));
+    assert!(lines.contains(&"Terminal=false"));
+    assert!(!lines
+        .iter()
+        .any(|line| line.starts_with("Exec=") && line.contains("lg-buddy-gui")));
+}
+
+#[test]
 fn run_screen_off_loads_config_and_uses_session_runtime_override() {
     let mock = MockBscpylgtv::new("entrypoint-screen-off-tv");
     mock.set_input("HDMI_2");

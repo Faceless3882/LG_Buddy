@@ -98,11 +98,11 @@ The main runtime consumers are:
 - desktop environment and session integrations, including GNOME, `swayidle`,
   and Linux input activity sources
 - TTY users invoking the CLI directly
-- the installed Zenity brightness dialog, which delegates back through the
-  CLI/API command surface
-- the standalone `lg-buddy-gui brightness` GTK window, which asynchronously
-  reads and writes OLED brightness and renders application-owned Loading,
-  Ready, Applying, or Failed presentation state
+- the stable `lg-buddy brightness` launcher, which opens the matching installed
+  GTK executable and uses Zenity only when that executable is absent
+- the `lg-buddy-gui brightness` GTK window, which asynchronously reads and
+  writes OLED brightness and renders application-owned Loading, Ready,
+  Applying, or Failed presentation state
 
 ```mermaid
 flowchart LR
@@ -188,6 +188,8 @@ flowchart LR
     LOGINDADAPTER -->|"RuntimeEvent"| EVENTS
     NM --> MAIN
     TERMINAL --> MAIN
+    MAIN -->|"brightness launcher"| GTK
+    MAIN -.->|"GUI absent"| ZENITY
     ZENITY --> MAIN
     GTK -->|"Propose / Apply / Retry / Cancel intents"| BRIGHTNESS
     BRIGHTNESS --> PRESENTATION
@@ -459,16 +461,19 @@ owns an operational cache under the user cache directory for GitHub ETag,
 latest release metadata, and last-notified release state used by the observable
 update notification policy; that cache is not user configuration and is not
 part of the settings API.
-The `brightness get` and `brightness set` commands use the TV picture
+The `brightness` command locates `lg-buddy-gui` beside the running CLI and
+launches its `brightness` entrypoint. Only an absent GUI executable selects the
+temporary Zenity compatibility flow; an invalid installation or failed GUI
+process is returned directly without a second prompt. The `brightness get` and
+`brightness set` commands never enter that launcher and use the TV picture
 abstraction in `tv.rs` for typed OLED brightness validation and live TV
 read/write operations. The interactive Zenity brightness dialog delegates its
-TV operations back through those CLI commands. The GTK brightness window uses
-the same typed picture read/write capabilities directly through the core
-brightness application flow. Workers keep blocking TV operations off the GTK
-main loop; the application permits one write at a time, and opaque operation
-identity prevents late results from replacing newer or closed presentation
-state. Successful GTK writes retain the existing brightness success
-notification.
+TV operations back through those direct CLI commands. The GTK brightness window
+uses the same typed picture capabilities through the core brightness
+application flow. Workers keep blocking TV operations off the GTK main loop;
+the application permits one write at a time, and opaque operation identity
+prevents late results from replacing newer or closed presentation state.
+Successful GTK writes retain the existing brightness success notification.
 The `volume` family uses the TV audio abstraction for typed volume and mute
 operations. Setting or stepping volume explicitly unmutes after the volume
 operation; mute toggle reads the current state before writing its inverse.
@@ -896,6 +901,8 @@ Important environment overrides:
   - force backend selection
 - `LG_BUDDY_BSCPYLGTV_COMMAND`
   - override TV command path
+- `LG_BUDDY_GUI`
+  - override the matching `lg-buddy-gui` path for relocation and tests
 - `LG_BUDDY_SYSTEM_RUNTIME_DIR`
   - override system state directory
 - `LG_BUDDY_SESSION_RUNTIME_DIR`
