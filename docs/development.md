@@ -9,6 +9,13 @@ Compiling the Rust runtime requires:
 - a Rust toolchain with `cargo`
 - a working C toolchain
 
+Compiling and testing the GTK frontend additionally requires:
+
+- GTK 4.10 or newer development files
+- `pkg-config`
+- a graphical session or virtual display for renderer tests
+- `xdotool` for the executable launch smoke test
+
 Running the interactive installer, exercising the legacy TV fallback, and
 testing release bundles also requires:
 
@@ -43,6 +50,21 @@ Build the runtime from source with:
 ```bash
 cargo build --release -p lg-buddy
 ```
+
+Build the GTK frontend from source with:
+
+```bash
+cargo build -p lg-buddy-gui
+```
+
+Run its current brightness shell with:
+
+```bash
+cargo run -p lg-buddy-gui -- brightness
+```
+
+The resulting `lg-buddy-gui` binary is a development artifact in the current
+GUI slice. Installer and release-bundle integration are tracked separately.
 
 Official release builds inject version identity into the binary:
 
@@ -83,7 +105,9 @@ Useful checks during development:
 ```bash
 cargo test -p lg-buddy --lib
 cargo test -p lg-buddy --test cucumber
-cargo clippy -p lg-buddy --all-targets --all-features -- -D warnings
+dbus-run-session -- xvfb-run -a bash ./scripts/test-gui-launch.sh ./target/debug/lg-buddy-gui
+dbus-run-session -- xvfb-run -a env GDK_BACKEND=x11 GDK_DEBUG=no-portals NO_AT_BRIDGE=1 cargo test -p lg-buddy-gui -- --test-threads=1
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 bash -n install.sh uninstall.sh configure.sh bin/LG_Buddy_Common scripts/build-release-bundle.sh scripts/test-release-bundle.sh scripts/test-cross-version-upgrade.sh scripts/test-production-upgrade-canary.sh scripts/publish-release-assets.sh
 python3 scripts/test_release_promotion.py
 python3 scripts/test_record_github_release_responses.py
@@ -186,6 +210,7 @@ the branch contract and recovery process, see
 | `crates/lg-buddy/src/commands.rs` | Runtime command entrypoints and dependency assembly |
 | `crates/lg-buddy/src/events.rs` | Canonical runtime event vocabulary |
 | `crates/lg-buddy/src/policy.rs` | Policy outcome, action, no-action, diagnostic, and state-transition types |
+| `crates/lg-buddy/src/presentation/` | Toolkit-neutral GUI presentation declarations owned by the application |
 | `crates/lg-buddy/src/screen.rs` | Session screen blank/restore policy |
 | `crates/lg-buddy/src/lifecycle.rs` | Startup, shutdown, system sleep, and system resume policy |
 | `crates/lg-buddy/src/runtime_phase.rs` | Runtime sleep-phase provider abstraction |
@@ -201,6 +226,7 @@ the branch contract and recovery process, see
 | `crates/lg-buddy/src/tv.rs` | TV transport boundary and facade |
 | `crates/lg-buddy/src/web_os/` | Native webOS client, profile-bound TV adapter, domain operations, and test support |
 | `crates/lg-buddy/src/wol.rs` | Native Wake-on-LAN support |
+| `crates/lg-buddy-gui/` | GTK 4 executable, application lifecycle, and thin presentation renderer |
 | `configure.sh` | Interactive configuration tool |
 | `install.sh` | Installer for an existing binary |
 | `uninstall.sh` | Uninstaller |
@@ -220,6 +246,7 @@ the branch contract and recovery process, see
 | `docs/architecture-overview.md` | Runtime architecture |
 | `docs/defaults-and-configuration.md` | Product defaults and persistent configuration guidance |
 | `docs/gamepad-subsystem.md` | Gamepad activity architecture and adapter guidance |
+| `docs/gui-target-architecture.md` | Target declarative application contract and GTK renderer boundary |
 | `docs/runtime-event-handler-map.md` | Top-level system, desktop, and runtime event handler map |
 | `docs/session-backend-model.md` | Session backend semantics and capability model |
 | `docs/testing-strategy.md` | Test strategy and scope |
