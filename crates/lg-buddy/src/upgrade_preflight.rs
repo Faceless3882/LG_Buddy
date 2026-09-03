@@ -1482,12 +1482,13 @@ mod tests {
     #[test]
     fn supported_release_bundle_layout_passes_initial_and_candidate_preflights() {
         let fixture = InstalledFixture::new("supported");
+        let filesystem = RootOwnedFilesystem(OsFilesystemFacts);
 
-        let initial = evaluate_initial_preflight(&OsFilesystemFacts, &fixture.facts);
+        let initial = evaluate_initial_preflight(&filesystem, &fixture.facts);
         let mut candidate_facts = fixture.facts.clone();
         candidate_facts.running_executable = fixture.candidate_root.join("lg-buddy");
         let candidate = evaluate_candidate_host_preflight(
-            &OsFilesystemFacts,
+            &filesystem,
             &candidate_facts,
             &fixture.candidate_root,
             false,
@@ -1500,12 +1501,13 @@ mod tests {
     #[test]
     fn python_environment_safety_is_required_only_when_repair_is_requested() {
         let fixture = InstalledFixture::new("conditional-python-repair");
+        let filesystem = RootOwnedFilesystem(OsFilesystemFacts);
         let virtualenv = fixture.facts.layout.system_path("/usr/bin/LG_Buddy_PIP");
         let mut candidate_facts = fixture.facts.clone();
         candidate_facts.running_executable = fixture.candidate_root.join("lg-buddy");
 
         let missing = evaluate_candidate_host_preflight(
-            &OsFilesystemFacts,
+            &filesystem,
             &candidate_facts,
             &fixture.candidate_root,
             true,
@@ -1514,7 +1516,7 @@ mod tests {
 
         fs::create_dir_all(&virtualenv).unwrap();
         let repair = evaluate_candidate_host_preflight(
-            &OsFilesystemFacts,
+            &filesystem,
             &candidate_facts,
             &fixture.candidate_root,
             true,
@@ -1524,13 +1526,13 @@ mod tests {
         fs::remove_dir(&virtualenv).unwrap();
         symlink(&fixture.config_directory, &virtualenv).unwrap();
         let preserving = evaluate_candidate_host_preflight(
-            &OsFilesystemFacts,
+            &filesystem,
             &candidate_facts,
             &fixture.candidate_root,
             false,
         );
         let repair = evaluate_candidate_host_preflight(
-            &OsFilesystemFacts,
+            &filesystem,
             &candidate_facts,
             &fixture.candidate_root,
             true,
@@ -1798,6 +1800,7 @@ mod tests {
             read_only: None,
             mount_point: None,
         };
+        let filesystem = RootOwnedFilesystem(filesystem);
 
         let report = evaluate_candidate_preflight(
             &filesystem,
@@ -2377,6 +2380,32 @@ mod tests {
         mode: Option<u32>,
         read_only: Option<bool>,
         mount_point: Option<bool>,
+    }
+
+    // Nix sandboxes can expose `/` as unmapped uid 65534. Positive host-layout
+    // tests model a conventional root without relaxing the production check.
+    struct RootOwnedFilesystem<F>(F);
+
+    impl<F: FilesystemFacts> FilesystemFacts for RootOwnedFilesystem<F> {
+        fn path_facts(&self, path: &Path) -> io::Result<PathFacts> {
+            let mut facts = self.0.path_facts(path)?;
+            if path == Path::new("/") {
+                facts.owner_uid = 0;
+            }
+            Ok(facts)
+        }
+
+        fn read_to_string(&self, path: &Path) -> io::Result<String> {
+            self.0.read_to_string(path)
+        }
+
+        fn read_directory(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
+            self.0.read_directory(path)
+        }
+
+        fn mount_points(&self) -> io::Result<Vec<PathBuf>> {
+            self.0.mount_points()
+        }
     }
 
     impl FilesystemFacts for OverriddenFilesystem {
