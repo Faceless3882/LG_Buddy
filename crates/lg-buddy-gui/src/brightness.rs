@@ -27,6 +27,7 @@ impl BrightnessWindow {
         shell.append(&body);
         let window = adw::ApplicationWindow::builder()
             .application(application)
+            .icon_name(crate::APPLICATION_ID)
             .default_width(360)
             .content(&shell)
             .build();
@@ -322,6 +323,7 @@ pub(crate) fn assert_failed_window(window: &gtk::Window, presentation: &Brightne
 fn assert_common_window(window: &gtk::Window, presentation: &BrightnessPresentation) {
     assert!(window.is_visible());
     assert_eq!(window.title().as_deref(), Some(presentation.title()));
+    assert_eq!(window.icon_name().as_deref(), Some(crate::APPLICATION_ID));
     let content = window_content(window);
     let heading = content
         .first_child()
