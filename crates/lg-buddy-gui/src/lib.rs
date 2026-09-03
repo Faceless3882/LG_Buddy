@@ -21,6 +21,7 @@ pub const APPLICATION_ID: &str = "io.github.staphylococcus.LGBuddy";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GuiCommand {
     Brightness,
+    Version,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +51,7 @@ where
     let mut args = args.into_iter();
     let command = match args.next() {
         Some(command) if command.as_ref() == "brightness" => GuiCommand::Brightness,
+        Some(command) if matches!(command.as_ref(), "--version" | "-V") => GuiCommand::Version,
         Some(command) => return Err(GuiParseError::UnknownCommand(command.as_ref().to_string())),
         None => return Err(GuiParseError::MissingCommand),
     };
@@ -63,12 +65,16 @@ where
 }
 
 pub fn help(program: &str) -> String {
-    format!("Usage: {program} brightness\n")
+    format!("Usage: {program} brightness\n       {program} --version\n")
 }
 
 pub fn run(command: GuiCommand) -> glib::ExitCode {
     match command {
         GuiCommand::Brightness => run_brightness_application(),
+        GuiCommand::Version => {
+            print!("{}", lg_buddy::version::version_text());
+            glib::ExitCode::SUCCESS
+        }
     }
 }
 
@@ -348,6 +354,8 @@ mod tests {
     #[test]
     fn parses_the_brightness_command() {
         assert_eq!(parse_args(["brightness"]), Ok(GuiCommand::Brightness));
+        assert_eq!(parse_args(["--version"]), Ok(GuiCommand::Version));
+        assert_eq!(parse_args(["-V"]), Ok(GuiCommand::Version));
         assert_eq!(
             parse_args(std::iter::empty::<&str>()),
             Err(GuiParseError::MissingCommand)
@@ -362,7 +370,10 @@ mod tests {
                 vec!["extra".to_string()]
             ))
         );
-        assert_eq!(help("lg-buddy-gui"), "Usage: lg-buddy-gui brightness\n");
+        assert_eq!(
+            help("lg-buddy-gui"),
+            "Usage: lg-buddy-gui brightness\n       lg-buddy-gui --version\n"
+        );
     }
 
     #[test]

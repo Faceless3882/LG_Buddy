@@ -458,9 +458,12 @@ A small acceptance layer proves only the user-visible boundary:
 - an unreachable TV or failed write leaves actionable feedback
 - the window remains responsive during blocking TV work
 
-Release-bundle smoke proves that both executables, the desktop entry, and the
-required GTK runtime dependencies are present. It should not duplicate the
-application state-machine matrix.
+Installed-GUI smoke proves that both executables and the desktop entry are
+installed together, the stable launcher opens the window without a terminal,
+and removal preserves user state. Release-bundle smoke separately proves that
+the distributed archive contains both executables and declares the required
+GTK runtime dependencies. Neither layer should duplicate the application
+state-machine matrix.
 
 Screenshots may support design review, but they are not the primary contract:
 system themes, fonts, and rendering legitimately vary. Automated assertions
@@ -505,7 +508,7 @@ that first needs them:
 5. [#144](https://github.com/Staphylococcus/LG_Buddy/issues/144) integrates the
    GUI with install, upgrade, and removal behavior.
 6. [#145](https://github.com/Staphylococcus/LG_Buddy/issues/145) ships the GUI
-   in release bundles and adds installed-artifact smoke coverage.
+   in release bundles and adds release-artifact smoke coverage.
 
 Each slice must leave the existing `brightness get`, `brightness set`, service,
 and compatibility paths green. The Zenity implementation remains available in
