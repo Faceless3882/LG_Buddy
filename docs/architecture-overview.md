@@ -7,13 +7,20 @@ It is not a product roadmap. It is a map of what exists today and how the main p
 For the top-level system, desktop, and service event paths that enter the
 runtime, see [Runtime event handler map](runtime-event-handler-map.md).
 
+For the application-owned presentation contract and GTK renderer boundary,
+including the target beyond the initial loading shell, see
+[GUI target architecture](gui-target-architecture.md). The architecture below
+describes the current implementation.
+
 ## Repository Shape
 
-The repository now has one runtime implementation and one setup surface:
+The repository has one application/runtime crate, one GUI frontend crate, and
+one setup surface:
 
 - Rust runtime workspace
   - `Cargo.toml`
   - `crates/lg-buddy/`
+  - `crates/lg-buddy-gui/`
 - shell-based setup surface
   - `configure.sh`
   - `install.sh`
@@ -21,7 +28,9 @@ The repository now has one runtime implementation and one setup surface:
   - `bin/LG_Buddy_Common`
   - `systemd/`
 
-The Rust runtime owns operational behavior. The remaining shell layer exists for configuration, installation, and removal.
+The Rust application owns operational behavior and toolkit-neutral presentation
+state. The GTK crate renders that state. The remaining shell layer exists for
+configuration, installation, and removal.
 
 ## High-Level Runtime Shape
 
@@ -88,8 +97,10 @@ The main runtime consumers are:
 - desktop environment and session integrations, including GNOME, `swayidle`,
   and Linux input activity sources
 - TTY users invoking the CLI directly
-- frontend surfaces, currently the zenity brightness dialog, which delegate
-  back through the CLI/API command surface
+- the installed Zenity brightness dialog, which delegates back through the
+  CLI/API command surface
+- the standalone `lg-buddy-gui brightness` GTK loading shell, which currently
+  renders application-owned presentation state without TV operations
 
 ```mermaid
 flowchart LR
@@ -112,6 +123,7 @@ flowchart LR
 
     subgraph Frontend["Frontend"]
         ZENITY["zenity brightness dialog<br/>interactive prompt"]
+        GTK["lg-buddy-gui<br/>brightness loading shell"]
     end
 
     subgraph Rust["Rust Runtime"]
@@ -126,6 +138,7 @@ flowchart LR
         PHASE["runtime_phase.rs<br/>machine sleep phase provider"]
         CONFIG["config.rs<br/>config.env parsing"]
         STATE["state.rs<br/>runtime markers"]
+        PRESENTATION["presentation/brightness.rs<br/>toolkit-neutral Loading state"]
 
         subgraph SessionSubsystem["Session Integration Subsystem"]
             BACKEND["backend.rs<br/>backend selection"]
@@ -173,6 +186,7 @@ flowchart LR
     NM --> MAIN
     TERMINAL --> MAIN
     ZENITY --> MAIN
+    PRESENTATION --> GTK
     MAIN --> COMMANDS
     COMMANDS --> EVENTS
     COMMANDS --> NMGATE

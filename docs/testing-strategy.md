@@ -172,6 +172,11 @@ So cucumber sits on top of the first two layers:
 
 ## Applying The Strategy To This Repo
 
+The GTK frontend applies these same layers without moving application
+behavior into GUI tests. Its presentation contract, renderer boundary, and
+test split are defined in
+[GUI target architecture](gui-target-architecture.md).
+
 ### Rust runtime core
 
 Primary concern:
