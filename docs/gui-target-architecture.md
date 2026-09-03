@@ -209,17 +209,18 @@ GTK returns only intents that express what the user requested:
 
 ```rust
 pub enum BrightnessIntent {
-    Propose(OledBrightness),
+    Propose(u8),
     Apply,
     Retry,
     Cancel,
 }
 ```
 
-The renderer does not turn `Apply` into a TV call, decide whether retry is
-allowed, or close the window because a callback happened to succeed. The
-application handles the intent and publishes the next presentation or an
-explicit close outcome.
+`Propose` carries the raw bounded-control value so the application remains the
+only layer that validates it into `OledBrightness`. The renderer does not turn
+`Apply` into a TV call, decide whether retry is allowed, or close the window
+because a callback happened to succeed. The application handles the intent and
+publishes the next presentation or an explicit close outcome.
 
 Window-close requests map to `Cancel`. Programmatic widget changes must not
 create accidental user intents. The GTK adapter may suppress signal feedback

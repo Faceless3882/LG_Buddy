@@ -2,6 +2,7 @@ use std::error::Error;
 use std::fmt;
 
 use crate::config::{load_config, resolve_config_path_from_env, Config};
+use crate::notifications::{FreedesktopNotifier, Notification, NotificationError, Notifier};
 use crate::presentation::brightness::{
     BrightnessFrontendUpdate, BrightnessIntent, BrightnessPresentation, UserFacingError,
 };
@@ -52,8 +53,75 @@ pub trait BrightnessReader: Send + Sync + 'static {
     fn read_current_brightness(&self) -> Result<OledBrightness, BrightnessReadError>;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrightnessWriteFailure {
+    NotConfigured,
+    InvalidConfiguration,
+    CredentialsUnavailable,
+    Unreachable,
+    Rejected,
+    ScreenNotVisible,
+    Internal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrightnessWriteError {
+    failure: BrightnessWriteFailure,
+    diagnostic: String,
+}
+
+impl BrightnessWriteError {
+    pub fn new(failure: BrightnessWriteFailure, diagnostic: impl Into<String>) -> Self {
+        Self {
+            failure,
+            diagnostic: diagnostic.into(),
+        }
+    }
+
+    pub fn failure(&self) -> BrightnessWriteFailure {
+        self.failure
+    }
+}
+
+impl fmt::Display for BrightnessWriteError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.diagnostic)
+    }
+}
+
+impl Error for BrightnessWriteError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BrightnessWriteOutcome {
+    Applied,
+    AppliedWithoutNotification { diagnostic: String },
+}
+
+impl BrightnessWriteOutcome {
+    pub fn applied() -> Self {
+        Self::Applied
+    }
+
+    fn diagnostic(&self) -> Option<&str> {
+        match self {
+            Self::Applied => None,
+            Self::AppliedWithoutNotification { diagnostic } => Some(diagnostic),
+        }
+    }
+}
+
+pub trait BrightnessWriter: Send + Sync + 'static {
+    fn write_brightness(
+        &self,
+        brightness: OledBrightness,
+    ) -> Result<BrightnessWriteOutcome, BrightnessWriteError>;
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct EnvironmentBrightnessReader;
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct EnvironmentBrightnessWriter;
 
 impl BrightnessReader for EnvironmentBrightnessReader {
     fn read_current_brightness(&self) -> Result<OledBrightness, BrightnessReadError> {
@@ -83,6 +151,37 @@ impl BrightnessReader for EnvironmentBrightnessReader {
     }
 }
 
+impl BrightnessWriter for EnvironmentBrightnessWriter {
+    fn write_brightness(
+        &self,
+        brightness: OledBrightness,
+    ) -> Result<BrightnessWriteOutcome, BrightnessWriteError> {
+        let config_path = resolve_config_path_from_env().map_err(|error| {
+            BrightnessWriteError::new(BrightnessWriteFailure::NotConfigured, error.to_string())
+        })?;
+        let config = load_config(&config_path).map_err(|error| {
+            BrightnessWriteError::new(
+                BrightnessWriteFailure::InvalidConfiguration,
+                error.to_string(),
+            )
+        })?;
+        let client = build_tv_client(
+            &config_path,
+            config.tv_ip,
+            config.tv_platform,
+            TvClientBuildOptions::production().stored_token_only(),
+        )
+        .map_err(|error| {
+            BrightnessWriteError::new(
+                BrightnessWriteFailure::CredentialsUnavailable,
+                error.to_string(),
+            )
+        })?;
+
+        write_brightness_and_notify_with(&config, &client, &FreedesktopNotifier, brightness)
+    }
+}
+
 impl From<TvError> for BrightnessReadError {
     fn from(error: TvError) -> Self {
         let failure = match error.kind() {
@@ -97,6 +196,20 @@ impl From<TvError> for BrightnessReadError {
     }
 }
 
+impl From<TvError> for BrightnessWriteError {
+    fn from(error: TvError) -> Self {
+        let failure = match error.kind() {
+            TvErrorKind::Transport => BrightnessWriteFailure::Unreachable,
+            TvErrorKind::Authentication => BrightnessWriteFailure::CredentialsUnavailable,
+            TvErrorKind::Rejected => BrightnessWriteFailure::Rejected,
+            TvErrorKind::InvalidResponse => BrightnessWriteFailure::Internal,
+            TvErrorKind::ScreenNotVisible => BrightnessWriteFailure::ScreenNotVisible,
+            TvErrorKind::Internal => BrightnessWriteFailure::Internal,
+        };
+        Self::new(failure, error.to_string())
+    }
+}
+
 pub(crate) fn read_current_brightness_with<C: TvClient>(
     config: &Config,
     client: &C,
@@ -106,13 +219,65 @@ pub(crate) fn read_current_brightness_with<C: TvClient>(
         .oled_brightness()
 }
 
+pub(crate) fn write_brightness_with<C: TvClient>(
+    config: &Config,
+    client: &C,
+    brightness: OledBrightness,
+) -> Result<(), TvError> {
+    TvDevice::new(client, config.tv_ip)
+        .picture()
+        .set_oled_brightness(brightness)
+}
+
+pub(crate) fn notify_brightness_success_with<N: Notifier>(
+    notifier: &N,
+    brightness: OledBrightness,
+) -> Result<(), NotificationError> {
+    notifier
+        .notify(&Notification::new(
+            "LG TV",
+            format!("Brightness set to {brightness}%"),
+        ))
+        .map(|_| ())
+}
+
+fn write_brightness_and_notify_with<C: TvClient, N: Notifier>(
+    config: &Config,
+    client: &C,
+    notifier: &N,
+    brightness: OledBrightness,
+) -> Result<BrightnessWriteOutcome, BrightnessWriteError> {
+    write_brightness_with(config, client, brightness).map_err(BrightnessWriteError::from)?;
+    Ok(match notify_brightness_success_with(notifier, brightness) {
+        Ok(()) => BrightnessWriteOutcome::Applied,
+        Err(error) => BrightnessWriteOutcome::AppliedWithoutNotification {
+            diagnostic: format!(
+                "brightness was set to {brightness}%, but desktop notification failed: {error}"
+            ),
+        },
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BrightnessReadOperation(u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BrightnessWriteOperation {
+    id: u64,
+    brightness: OledBrightness,
+}
+
+impl BrightnessWriteOperation {
+    pub fn brightness(self) -> OledBrightness {
+        self.brightness
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrightnessTransition {
     update: BrightnessFrontendUpdate,
     read_operation: Option<BrightnessReadOperation>,
+    write_operation: Option<BrightnessWriteOperation>,
     diagnostic: Option<String>,
 }
 
@@ -125,23 +290,39 @@ impl BrightnessTransition {
         self.read_operation
     }
 
+    pub fn write_operation(&self) -> Option<BrightnessWriteOperation> {
+        self.write_operation
+    }
+
     pub fn diagnostic(&self) -> Option<&str> {
         self.diagnostic.as_deref()
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum BrightnessApplicationState {
-    Loading,
-    Ready,
-    Failed,
+    Loading(BrightnessReadOperation),
+    Ready {
+        current: OledBrightness,
+        proposed: OledBrightness,
+    },
+    ReadFailed,
+    Applying {
+        current: OledBrightness,
+        proposed: OledBrightness,
+        operation: BrightnessWriteOperation,
+    },
+    WriteFailed {
+        current: OledBrightness,
+        proposed: OledBrightness,
+        error: UserFacingError,
+    },
     Closed,
 }
 
 #[derive(Debug)]
 pub struct BrightnessApplication {
     state: BrightnessApplicationState,
-    active_read: Option<BrightnessReadOperation>,
     next_operation_id: u64,
 }
 
@@ -150,41 +331,120 @@ impl BrightnessApplication {
         let operation = BrightnessReadOperation(0);
         (
             Self {
-                state: BrightnessApplicationState::Loading,
-                active_read: Some(operation),
+                state: BrightnessApplicationState::Loading(operation),
                 next_operation_id: 1,
             },
             BrightnessTransition {
                 update: BrightnessFrontendUpdate::Present(BrightnessPresentation::loading()),
                 read_operation: Some(operation),
+                write_operation: None,
                 diagnostic: None,
             },
         )
     }
 
     pub fn handle_intent(&mut self, intent: BrightnessIntent) -> Option<BrightnessTransition> {
-        match intent {
-            BrightnessIntent::Retry if self.state == BrightnessApplicationState::Failed => {
+        match (self.state.clone(), intent) {
+            (BrightnessApplicationState::ReadFailed, BrightnessIntent::Retry) => {
                 let operation = BrightnessReadOperation(self.next_operation_id);
                 self.next_operation_id += 1;
-                self.state = BrightnessApplicationState::Loading;
-                self.active_read = Some(operation);
+                self.state = BrightnessApplicationState::Loading(operation);
                 Some(BrightnessTransition {
                     update: BrightnessFrontendUpdate::Present(BrightnessPresentation::loading()),
                     read_operation: Some(operation),
+                    write_operation: None,
                     diagnostic: None,
                 })
             }
-            BrightnessIntent::Cancel if self.state != BrightnessApplicationState::Closed => {
+            (
+                BrightnessApplicationState::Ready { current, proposed },
+                BrightnessIntent::Propose(value),
+            ) => self.update_proposal(current, proposed, value, None),
+            (
+                BrightnessApplicationState::WriteFailed {
+                    current,
+                    proposed,
+                    error,
+                },
+                BrightnessIntent::Propose(value),
+            ) => self.update_proposal(current, proposed, value, Some(error)),
+            (BrightnessApplicationState::Ready { current, proposed }, BrightnessIntent::Apply)
+                if current != proposed =>
+            {
+                Some(self.begin_write(current, proposed))
+            }
+            (
+                BrightnessApplicationState::WriteFailed {
+                    current, proposed, ..
+                },
+                BrightnessIntent::Retry,
+            ) if current != proposed => Some(self.begin_write(current, proposed)),
+            (state, BrightnessIntent::Cancel) if state != BrightnessApplicationState::Closed => {
                 self.state = BrightnessApplicationState::Closed;
-                self.active_read = None;
                 Some(BrightnessTransition {
                     update: BrightnessFrontendUpdate::Close,
                     read_operation: None,
+                    write_operation: None,
                     diagnostic: None,
                 })
             }
-            BrightnessIntent::Retry | BrightnessIntent::Cancel => None,
+            _ => None,
+        }
+    }
+
+    fn update_proposal(
+        &mut self,
+        current: OledBrightness,
+        previous: OledBrightness,
+        value: u8,
+        error: Option<UserFacingError>,
+    ) -> Option<BrightnessTransition> {
+        let proposed = OledBrightness::new(value).ok()?;
+        if proposed == previous {
+            return None;
+        }
+
+        let presentation = if let Some(error) = error {
+            self.state = BrightnessApplicationState::WriteFailed {
+                current,
+                proposed,
+                error: error.clone(),
+            };
+            BrightnessPresentation::write_failed(current, proposed, error)
+        } else {
+            self.state = BrightnessApplicationState::Ready { current, proposed };
+            BrightnessPresentation::ready(current, proposed)
+        };
+        Some(BrightnessTransition {
+            update: BrightnessFrontendUpdate::Present(presentation),
+            read_operation: None,
+            write_operation: None,
+            diagnostic: None,
+        })
+    }
+
+    fn begin_write(
+        &mut self,
+        current: OledBrightness,
+        proposed: OledBrightness,
+    ) -> BrightnessTransition {
+        let operation = BrightnessWriteOperation {
+            id: self.next_operation_id,
+            brightness: proposed,
+        };
+        self.next_operation_id += 1;
+        self.state = BrightnessApplicationState::Applying {
+            current,
+            proposed,
+            operation,
+        };
+        BrightnessTransition {
+            update: BrightnessFrontendUpdate::Present(BrightnessPresentation::applying(
+                current, proposed,
+            )),
+            read_operation: None,
+            write_operation: Some(operation),
+            diagnostic: None,
         }
     }
 
@@ -193,21 +453,23 @@ impl BrightnessApplication {
         operation: BrightnessReadOperation,
         result: Result<OledBrightness, BrightnessReadError>,
     ) -> Option<BrightnessTransition> {
-        if self.state != BrightnessApplicationState::Loading || self.active_read != Some(operation)
+        if !matches!(self.state, BrightnessApplicationState::Loading(active) if active == operation)
         {
             return None;
         }
 
-        self.active_read = None;
         let (presentation, diagnostic) = match result {
             Ok(brightness) => {
-                self.state = BrightnessApplicationState::Ready;
-                (BrightnessPresentation::ready(brightness), None)
+                self.state = BrightnessApplicationState::Ready {
+                    current: brightness,
+                    proposed: brightness,
+                };
+                (BrightnessPresentation::ready(brightness, brightness), None)
             }
             Err(error) => {
-                self.state = BrightnessApplicationState::Failed;
+                self.state = BrightnessApplicationState::ReadFailed;
                 let presentation =
-                    BrightnessPresentation::failed(user_facing_error(error.failure()));
+                    BrightnessPresentation::read_failed(user_facing_read_error(error.failure()));
                 let diagnostic = format!("could not load current brightness: {error}");
                 (presentation, Some(diagnostic))
             }
@@ -215,17 +477,63 @@ impl BrightnessApplication {
         Some(BrightnessTransition {
             update: BrightnessFrontendUpdate::Present(presentation),
             read_operation: None,
+            write_operation: None,
             diagnostic,
         })
     }
 
+    pub fn complete_write(
+        &mut self,
+        operation: BrightnessWriteOperation,
+        result: Result<BrightnessWriteOutcome, BrightnessWriteError>,
+    ) -> Option<BrightnessTransition> {
+        let BrightnessApplicationState::Applying {
+            current,
+            proposed,
+            operation: active,
+        } = self.state.clone()
+        else {
+            return None;
+        };
+        if active != operation {
+            return None;
+        }
+
+        match result {
+            Ok(outcome) => {
+                self.state = BrightnessApplicationState::Closed;
+                Some(BrightnessTransition {
+                    update: BrightnessFrontendUpdate::Close,
+                    read_operation: None,
+                    write_operation: None,
+                    diagnostic: outcome.diagnostic().map(str::to_string),
+                })
+            }
+            Err(error) => {
+                let user_error = user_facing_write_error(error.failure());
+                self.state = BrightnessApplicationState::WriteFailed {
+                    current,
+                    proposed,
+                    error: user_error.clone(),
+                };
+                Some(BrightnessTransition {
+                    update: BrightnessFrontendUpdate::Present(
+                        BrightnessPresentation::write_failed(current, proposed, user_error),
+                    ),
+                    read_operation: None,
+                    write_operation: None,
+                    diagnostic: Some(format!("could not apply brightness: {error}")),
+                })
+            }
+        }
+    }
+
     pub fn shutdown(&mut self) {
         self.state = BrightnessApplicationState::Closed;
-        self.active_read = None;
     }
 }
 
-fn user_facing_error(failure: BrightnessReadFailure) -> UserFacingError {
+fn user_facing_read_error(failure: BrightnessReadFailure) -> UserFacingError {
     let (summary, detail) = match failure {
         BrightnessReadFailure::NotConfigured => (
             "LG Buddy is not configured.",
@@ -263,6 +571,40 @@ fn user_facing_error(failure: BrightnessReadFailure) -> UserFacingError {
     UserFacingError::new(summary, detail)
 }
 
+fn user_facing_write_error(failure: BrightnessWriteFailure) -> UserFacingError {
+    let (summary, detail) = match failure {
+        BrightnessWriteFailure::NotConfigured => (
+            "LG Buddy is not configured.",
+            "Complete LG Buddy setup, then retry.",
+        ),
+        BrightnessWriteFailure::InvalidConfiguration => (
+            "LG Buddy could not load its TV configuration.",
+            "Check the saved TV address and platform settings, then retry.",
+        ),
+        BrightnessWriteFailure::CredentialsUnavailable => (
+            "LG Buddy cannot authenticate with this TV.",
+            "Run `lg-buddy brightness set <0-100>` in a terminal, accept a TV pairing prompt if shown, then retry.",
+        ),
+        BrightnessWriteFailure::Unreachable => (
+            "The TV could not be reached.",
+            "Make sure the TV is on and connected to the same network, then retry.",
+        ),
+        BrightnessWriteFailure::Rejected => (
+            "The TV rejected the brightness change.",
+            "Make sure the TV screen is on, then retry.",
+        ),
+        BrightnessWriteFailure::ScreenNotVisible => (
+            "The TV screen is not available.",
+            "Turn the TV screen on, then retry.",
+        ),
+        BrightnessWriteFailure::Internal => (
+            "LG Buddy could not set the brightness.",
+            "Retry. If this continues, check the LG Buddy logs.",
+        ),
+    };
+    UserFacingError::new(summary, detail)
+}
+
 #[cfg(test)]
 mod tests {
     mod support {
@@ -270,19 +612,60 @@ mod tests {
     }
 
     use super::{
-        read_current_brightness_with, BrightnessApplication, BrightnessReadError,
-        BrightnessReadFailure,
+        read_current_brightness_with, write_brightness_and_notify_with, BrightnessApplication,
+        BrightnessReadError, BrightnessReadFailure, BrightnessWriteError, BrightnessWriteFailure,
+        BrightnessWriteOutcome,
     };
     use crate::config::{
         Config, HdmiInput, MacAddress, ScreenBackend, ScreenIdleBlankPolicy, ScreenRestorePolicy,
         SystemSleepWakePolicy, TvPlatform,
     };
+    use crate::notifications::{
+        Notification, NotificationCapabilities, NotificationError, NotificationId, Notifier,
+    };
     use crate::presentation::brightness::{
         BrightnessFrontendUpdate, BrightnessIntent, BrightnessStatus,
     };
     use crate::tv::{BscpylgtvCommandClient, OledBrightness, TvErrorKind};
+    use std::cell::RefCell;
     use std::net::Ipv4Addr;
     use support::MockBscpylgtv;
+
+    #[derive(Default)]
+    struct RecordingNotifier {
+        messages: RefCell<Vec<(String, String)>>,
+        failure: Option<&'static str>,
+    }
+
+    impl RecordingNotifier {
+        fn failing(message: &'static str) -> Self {
+            Self {
+                messages: RefCell::new(Vec::new()),
+                failure: Some(message),
+            }
+        }
+
+        fn messages(&self) -> Vec<(String, String)> {
+            self.messages.borrow().clone()
+        }
+    }
+
+    impl Notifier for RecordingNotifier {
+        fn capabilities(&self) -> Result<NotificationCapabilities, NotificationError> {
+            Ok(NotificationCapabilities { actions: false })
+        }
+
+        fn notify(&self, notification: &Notification) -> Result<NotificationId, NotificationError> {
+            self.messages
+                .borrow_mut()
+                .push((notification.summary.clone(), notification.body.clone()));
+            if let Some(message) = self.failure {
+                Err(NotificationError::Transport(message.to_string()))
+            } else {
+                Ok(NotificationId(1))
+            }
+        }
+    }
 
     #[test]
     fn opening_publishes_loading_and_one_current_read() {
@@ -317,6 +700,164 @@ mod tests {
         assert_eq!(control.current(), brightness);
         assert_eq!(control.proposed(), brightness);
         assert!(transition.read_operation().is_none());
+        assert!(transition.write_operation().is_none());
+    }
+
+    #[test]
+    fn proposal_is_validated_and_does_not_start_a_write() {
+        let mut application = ready_application(72);
+
+        assert!(application
+            .handle_intent(BrightnessIntent::Propose(101))
+            .is_none());
+        assert!(application.handle_intent(BrightnessIntent::Apply).is_none());
+
+        let transition = application
+            .handle_intent(BrightnessIntent::Propose(65))
+            .expect("valid proposal transition");
+        let BrightnessFrontendUpdate::Present(presentation) = transition.update() else {
+            panic!("proposal should present ready state");
+        };
+        let control = presentation.control().expect("ready control");
+
+        assert!(matches!(
+            presentation.status(),
+            BrightnessStatus::Ready { .. }
+        ));
+        assert_eq!(control.current().as_percent(), 72);
+        assert_eq!(control.proposed().as_percent(), 65);
+        assert!(presentation
+            .primary_action()
+            .expect("apply action")
+            .enabled());
+        assert!(transition.read_operation().is_none());
+        assert!(transition.write_operation().is_none());
+        assert!(application
+            .handle_intent(BrightnessIntent::Propose(65))
+            .is_none());
+    }
+
+    #[test]
+    fn apply_captures_one_proposal_and_publishes_busy_state() {
+        let mut application = ready_application(72);
+        application
+            .handle_intent(BrightnessIntent::Propose(65))
+            .expect("valid proposal");
+
+        let transition = application
+            .handle_intent(BrightnessIntent::Apply)
+            .expect("apply transition");
+        let operation = transition.write_operation().expect("write operation");
+        let BrightnessFrontendUpdate::Present(presentation) = transition.update() else {
+            panic!("apply should present applying state");
+        };
+
+        assert_eq!(operation.brightness().as_percent(), 65);
+        assert!(matches!(
+            presentation.status(),
+            BrightnessStatus::Applying { .. }
+        ));
+        assert!(!presentation.control().expect("applying control").enabled());
+        assert!(!presentation
+            .primary_action()
+            .expect("apply action")
+            .enabled());
+        assert!(application.handle_intent(BrightnessIntent::Apply).is_none());
+        assert!(application
+            .handle_intent(BrightnessIntent::Propose(40))
+            .is_none());
+        assert!(application.handle_intent(BrightnessIntent::Retry).is_none());
+    }
+
+    #[test]
+    fn successful_write_closes_and_ignores_duplicate_completion() {
+        let (mut application, operation) = applying_application(72, 65);
+
+        let completion = application
+            .complete_write(operation, Ok(BrightnessWriteOutcome::Applied))
+            .expect("current write completion");
+
+        assert_eq!(completion.update(), &BrightnessFrontendUpdate::Close);
+        assert!(completion.diagnostic().is_none());
+        assert!(application
+            .complete_write(operation, Ok(BrightnessWriteOutcome::Applied))
+            .is_none());
+    }
+
+    #[test]
+    fn notification_warning_does_not_turn_an_applied_write_into_a_retry() {
+        let (mut application, operation) = applying_application(72, 65);
+
+        let completion = application
+            .complete_write(
+                operation,
+                Ok(BrightnessWriteOutcome::AppliedWithoutNotification {
+                    diagnostic: "notification bus unavailable".to_string(),
+                }),
+            )
+            .expect("current write completion");
+
+        assert_eq!(completion.update(), &BrightnessFrontendUpdate::Close);
+        assert_eq!(
+            completion.diagnostic(),
+            Some("notification bus unavailable")
+        );
+        assert!(application.handle_intent(BrightnessIntent::Retry).is_none());
+    }
+
+    #[test]
+    fn failed_write_preserves_proposal_and_retry_replaces_the_operation() {
+        let (mut application, old_operation) = applying_application(72, 65);
+        let failure = application
+            .complete_write(
+                old_operation,
+                Err(BrightnessWriteError::new(
+                    BrightnessWriteFailure::Unreachable,
+                    "sensitive write diagnostic",
+                )),
+            )
+            .expect("write failure transition");
+        let BrightnessFrontendUpdate::Present(presentation) = failure.update() else {
+            panic!("write failure should remain open");
+        };
+        let BrightnessStatus::Failed(error) = presentation.status() else {
+            panic!("write failure should present an error");
+        };
+
+        assert!(error.summary().contains("could not be reached"));
+        assert!(!error.summary().contains("sensitive"));
+        assert!(!error.detail().contains("sensitive"));
+        assert_eq!(
+            presentation
+                .control()
+                .expect("failed write control")
+                .proposed()
+                .as_percent(),
+            65
+        );
+        assert_eq!(
+            presentation
+                .primary_action()
+                .expect("retry action")
+                .intent(),
+            BrightnessIntent::Retry
+        );
+        assert!(failure
+            .diagnostic()
+            .is_some_and(|value| value.contains("sensitive write diagnostic")));
+
+        let retry = application
+            .handle_intent(BrightnessIntent::Retry)
+            .expect("retry transition");
+        let new_operation = retry.write_operation().expect("retry write");
+        assert_ne!(old_operation, new_operation);
+        assert_eq!(new_operation.brightness().as_percent(), 65);
+        assert!(application
+            .complete_write(old_operation, Ok(BrightnessWriteOutcome::Applied))
+            .is_none());
+        assert!(application
+            .complete_write(new_operation, Ok(BrightnessWriteOutcome::Applied))
+            .is_some());
     }
 
     #[test]
@@ -435,6 +976,36 @@ mod tests {
     }
 
     #[test]
+    fn cancellation_before_apply_closes_without_a_write() {
+        let mut application = ready_application(72);
+        application
+            .handle_intent(BrightnessIntent::Propose(65))
+            .expect("valid proposal");
+
+        let cancellation = application
+            .handle_intent(BrightnessIntent::Cancel)
+            .expect("cancel transition");
+
+        assert_eq!(cancellation.update(), &BrightnessFrontendUpdate::Close);
+        assert!(cancellation.write_operation().is_none());
+        assert!(application.handle_intent(BrightnessIntent::Apply).is_none());
+    }
+
+    #[test]
+    fn cancellation_during_write_closes_and_ignores_late_completion() {
+        let (mut application, operation) = applying_application(72, 65);
+
+        let cancellation = application
+            .handle_intent(BrightnessIntent::Cancel)
+            .expect("cancel transition");
+
+        assert_eq!(cancellation.update(), &BrightnessFrontendUpdate::Close);
+        assert!(application
+            .complete_write(operation, Ok(BrightnessWriteOutcome::Applied))
+            .is_none());
+    }
+
+    #[test]
     fn shutdown_ignores_late_read_completion() {
         let (mut application, opening) = BrightnessApplication::open();
         let operation = opening.read_operation().expect("opening read");
@@ -446,6 +1017,17 @@ mod tests {
                 operation,
                 Ok(OledBrightness::new(72).expect("valid brightness"))
             )
+            .is_none());
+    }
+
+    #[test]
+    fn shutdown_ignores_late_write_completion() {
+        let (mut application, operation) = applying_application(72, 65);
+
+        application.shutdown();
+
+        assert!(application
+            .complete_write(operation, Ok(BrightnessWriteOutcome::Applied))
             .is_none());
     }
 
@@ -467,6 +1049,76 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["get_picture_settings"]
         );
+    }
+
+    #[test]
+    fn successful_write_uses_the_tv_picture_capability_and_notifies() {
+        let config = sample_config();
+        let mock = MockBscpylgtv::new("gui-brightness-write");
+        let client = client_for_mock(&mock, config.tv_ip);
+        let notifier = RecordingNotifier::default();
+        let brightness = OledBrightness::new(65).expect("valid brightness");
+
+        let outcome = write_brightness_and_notify_with(&config, &client, &notifier, brightness)
+            .expect("brightness write should succeed");
+
+        assert_eq!(outcome, BrightnessWriteOutcome::Applied);
+        assert_eq!(mock.state_snapshot().backlight, 65);
+        assert_eq!(
+            mock.calls()
+                .into_iter()
+                .map(|call| call.command)
+                .collect::<Vec<_>>(),
+            vec!["set_settings"]
+        );
+        assert_eq!(
+            notifier.messages(),
+            vec![("LG TV".to_string(), "Brightness set to 65%".to_string())]
+        );
+    }
+
+    #[test]
+    fn failed_write_is_typed_and_does_not_send_a_success_notification() {
+        let config = sample_config();
+        let client = BscpylgtvCommandClient::new(
+            config.tv_ip,
+            "/definitely/missing/lg-buddy-bscpylgtvcommand",
+        );
+        let notifier = RecordingNotifier::default();
+
+        let error = write_brightness_and_notify_with(
+            &config,
+            &client,
+            &notifier,
+            OledBrightness::new(65).expect("valid brightness"),
+        )
+        .expect_err("brightness write should fail");
+
+        assert_eq!(error.failure(), BrightnessWriteFailure::Unreachable);
+        assert!(notifier.messages().is_empty());
+    }
+
+    #[test]
+    fn notification_failure_preserves_the_successful_tv_write() {
+        let config = sample_config();
+        let mock = MockBscpylgtv::new("gui-brightness-notification-failure");
+        let client = client_for_mock(&mock, config.tv_ip);
+        let notifier = RecordingNotifier::failing("bus unavailable");
+
+        let outcome = write_brightness_and_notify_with(
+            &config,
+            &client,
+            &notifier,
+            OledBrightness::new(65).expect("valid brightness"),
+        )
+        .expect("TV write should remain successful");
+
+        assert!(matches!(
+            outcome,
+            BrightnessWriteOutcome::AppliedWithoutNotification { diagnostic }
+                if diagnostic.contains("bus unavailable")
+        ));
+        assert_eq!(mock.state_snapshot().backlight, 65);
     }
 
     #[test]
@@ -521,5 +1173,32 @@ mod tests {
 
     fn client_for_mock(mock: &MockBscpylgtv, tv_ip: Ipv4Addr) -> BscpylgtvCommandClient {
         BscpylgtvCommandClient::with_args(tv_ip, mock.command_path(), mock.command_args())
+    }
+
+    fn ready_application(value: u8) -> BrightnessApplication {
+        let (mut application, opening) = BrightnessApplication::open();
+        let operation = opening.read_operation().expect("opening read");
+        application
+            .complete_read(
+                operation,
+                Ok(OledBrightness::new(value).expect("valid brightness")),
+            )
+            .expect("ready transition");
+        application
+    }
+
+    fn applying_application(
+        current: u8,
+        proposed: u8,
+    ) -> (BrightnessApplication, super::BrightnessWriteOperation) {
+        let mut application = ready_application(current);
+        application
+            .handle_intent(BrightnessIntent::Propose(proposed))
+            .expect("proposal transition");
+        let applying = application
+            .handle_intent(BrightnessIntent::Apply)
+            .expect("apply transition");
+        let operation = applying.write_operation().expect("write operation");
+        (application, operation)
     }
 }

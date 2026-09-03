@@ -16,6 +16,7 @@ pub struct BrightnessPresentation {
 pub enum BrightnessStatus {
     Loading { message: String },
     Ready { message: String },
+    Applying { message: String },
     Failed(UserFacingError),
 }
 
@@ -39,6 +40,8 @@ pub struct ActionPresentation {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BrightnessIntent {
+    Propose(u8),
+    Apply,
     Retry,
     Cancel,
 }
@@ -66,31 +69,81 @@ impl BrightnessPresentation {
         )
     }
 
-    pub(crate) fn ready(brightness: OledBrightness) -> Self {
+    pub(crate) fn ready(current: OledBrightness, proposed: OledBrightness) -> Self {
         Self::new(
             BrightnessStatus::Ready {
-                message: format!("Current brightness: {brightness}%"),
+                message: format!("Current brightness: {current}%"),
             },
             Some(BrightnessControl {
                 label: "OLED Pixel Brightness".to_string(),
-                current: brightness,
-                proposed: brightness,
+                current,
+                proposed,
+                minimum: OLED_BRIGHTNESS_MIN,
+                maximum: OLED_BRIGHTNESS_MAX,
+                step: BRIGHTNESS_STEP,
+                enabled: true,
+            }),
+            Some(ActionPresentation::new(
+                "Apply",
+                proposed != current,
+                BrightnessIntent::Apply,
+            )),
+        )
+    }
+
+    pub(crate) fn applying(current: OledBrightness, proposed: OledBrightness) -> Self {
+        Self::new(
+            BrightnessStatus::Applying {
+                message: format!("Applying brightness: {proposed}%…"),
+            },
+            Some(BrightnessControl {
+                label: "OLED Pixel Brightness".to_string(),
+                current,
+                proposed,
                 minimum: OLED_BRIGHTNESS_MIN,
                 maximum: OLED_BRIGHTNESS_MAX,
                 step: BRIGHTNESS_STEP,
                 enabled: false,
             }),
-            None,
+            Some(ActionPresentation::new(
+                "Apply",
+                false,
+                BrightnessIntent::Apply,
+            )),
         )
     }
 
-    pub(crate) fn failed(error: UserFacingError) -> Self {
+    pub(crate) fn read_failed(error: UserFacingError) -> Self {
         Self::new(
             BrightnessStatus::Failed(error),
             None,
             Some(ActionPresentation::new(
                 "Retry",
                 true,
+                BrightnessIntent::Retry,
+            )),
+        )
+    }
+
+    pub(crate) fn write_failed(
+        current: OledBrightness,
+        proposed: OledBrightness,
+        error: UserFacingError,
+    ) -> Self {
+        Self::new(
+            BrightnessStatus::Failed(error),
+            Some(BrightnessControl {
+                label: "OLED Pixel Brightness".to_string(),
+                current,
+                proposed,
+                minimum: OLED_BRIGHTNESS_MIN,
+                maximum: OLED_BRIGHTNESS_MAX,
+                step: BRIGHTNESS_STEP,
+                enabled: true,
+            }),
+            Some(ActionPresentation::new(
+                "Retry",
+                proposed != current,
                 BrightnessIntent::Retry,
             )),
         )
@@ -233,9 +286,9 @@ mod tests {
     }
 
     #[test]
-    fn ready_presentation_declares_the_validated_read_only_control() {
+    fn ready_presentation_declares_an_editable_control_and_apply_availability() {
         let brightness = OledBrightness::new(72).expect("valid brightness");
-        let presentation = BrightnessPresentation::ready(brightness);
+        let presentation = BrightnessPresentation::ready(brightness, brightness);
         let control = presentation.control().expect("ready control");
 
         assert_eq!(
@@ -250,7 +303,41 @@ mod tests {
         assert_eq!(control.minimum(), 0);
         assert_eq!(control.maximum(), 100);
         assert_eq!(control.step(), 5);
+        assert!(control.enabled());
+        let apply = presentation.primary_action().expect("apply action");
+        assert_eq!(apply.label(), "Apply");
+        assert!(!apply.enabled());
+        assert_eq!(apply.intent(), BrightnessIntent::Apply);
+
+        let proposed = OledBrightness::new(65).expect("valid proposal");
+        let changed = BrightnessPresentation::ready(brightness, proposed);
+        assert_eq!(
+            changed.control().expect("ready control").proposed(),
+            proposed
+        );
+        assert!(changed.primary_action().expect("apply action").enabled());
+    }
+
+    #[test]
+    fn applying_presentation_keeps_the_captured_value_visible_and_disables_changes() {
+        let current = OledBrightness::new(72).expect("valid brightness");
+        let proposed = OledBrightness::new(65).expect("valid proposal");
+        let presentation = BrightnessPresentation::applying(current, proposed);
+        let control = presentation.control().expect("applying control");
+
+        assert_eq!(
+            presentation.status(),
+            &BrightnessStatus::Applying {
+                message: "Applying brightness: 65%…".to_string(),
+            }
+        );
+        assert_eq!(control.current(), current);
+        assert_eq!(control.proposed(), proposed);
         assert!(!control.enabled());
-        assert!(presentation.primary_action().is_none());
+        assert!(!presentation
+            .primary_action()
+            .expect("apply action")
+            .enabled());
+        assert!(presentation.cancel_action().enabled());
     }
 }
