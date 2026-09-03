@@ -103,7 +103,7 @@ The workflow:
 11. For prereleases, exercises production GitHub discovery, acquisition,
     confirmation, installation, and final identity from the pinned baseline.
 
-`install.sh` is only an installer. It does not build the runtime.
+`install.sh` is only an installer. It does not build the runtime or GUI.
 
 ## Release bundle identity
 
@@ -198,10 +198,13 @@ An incompatible or legacy layout is refused rather than migrated. If a failure
 occurs after installation writes begin, correct the reported cause and rerun the
 same verified bundle with `--upgrade`.
 
-## Installing a locally built binary
+## Installing locally built binaries
 
-If you build `lg-buddy` yourself, install it by passing the binary path explicitly:
+If you build `lg-buddy` and `lg-buddy-gui` yourself, install them by passing both
+binary paths explicitly:
 
 ```bash
-./install.sh --runtime-binary ./target/release/lg-buddy
+./install.sh \
+  --runtime-binary ./target/release/lg-buddy \
+  --gui-binary ./target/release/lg-buddy-gui
 ```

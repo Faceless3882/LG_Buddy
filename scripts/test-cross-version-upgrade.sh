@@ -31,6 +31,32 @@ assert_executable() {
     [ -x "$1" ] || fail "Expected executable not found: $1"
 }
 
+install_gui_candidate_fixture() {
+    local bundle_root="$1"
+    local gui_binary="$bundle_root/lg-buddy-gui"
+
+    # #144 covers installer upgrades before #145 adds the real GUI to release
+    # archives and their manifest.
+    [ ! -e "$gui_binary" ] || return 0
+    cat >"$gui_binary" <<'EOF'
+#!/bin/sh
+set -eu
+
+case "${1:-}" in
+    --version|-V)
+        [ "$#" -eq 1 ] || exit 2
+        exec "$(dirname "$0")/lg-buddy" --version
+        ;;
+    brightness)
+        [ "$#" -eq 1 ] || exit 2
+        exit 0
+        ;;
+    *) exit 2 ;;
+esac
+EOF
+    chmod 755 "$gui_binary"
+}
+
 validate_archive_paths() {
     local archive="$1"
     local entry=""
@@ -194,6 +220,8 @@ python3 "$SCRIPT_DIR/release_bundle_manifest.py" validate \
     --expected-channel "$CANDIDATE_CHANNEL" \
     --expected-target "$CANDIDATE_TARGET" \
     --expected-commit "$CANDIDATE_COMMIT"
+install_gui_candidate_fixture "$CANDIDATE_BUNDLE"
+assert_executable "$CANDIDATE_BUNDLE/lg-buddy-gui"
 
 INSTALL_ROOT="$WORK_DIR/root"
 HOME_DIR="$WORK_DIR/home"
@@ -218,11 +246,12 @@ export PIP_NO_PYTHON_VERSION_WARNING="1"
 
 (
     cd "$PREVIOUS_BUNDLE"
-    ./install.sh
+    bash ./install.sh
 )
 
 CONFIG_FILE="$XDG_CONFIG_HOME/lg-buddy/config.env"
 INSTALLED_BINARY="$INSTALL_ROOT/usr/bin/lg-buddy"
+INSTALLED_GUI="$INSTALL_ROOT/usr/bin/lg-buddy-gui"
 INSTALLED_POINTER="$INSTALL_ROOT/usr/lib/lg-buddy/config-path"
 SYSTEM_SERVICE="$INSTALL_ROOT/etc/systemd/system/LG_Buddy.service"
 LIFECYCLE_SERVICE="$INSTALL_ROOT/etc/systemd/system/LG_Buddy_lifecycle.service"
@@ -330,7 +359,7 @@ if (
     LG_BUDDY_SUDO_CMD="$SUDO_SPY" \
     LG_BUDDY_SUDO_MARKER="$SUDO_MARKER" \
     strace -f -qq -e trace=network -o "$CANDIDATE_NETWORK_TRACE" \
-        ./install.sh --upgrade >"$CANDIDATE_REFUSAL_OUTPUT" 2>&1
+        bash ./install.sh --upgrade >"$CANDIDATE_REFUSAL_OUTPUT" 2>&1
 ); then
     fail "Malformed candidate unexpectedly passed its preflight."
 fi
@@ -377,7 +406,7 @@ chmod 755 "$INSTALLER_STUB_DIR/systemctl" "$INSTALLER_STUB_DIR/systemd-tmpfiles"
     export LG_BUDDY_SERVICE_ACTION_LOG="$SERVICE_ACTION_LOG"
     export LG_BUDDY_SKIP_SYSTEMD_ACTIONS="0"
     cd "$CANDIDATE_BUNDLE"
-    ./install.sh --upgrade >"$UPGRADE_OUTPUT" 2>&1
+    bash ./install.sh --upgrade >"$UPGRADE_OUTPUT" 2>&1
 )
 
 grep -F -q 'Upgrade complete!' "$UPGRADE_OUTPUT"
@@ -405,6 +434,10 @@ cmp -s "$TOKEN_SNAPSHOT" "$NATIVE_TOKEN_FILE" || fail "Cross-version upgrade cha
 [ -e "$VENV_MARKER" ] || fail "Cross-version native upgrade recreated the Python environment."
 
 cmp -s "$CANDIDATE_BUNDLE/lg-buddy" "$INSTALLED_BINARY"
+assert_executable "$INSTALLED_GUI"
+[ "$(stat -c '%a' "$INSTALLED_GUI")" = "755" ] || fail "Installed GUI mode is not 755."
+cmp -s "$CANDIDATE_BUNDLE/lg-buddy-gui" "$INSTALLED_GUI"
+[ "$("$INSTALLED_GUI" --version)" = "$("$INSTALLED_BINARY" --version)" ] || fail "Installed GUI identity does not match the runtime."
 cmp -s "$CANDIDATE_BUNDLE/systemd/LG_Buddy.service" "$SYSTEM_SERVICE"
 cmp -s "$CANDIDATE_BUNDLE/systemd/LG_Buddy_lifecycle.service" "$LIFECYCLE_SERVICE"
 cmp -s "$CANDIDATE_BUNDLE/systemd/lg_buddy.conf" "$TMPFILES_CONFIG"

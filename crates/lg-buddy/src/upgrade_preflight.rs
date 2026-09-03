@@ -110,6 +110,11 @@ const SYSTEM_PATH_REQUIREMENTS: &[InstallerPathRequirement] = &[
     ),
 ];
 
+const OPTIONAL_SYSTEM_PATH_REQUIREMENTS: &[InstallerPathRequirement] = &[requirement(
+    "/usr/bin/lg-buddy-gui",
+    InstallerPathPolicy::ReplaceExecutable,
+)];
+
 const PYTHON_REPAIR_PATH_REQUIREMENTS: &[InstallerPathRequirement] = &[requirement(
     "/usr/bin/LG_Buddy_PIP",
     InstallerPathPolicy::RecursiveClear,
@@ -173,6 +178,7 @@ const CANDIDATE_PATH_REQUIREMENTS: &[InstallerPathRequirement] = &[
     requirement("release-manifest.json", InstallerPathPolicy::ReadableInput),
     requirement("install.sh", InstallerPathPolicy::ExecutableInput),
     requirement("lg-buddy", InstallerPathPolicy::ExecutableInput),
+    requirement("lg-buddy-gui", InstallerPathPolicy::ExecutableInput),
     requirement(
         "LG_Buddy_Brightness.desktop",
         InstallerPathPolicy::ReadableInput,
@@ -633,6 +639,15 @@ fn evaluate_installed_state(
             Some(system_trust),
             requirement.policy,
             check,
+        );
+    }
+    for requirement in OPTIONAL_SYSTEM_PATH_REQUIREMENTS {
+        checker.check_optional_requirement(
+            &facts.layout.system_path(requirement.path),
+            facts.system_owner_uid,
+            Some(system_trust),
+            requirement.policy,
+            "installed-layout",
         );
     }
     if repair_python {
@@ -1499,6 +1514,29 @@ mod tests {
     }
 
     #[test]
+    fn installed_gui_is_optional_for_first_upgrade_but_validated_when_present() {
+        let fixture = InstalledFixture::new("optional-installed-gui");
+        let gui = fixture.facts.layout.system_path("/usr/bin/lg-buddy-gui");
+
+        let missing = evaluate_initial_preflight(&OsFilesystemFacts, &fixture.facts);
+        assert!(missing.compatible(), "{}", missing.render());
+
+        write_file(&gui, true);
+        let installed = evaluate_initial_preflight(&OsFilesystemFacts, &fixture.facts);
+        assert!(installed.compatible(), "{}", installed.render());
+
+        fs::remove_file(&gui).unwrap();
+        symlink(fixture.facts.layout.installed_executable(), &gui).unwrap();
+        let unsafe_installation = evaluate_initial_preflight(&OsFilesystemFacts, &fixture.facts);
+        assert_failure(
+            &unsafe_installation,
+            "installed-layout",
+            &gui,
+            "found Symlink",
+        );
+    }
+
+    #[test]
     fn python_environment_safety_is_required_only_when_repair_is_requested() {
         let fixture = InstalledFixture::new("conditional-python-repair");
         let filesystem = RootOwnedFilesystem(OsFilesystemFacts);
@@ -1722,6 +1760,7 @@ mod tests {
         for (label, path, mode) in [
             ("writable-manifest", "release-manifest.json", 0o660),
             ("writable-installer", "install.sh", 0o770),
+            ("writable-gui", "lg-buddy-gui", 0o770),
             ("writable-input-directory", "systemd", 0o770),
         ] {
             let fixture = InstalledFixture::new(label);
@@ -2252,10 +2291,14 @@ mod tests {
 
     #[test]
     fn candidate_preflight_requires_owner_usable_executable_modes() {
-        for (label, mode) in [("unreadable-installer", 0o100), ("other-executable", 0o401)] {
+        for (label, path, mode) in [
+            ("unreadable-installer", "install.sh", 0o100),
+            ("other-executable", "install.sh", 0o401),
+            ("non-executable-gui", "lg-buddy-gui", 0o400),
+        ] {
             let fixture = InstalledFixture::new(label);
-            let installer = fixture.candidate_root.join("install.sh");
-            set_mode(&installer, mode);
+            let executable = fixture.candidate_root.join(path);
+            set_mode(&executable, mode);
 
             let report = evaluate_candidate_preflight(
                 &OsFilesystemFacts,
@@ -2266,7 +2309,7 @@ mod tests {
             assert_failure(
                 &report,
                 "candidate-layout",
-                &installer,
+                &executable,
                 "not readable and executable by its owner",
             );
         }

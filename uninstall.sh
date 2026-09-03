@@ -28,6 +28,7 @@ run_privileged() {
 
 SYSTEM_BIN_DIR="$(prefix_path "/usr/bin")"
 RUNTIME_INSTALL_PATH="${SYSTEM_BIN_DIR}/lg-buddy"
+GUI_INSTALL_PATH="${SYSTEM_BIN_DIR}/lg-buddy-gui"
 VENV_DIR="${SYSTEM_BIN_DIR}/LG_Buddy_PIP"
 SYSTEM_LIB_DIR="$(prefix_path "/usr/lib/lg-buddy")"
 COMMON_HELPER_PATH="${SYSTEM_LIB_DIR}/common.sh"
@@ -115,6 +116,7 @@ echo "Done."
 
 echo "Removing scripts"
 run_privileged rm -f "$RUNTIME_INSTALL_PATH"
+run_privileged rm -f "$GUI_INSTALL_PATH"
 run_privileged rm -f "${SYSTEM_BIN_DIR}/LG_Buddy_Startup"
 run_privileged rm -f "${SYSTEM_BIN_DIR}/LG_Buddy_Shutdown"
 run_privileged rm -f "${SYSTEM_BIN_DIR}/LG_Buddy_Screen_On"

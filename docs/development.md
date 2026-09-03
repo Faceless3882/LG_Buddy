@@ -55,7 +55,7 @@ cargo build --release -p lg-buddy
 Build the GTK frontend from source with:
 
 ```bash
-cargo build -p lg-buddy-gui
+cargo build --release -p lg-buddy-gui
 ```
 
 Run its current brightness window with:
@@ -70,8 +70,8 @@ the running CLI executable. `LG_BUDDY_GUI` overrides that companion path for
 relocation and subprocess tests. Only a missing path selects the temporary
 Zenity compatibility flow.
 
-The resulting `lg-buddy-gui` binary is a development artifact in the current
-GUI slice. Installer and release-bundle integration are tracked separately.
+The local installer accepts the GUI and runtime as separate build artifacts.
+Shipping both artifacts in official release bundles is tracked separately.
 
 Official release builds inject version identity into the binary:
 
@@ -91,12 +91,14 @@ The resulting binary will be at:
 
 ## Install a Locally Built Binary
 
-`install.sh` is installer-only. It does not build the runtime.
+`install.sh` is installer-only. It does not build the runtime or GUI.
 
-To install a binary you built yourself:
+To install binaries you built yourself:
 
 ```bash
-./install.sh --runtime-binary ./target/release/lg-buddy
+./install.sh \
+  --runtime-binary ./target/release/lg-buddy \
+  --gui-binary ./target/release/lg-buddy-gui
 ```
 
 To install from a release bundle instead, extract the archive and run:
@@ -114,9 +116,10 @@ cargo test -p lg-buddy --lib
 cargo test -p lg-buddy --test cucumber
 dbus-run-session -- xvfb-run -a bash ./scripts/test-gui-launch.sh ./target/debug/lg-buddy-gui
 dbus-run-session -- xvfb-run -a bash ./scripts/test-gui-launch.sh ./target/debug/lg-buddy
+dbus-run-session -- xvfb-run -a bash ./scripts/test-installed-gui.sh ./target/debug/lg-buddy ./target/debug/lg-buddy-gui
 dbus-run-session -- xvfb-run -a env ADW_DISABLE_PORTAL=1 GDK_BACKEND=x11 GDK_DEBUG=no-portals NO_AT_BRIDGE=1 cargo test -p lg-buddy-gui -- --test-threads=1
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-bash -n install.sh uninstall.sh configure.sh bin/LG_Buddy_Common scripts/build-release-bundle.sh scripts/test-release-bundle.sh scripts/test-cross-version-upgrade.sh scripts/test-production-upgrade-canary.sh scripts/publish-release-assets.sh
+bash -n install.sh uninstall.sh configure.sh bin/LG_Buddy_Common scripts/build-release-bundle.sh scripts/test-gui-launch.sh scripts/test-installed-gui.sh scripts/test-release-bundle.sh scripts/test-cross-version-upgrade.sh scripts/test-production-upgrade-canary.sh scripts/publish-release-assets.sh
 python3 scripts/test_release_promotion.py
 python3 scripts/test_record_github_release_responses.py
 ```
@@ -237,10 +240,11 @@ the branch contract and recovery process, see
 | `crates/lg-buddy/src/wol.rs` | Native Wake-on-LAN support |
 | `crates/lg-buddy-gui/` | GTK 4/libadwaita executable, application lifecycle, and thin presentation renderer |
 | `configure.sh` | Interactive configuration tool |
-| `install.sh` | Installer for an existing binary |
+| `install.sh` | Installer for existing runtime and GUI binaries |
 | `uninstall.sh` | Uninstaller |
 | `scripts/release_bundle_manifest.py` | Release-bundle identity manifest creator and validator |
 | `scripts/build-release-bundle.sh` | Release bundle builder |
+| `scripts/test-installed-gui.sh` | Installed GTK launcher and removal smoke test |
 | `scripts/test-release-bundle.sh` | Release bundle smoke test |
 | `scripts/test-cross-version-upgrade.sh` | Pinned previous-to-candidate archive upgrade smoke test |
 | `scripts/test-production-upgrade-canary.sh` | Post-publication production GitHub upgrade canary |

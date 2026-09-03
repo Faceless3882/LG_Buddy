@@ -45,15 +45,18 @@ selection and troubleshooting. Protocol and event details are documented in the
 Fresh installation selects the native `lg_webos` control path, which does not
 require Python. Native-only packages can omit the Python client, `venv`, and
 `pip`. The release-bundle installer still provisions `bscpylgtv` as an explicit
-compatibility fallback and installs the brightness dialog, so it checks for
-Python 3 with a `venv` that provisions `pip`, plus `zenity`. `swayidle` is needed
-only by an existing explicit selection or as the deprecated compatibility
-fallback.
+compatibility fallback, so it checks for Python 3 with a `venv` that provisions
+`pip`, plus `zenity`. The GTK brightness window requires GTK 4.10 or newer and
+libadwaita 1; the installer verifies that the GUI executable can load and has
+the same release identity as the runtime before changing the installation.
+Zenity remains the compatibility fallback when the GUI executable is absent.
+`swayidle` is needed only by an existing explicit selection or as the deprecated
+compatibility fallback.
 
 ### Debian, Ubuntu, and Pop!_OS
 
 ```bash
-sudo apt install python3-venv python3-pip zenity
+sudo apt install python3-venv python3-pip zenity libgtk-4-1 libadwaita-1-0
 # Deprecated compatibility fallback only:
 sudo apt install swayidle
 ```
@@ -61,7 +64,7 @@ sudo apt install swayidle
 ### Fedora
 
 ```bash
-sudo dnf install python3 python3-pip python3-virtualenv zenity
+sudo dnf install python3 python3-pip python3-virtualenv zenity gtk4 libadwaita
 # Deprecated compatibility fallback only:
 sudo dnf install swayidle
 ```
@@ -69,7 +72,7 @@ sudo dnf install swayidle
 ### Arch Linux
 
 ```bash
-sudo pacman -S python python-pip python-virtualenv zenity
+sudo pacman -S python python-pip python-virtualenv zenity gtk4 libadwaita
 # Deprecated compatibility fallback only:
 sudo pacman -S swayidle
 ```

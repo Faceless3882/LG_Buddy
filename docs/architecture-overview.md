@@ -525,9 +525,13 @@ mutation targets, and special files in owned config state are refused.
 After a bundle has been verified, its candidate binary can run the second
 preflight. That pass rechecks the installed state, proves it is executing the
 candidate from the supplied bundle root, and checks the candidate manifest,
-installer, runtime, desktop entry, and systemd assets before any privileged
-mutation. Candidate inputs must be owner-usable and not writable by another
-user. The external ancestor chain must remain root- or user-owned and cannot be
+installer, runtime, GUI executable, desktop entry, and systemd assets before
+any privileged mutation. The first GUI upgrade permits the installed GUI to be
+absent; once present, it must satisfy the same safe executable-replacement
+policy as the runtime. Candidate inputs must be owner-usable and not writable
+by another user. The installer also runs both candidates' non-graphical version
+paths and requires exact release identity agreement before mutation. The
+external ancestor chain must remain root- or user-owned and cannot be
 shared-writable unless sticky-directory semantics protect its trusted child.
 Configuration and pairing scripts are deliberately excluded because the
 non-interactive upgrade mode preserves existing configuration and credentials
