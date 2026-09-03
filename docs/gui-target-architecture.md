@@ -120,12 +120,16 @@ application-owned. It depends on `lg-buddy`, GTK, and libadwaita, never the
 reverse. The GUI crate should consume one public application entrypoint rather
 than assembling TV or configuration dependencies itself.
 
-The installed graphical executable is `lg-buddy-gui`. The desktop entry launches
-that executable directly. The user-facing `lg-buddy brightness` command may
-locate and launch it for compatibility, while `lg-buddy brightness get` and
-`lg-buddy brightness set` remain direct headless commands. That launcher handoff
-does not become the frontend/backend contract: once `lg-buddy-gui` starts, GTK
-and the application communicate only through in-process Rust types.
+The installed graphical executable is `lg-buddy-gui`. The desktop entry keeps
+the stable `lg-buddy brightness` command surface, which locates the matching GUI
+beside the running CLI executable and launches `lg-buddy-gui brightness`.
+`lg-buddy brightness get` and `lg-buddy brightness set` remain direct headless
+commands and never inspect or launch the GUI. During the compatibility window,
+an absent GUI executable falls back to the retained Zenity flow. A present but
+invalid GUI installation, or a GUI process that starts and fails, is reported
+without opening Zenity or performing a second TV operation. That launcher
+handoff does not become the frontend/backend contract: once `lg-buddy-gui`
+starts, GTK and the application communicate only through in-process Rust types.
 
 This split also keeps GTK runtime linkage out of systemd services and the
 headless CLI. Release bundles and packages must ship the GUI executable and

@@ -39,8 +39,10 @@ syntax.
   is pending.
 - `screen off` blanks the TV output while remembering that LG Buddy blanked it.
 - `screen on` restores the output according to the configured restore policy.
-- `brightness` opens the desktop brightness dialog. `brightness get` and
-  `brightness set <0-100>` read or change OLED brightness directly.
+- `brightness` opens the GTK brightness window. If the GUI executable is absent
+  from a transitional installation, LG Buddy uses the retained Zenity dialog.
+  `brightness get` and `brightness set <0-100>` remain headless and read or
+  change OLED brightness directly.
 - `volume` prints the current level, `mute` when muted, or `unknown` when the TV
   does not expose a numeric level. `volume <0-100>`, `volume up`, and `volume
   down` change the volume and unmute the TV. `volume mute [on|off]` toggles or

@@ -153,6 +153,21 @@ fn brightness_dialog_returns(world: &mut LgBuddyWorld, value: u8) {
     world.install_brightness_ui_stub(Some(value));
 }
 
+#[given("the GTK brightness GUI is unavailable")]
+fn gtk_brightness_gui_is_unavailable(world: &mut LgBuddyWorld) {
+    world.make_brightness_gui_unavailable();
+}
+
+#[given("a working GTK brightness GUI")]
+fn working_gtk_brightness_gui(world: &mut LgBuddyWorld) {
+    world.install_brightness_gui_stub(0);
+}
+
+#[given(regex = r#"the GTK brightness GUI exits with status (\d+)"#)]
+fn failing_gtk_brightness_gui(world: &mut LgBuddyWorld, status: i32) {
+    world.install_brightness_gui_stub(status);
+}
+
 #[given("the brightness dialog is cancelled")]
 fn brightness_dialog_is_cancelled(world: &mut LgBuddyWorld) {
     world.install_brightness_ui_stub(None);
@@ -161,6 +176,21 @@ fn brightness_dialog_is_cancelled(world: &mut LgBuddyWorld) {
 #[given("the brightness error dialog is available")]
 fn brightness_error_dialog_is_available(world: &mut LgBuddyWorld) {
     world.install_brightness_ui_stub(None);
+}
+
+#[then(regex = r#"the GTK brightness GUI received "([^"]+)""#)]
+fn gtk_brightness_gui_received(world: &mut LgBuddyWorld, arguments: String) {
+    world.assert_brightness_gui_received(&arguments);
+}
+
+#[then("the GTK brightness GUI was not launched")]
+fn gtk_brightness_gui_not_launched(world: &mut LgBuddyWorld) {
+    world.assert_brightness_gui_not_launched();
+}
+
+#[then("the brightness compatibility dialog was not opened")]
+fn brightness_compatibility_dialog_not_opened(world: &mut LgBuddyWorld) {
+    world.assert_brightness_ui_not_opened();
 }
 
 #[given("the TV screen is blanked")]

@@ -1,11 +1,31 @@
 Feature: Brightness
   LG Buddy should provide a manual OLED brightness control for the configured TV.
 
-  Scenario: Brightness sets the TV OLED brightness when the TV is reachable
+  Scenario: Brightness launches the GTK window through the stable command
+    Given a working GTK brightness GUI
+    And the brightness error dialog is available
+    When I run the command "brightness"
+    Then the command succeeds
+    And the GTK brightness GUI received "brightness"
+    And the brightness compatibility dialog was not opened
+
+  Scenario: A failed GTK launch does not open the compatibility dialog
+    Given the GTK brightness GUI exits with status 23
+    And the brightness error dialog is available
+    When I run the command "brightness"
+    Then the command fails
+    And the command exits with status 1
+    And stderr contains "installed brightness GUI"
+    And stderr contains "exited with status 23"
+    And the GTK brightness GUI received "brightness"
+    And the brightness compatibility dialog was not opened
+
+  Scenario: Missing GTK GUI falls back to the brightness compatibility dialog
     Given a temporary LG Buddy config using input HDMI_2
     And a mock TV client
     And the TV backlight is 72
     And the TV is reachable over ping
+    And the GTK brightness GUI is unavailable
     And the brightness dialog returns 65
     When I run the command "brightness"
     Then the command succeeds
@@ -19,6 +39,7 @@ Feature: Brightness
     And a mock TV client
     And the TV backlight is 44
     And the TV is reachable over ping
+    And the GTK brightness GUI is unavailable
     And the brightness dialog is cancelled
     When I run the command "brightness"
     Then the command succeeds
@@ -30,9 +51,11 @@ Feature: Brightness
     Given a temporary LG Buddy config using input HDMI_2
     And a mock TV client
     And the TV backlight is 58
+    And a working GTK brightness GUI
     When I run the command "brightness get"
     Then the command succeeds
     And stdout is "58"
+    And the GTK brightness GUI was not launched
     And the TV client received "get_picture_settings"
     And the TV client did not receive "set_settings"
 
@@ -40,9 +63,11 @@ Feature: Brightness
     Given a temporary LG Buddy config using input HDMI_2
     And a mock TV client
     And the TV backlight is 44
+    And a working GTK brightness GUI
     When I run the command "brightness set 66"
     Then the command succeeds
     And stdout contains "Set OLED pixel brightness to 66%."
+    And the GTK brightness GUI was not launched
     And the TV client received "set_settings"
     And the TV brightness is 66
 
@@ -63,6 +88,7 @@ Feature: Brightness
     Given a temporary LG Buddy config using input HDMI_2
     And a mock TV client
     And the TV is unreachable over ping
+    And the GTK brightness GUI is unavailable
     And the brightness error dialog is available
     When I run the command "brightness"
     Then the command fails

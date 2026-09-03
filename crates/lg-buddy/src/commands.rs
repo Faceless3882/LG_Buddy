@@ -1,7 +1,9 @@
 use std::env;
+use std::fs;
 use std::io::{self, Write};
 use std::net::Ipv4Addr;
-use std::path::PathBuf;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::process::Output;
 use std::time::Duration;
@@ -25,6 +27,9 @@ use crate::wol::UdpWakeOnLanSender;
 use crate::{BrightnessCommand, MuteCommand, RunError, StartupMode, VolumeCommand};
 
 const SYSTEM_PRE_SLEEP_TV_COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
+const BRIGHTNESS_GUI_ENV: &str = "LG_BUDDY_GUI";
+const BRIGHTNESS_GUI_EXECUTABLE: &str = "lg-buddy-gui";
+
 trait ReachabilityChecker {
     fn is_reachable(&self, tv_ip: Ipv4Addr) -> io::Result<bool>;
 }
@@ -53,6 +58,17 @@ struct ZenityBrightnessUi {
 
 struct CurrentExeBrightnessCli {
     command_path: PathBuf,
+}
+
+struct InstalledBrightnessGui {
+    current_exe: PathBuf,
+    command_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BrightnessGuiLaunchOutcome {
+    Launched,
+    Missing,
 }
 
 struct BrightnessDialogDeps<'a, R, U, B, N> {
@@ -123,6 +139,132 @@ impl CurrentExeBrightnessCli {
             .output()
             .map_err(RunError::Io)
     }
+}
+
+impl InstalledBrightnessGui {
+    fn from_env() -> Result<Self, RunError> {
+        let current_exe = env::current_exe()?;
+        let command_path = match env::var_os(BRIGHTNESS_GUI_ENV) {
+            Some(value) if value.is_empty() => {
+                return Err(RunError::Policy(format!(
+                    "{BRIGHTNESS_GUI_ENV} is set but empty"
+                )));
+            }
+            Some(value) => PathBuf::from(value),
+            None => current_exe.with_file_name(BRIGHTNESS_GUI_EXECUTABLE),
+        };
+
+        Ok(Self {
+            current_exe,
+            command_path,
+        })
+    }
+
+    #[cfg(test)]
+    fn new(current_exe: impl Into<PathBuf>, command_path: impl Into<PathBuf>) -> Self {
+        Self {
+            current_exe: current_exe.into(),
+            command_path: command_path.into(),
+        }
+    }
+
+    fn launch(&self) -> Result<BrightnessGuiLaunchOutcome, RunError> {
+        match fs::symlink_metadata(&self.command_path) {
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(BrightnessGuiLaunchOutcome::Missing);
+            }
+            Err(error) => {
+                return Err(RunError::Policy(format!(
+                    "could not inspect installed brightness GUI at `{}`: {error}",
+                    self.command_path.display()
+                )));
+            }
+        }
+        let metadata = fs::metadata(&self.command_path).map_err(|error| {
+            invalid_brightness_gui(
+                &self.command_path,
+                &format!("its target cannot be inspected: {error}"),
+            )
+        })?;
+
+        if !metadata.is_file() {
+            return Err(invalid_brightness_gui(
+                &self.command_path,
+                "it is not a regular file",
+            ));
+        }
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return Err(invalid_brightness_gui(
+                &self.command_path,
+                "it is not executable",
+            ));
+        }
+
+        let current_metadata = fs::metadata(&self.current_exe).map_err(|error| {
+            RunError::Policy(format!(
+                "could not validate the LG Buddy executable at `{}`: {error}",
+                self.current_exe.display()
+            ))
+        })?;
+        if metadata.dev() == current_metadata.dev() && metadata.ino() == current_metadata.ino() {
+            return Err(invalid_brightness_gui(
+                &self.command_path,
+                "it resolves to the lg-buddy executable and would recursively relaunch itself",
+            ));
+        }
+
+        let output = ProcessCommand::new(&self.command_path)
+            .arg("brightness")
+            .output()
+            .map_err(|error| {
+                RunError::Policy(format!(
+                    "could not launch installed brightness GUI at `{}`: {error}",
+                    self.command_path.display()
+                ))
+            })?;
+
+        if output.status.success() {
+            Ok(BrightnessGuiLaunchOutcome::Launched)
+        } else {
+            Err(RunError::Policy(format!(
+                "installed brightness GUI at `{}` failed: {}",
+                self.command_path.display(),
+                brightness_gui_output_message(&output)
+            )))
+        }
+    }
+}
+
+fn invalid_brightness_gui(path: &Path, reason: &str) -> RunError {
+    RunError::Policy(format!(
+        "invalid brightness GUI installation at `{}`: {reason}",
+        path.display()
+    ))
+}
+
+fn brightness_gui_output_message(output: &Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !stderr.is_empty() {
+        return stderr
+            .strip_prefix("LG Buddy GUI: ")
+            .unwrap_or(&stderr)
+            .to_string();
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !stdout.is_empty() {
+        return stdout;
+    }
+
+    format!(
+        "exited with status {}",
+        output
+            .status
+            .code()
+            .map(|code| code.to_string())
+            .unwrap_or_else(|| "terminated by signal".to_string())
+    )
 }
 
 impl BrightnessCli for CurrentExeBrightnessCli {
@@ -339,11 +481,16 @@ pub fn run_brightness<W: Write>(
     writer: &mut W,
     command: BrightnessCommand,
 ) -> Result<(), RunError> {
-    let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
-    let config = load_config(&config_path).map_err(RunError::Config)?;
-
     match command {
         BrightnessCommand::Prompt => {
+            let gui = InstalledBrightnessGui::from_env()?;
+            match gui.launch()? {
+                BrightnessGuiLaunchOutcome::Launched => return Ok(()),
+                BrightnessGuiLaunchOutcome::Missing => {}
+            }
+
+            let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
+            let config = load_config(&config_path).map_err(RunError::Config)?;
             let reachability = PingReachabilityChecker::default();
             let ui = ZenityBrightnessUi::default();
             let brightness_cli = CurrentExeBrightnessCli::from_current_exe()?;
@@ -358,6 +505,8 @@ pub fn run_brightness<W: Write>(
             run_brightness_prompt_with(writer, &config, deps)
         }
         BrightnessCommand::Get | BrightnessCommand::Set(_) => {
+            let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
+            let config = load_config(&config_path).map_err(RunError::Config)?;
             let tv_client = build_tv_client(
                 &config_path,
                 config.tv_ip,
@@ -731,7 +880,8 @@ mod tests {
 
     use super::{
         run_brightness_command_with, run_brightness_prompt_with, BrightnessCli,
-        BrightnessDialogDeps, BrightnessUi, ReachabilityChecker,
+        BrightnessDialogDeps, BrightnessGuiLaunchOutcome, BrightnessUi, InstalledBrightnessGui,
+        ReachabilityChecker,
     };
     use crate::config::{
         Config, HdmiInput, MacAddress, ScreenBackend, ScreenIdleBlankPolicy, ScreenRestorePolicy,
@@ -749,17 +899,19 @@ mod tests {
     use crate::wol::{WakeOnLanError, WakeOnLanSender};
     use crate::{BrightnessCommand, RunError, StartupMode};
     use std::cell::RefCell;
+    use std::env;
     use std::ffi::CString;
     use std::fs;
     use std::io;
     use std::net::Ipv4Addr;
     #[cfg(unix)]
     use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::symlink;
     use std::path::{Path, PathBuf};
     use std::process;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
-    use support::MockBscpylgtv;
+    use support::{ExecutableScript, MockBscpylgtv};
 
     #[cfg(unix)]
     fn set_modified_time(path: &Path, modified: SystemTime) {
@@ -1522,6 +1674,112 @@ mod tests {
             vec![FakeBrightnessCliCall::Get, FakeBrightnessCliCall::Set(65),]
         );
         assert!(rendered(&output).contains("Set OLED pixel brightness to 65%."));
+    }
+
+    #[test]
+    fn installed_brightness_gui_launches_only_the_brightness_command() {
+        let gui = ExecutableScript::new(
+            "brightness-gui-launch",
+            "lg-buddy-gui",
+            "#!/bin/sh\n[ \"$#\" -eq 1 ] && [ \"$1\" = \"brightness\" ]\n",
+        );
+        let launcher = InstalledBrightnessGui::new(
+            env::current_exe().expect("current executable"),
+            gui.path(),
+        );
+
+        assert_eq!(
+            launcher.launch().expect("GUI launch should succeed"),
+            BrightnessGuiLaunchOutcome::Launched
+        );
+    }
+
+    #[test]
+    fn missing_installed_brightness_gui_allows_compatibility_fallback() {
+        let anchor =
+            ExecutableScript::new("brightness-gui-missing", "anchor", "#!/bin/sh\nexit 0\n");
+        let launcher = InstalledBrightnessGui::new(
+            env::current_exe().expect("current executable"),
+            anchor.path().with_file_name("missing-lg-buddy-gui"),
+        );
+
+        assert_eq!(
+            launcher.launch().expect("missing GUI should be recognized"),
+            BrightnessGuiLaunchOutcome::Missing
+        );
+    }
+
+    #[test]
+    fn failed_installed_brightness_gui_is_reported_without_fallback() {
+        let gui = ExecutableScript::new(
+            "brightness-gui-failure",
+            "lg-buddy-gui",
+            "#!/bin/sh\nprintf 'LG Buddy GUI: initialization failed\\n' >&2\nexit 23\n",
+        );
+        let launcher = InstalledBrightnessGui::new(
+            env::current_exe().expect("current executable"),
+            gui.path(),
+        );
+
+        let error = launcher
+            .launch()
+            .expect_err("failed GUI must not become a missing-GUI fallback");
+
+        assert!(error.to_string().contains("initialization failed"));
+        assert!(!error.to_string().contains("exited with status"));
+    }
+
+    #[test]
+    fn invalid_installed_brightness_gui_is_rejected() {
+        let anchor =
+            ExecutableScript::new("brightness-gui-invalid", "anchor", "#!/bin/sh\nexit 0\n");
+        let launcher = InstalledBrightnessGui::new(
+            env::current_exe().expect("current executable"),
+            anchor.path().parent().expect("anchor parent"),
+        );
+
+        let error = launcher
+            .launch()
+            .expect_err("directory must not be treated as a GUI executable");
+
+        assert!(error
+            .to_string()
+            .contains("invalid brightness GUI installation"));
+        assert!(error.to_string().contains("not a regular file"));
+    }
+
+    #[test]
+    fn dangling_installed_brightness_gui_is_invalid_instead_of_missing() {
+        let anchor =
+            ExecutableScript::new("brightness-gui-dangling", "anchor", "#!/bin/sh\nexit 0\n");
+        let gui_path = anchor.path().with_file_name("lg-buddy-gui");
+        symlink(anchor.path().with_file_name("missing-target"), &gui_path)
+            .expect("create dangling GUI symlink");
+        let launcher =
+            InstalledBrightnessGui::new(env::current_exe().expect("current executable"), gui_path);
+
+        let error = launcher
+            .launch()
+            .expect_err("dangling GUI installation must not use compatibility fallback");
+
+        assert!(error
+            .to_string()
+            .contains("invalid brightness GUI installation"));
+        assert!(error.to_string().contains("target cannot be inspected"));
+    }
+
+    #[test]
+    fn brightness_gui_cannot_resolve_to_the_cli_executable() {
+        let current_exe = env::current_exe().expect("current executable");
+        let launcher = InstalledBrightnessGui::new(&current_exe, &current_exe);
+
+        let error = launcher
+            .launch()
+            .expect_err("recursive GUI launch must be rejected");
+
+        assert!(error
+            .to_string()
+            .contains("would recursively relaunch itself"));
     }
 
     #[test]
