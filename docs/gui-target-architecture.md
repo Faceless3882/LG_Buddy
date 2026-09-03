@@ -113,10 +113,12 @@ the presentation contracts, state transitions, dependency construction, and
 operations. Its normal tests must continue to build on a host without GTK
 development packages.
 
-`crates/lg-buddy-gui` owns the GTK application, windows, widgets, renderer, and
-main-loop bridge. It depends on `lg-buddy` and GTK, never the reverse. The GUI
-crate should consume one public application entrypoint rather than assembling
-TV or configuration dependencies itself.
+`crates/lg-buddy-gui` owns the libadwaita application and window shell, GTK
+widgets, renderer, and main-loop bridge. Libadwaita supplies the native GNOME
+appearance and system color-scheme integration; product presentation remains
+application-owned. It depends on `lg-buddy`, GTK, and libadwaita, never the
+reverse. The GUI crate should consume one public application entrypoint rather
+than assembling TV or configuration dependencies itself.
 
 The installed graphical executable is `lg-buddy-gui`. The desktop entry launches
 that executable directly. The user-facing `lg-buddy brightness` command may

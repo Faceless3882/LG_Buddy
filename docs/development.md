@@ -12,6 +12,7 @@ Compiling the Rust runtime requires:
 Compiling and testing the GTK frontend additionally requires:
 
 - GTK 4.10 or newer development files
+- libadwaita 1 development files
 - `pkg-config`
 - a graphical session or virtual display for renderer tests
 - `xdotool` for the executable launch smoke test
@@ -57,7 +58,7 @@ Build the GTK frontend from source with:
 cargo build -p lg-buddy-gui
 ```
 
-Run its current brightness shell with:
+Run its current brightness window with:
 
 ```bash
 cargo run -p lg-buddy-gui -- brightness
@@ -106,7 +107,7 @@ Useful checks during development:
 cargo test -p lg-buddy --lib
 cargo test -p lg-buddy --test cucumber
 dbus-run-session -- xvfb-run -a bash ./scripts/test-gui-launch.sh ./target/debug/lg-buddy-gui
-dbus-run-session -- xvfb-run -a env GDK_BACKEND=x11 GDK_DEBUG=no-portals NO_AT_BRIDGE=1 cargo test -p lg-buddy-gui -- --test-threads=1
+dbus-run-session -- xvfb-run -a env ADW_DISABLE_PORTAL=1 GDK_BACKEND=x11 GDK_DEBUG=no-portals NO_AT_BRIDGE=1 cargo test -p lg-buddy-gui -- --test-threads=1
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 bash -n install.sh uninstall.sh configure.sh bin/LG_Buddy_Common scripts/build-release-bundle.sh scripts/test-release-bundle.sh scripts/test-cross-version-upgrade.sh scripts/test-production-upgrade-canary.sh scripts/publish-release-assets.sh
 python3 scripts/test_release_promotion.py
@@ -208,6 +209,7 @@ the branch contract and recovery process, see
 | --- | --- |
 | `crates/lg-buddy/src/lib.rs` | CLI parsing and command dispatch |
 | `crates/lg-buddy/src/commands.rs` | Runtime command entrypoints and dependency assembly |
+| `crates/lg-buddy/src/brightness.rs` | Toolkit-neutral brightness read flow and production read adapter |
 | `crates/lg-buddy/src/events.rs` | Canonical runtime event vocabulary |
 | `crates/lg-buddy/src/policy.rs` | Policy outcome, action, no-action, diagnostic, and state-transition types |
 | `crates/lg-buddy/src/presentation/` | Toolkit-neutral GUI presentation declarations owned by the application |
@@ -226,7 +228,7 @@ the branch contract and recovery process, see
 | `crates/lg-buddy/src/tv.rs` | TV transport boundary and facade |
 | `crates/lg-buddy/src/web_os/` | Native webOS client, profile-bound TV adapter, domain operations, and test support |
 | `crates/lg-buddy/src/wol.rs` | Native Wake-on-LAN support |
-| `crates/lg-buddy-gui/` | GTK 4 executable, application lifecycle, and thin presentation renderer |
+| `crates/lg-buddy-gui/` | GTK 4/libadwaita executable, application lifecycle, and thin presentation renderer |
 | `configure.sh` | Interactive configuration tool |
 | `install.sh` | Installer for an existing binary |
 | `uninstall.sh` | Uninstaller |

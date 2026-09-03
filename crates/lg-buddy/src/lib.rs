@@ -2,6 +2,7 @@ mod dev;
 
 pub mod auth;
 pub mod backend;
+pub mod brightness;
 pub mod commands;
 pub mod config;
 pub mod events;
