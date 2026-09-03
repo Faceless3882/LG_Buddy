@@ -101,8 +101,8 @@ The main runtime consumers are:
 - the installed Zenity brightness dialog, which delegates back through the
   CLI/API command surface
 - the standalone `lg-buddy-gui brightness` GTK window, which asynchronously
-  reads the current OLED brightness and renders application-owned Loading,
-  Ready, or Failed presentation state
+  reads and writes OLED brightness and renders application-owned Loading,
+  Ready, Applying, or Failed presentation state
 
 ```mermaid
 flowchart LR
@@ -141,7 +141,7 @@ flowchart LR
         CONFIG["config.rs<br/>config.env parsing"]
         STATE["state.rs<br/>runtime markers"]
         BRIGHTNESS["brightness.rs<br/>brightness application flow"]
-        PRESENTATION["presentation/brightness.rs<br/>Loading / Ready / Failed declarations"]
+        PRESENTATION["presentation/brightness.rs<br/>Loading / Ready / Applying / Failed declarations"]
 
         subgraph SessionSubsystem["Session Integration Subsystem"]
             BACKEND["backend.rs<br/>backend selection"]
@@ -189,7 +189,7 @@ flowchart LR
     NM --> MAIN
     TERMINAL --> MAIN
     ZENITY --> MAIN
-    GTK -->|"Retry / Cancel intents"| BRIGHTNESS
+    GTK -->|"Propose / Apply / Retry / Cancel intents"| BRIGHTNESS
     BRIGHTNESS --> PRESENTATION
     PRESENTATION --> GTK
     MAIN --> COMMANDS
@@ -219,6 +219,7 @@ flowchart LR
     COMMANDS --> CONFIG
     COMMANDS --> STATE
     BRIGHTNESS --> CONFIG
+    BRIGHTNESS --> NOTIFICATIONS
     BRIGHTNESS --> TV
     SCREEN --> STATE
     LIFECYCLE --> STATE
@@ -243,12 +244,12 @@ The intended split is:
   - config, state, and dependency loading for command execution
   - command output handoff
 - `brightness.rs`
-  - toolkit-neutral current-brightness application flow
-  - typed brightness read dependency and production TV/config adapter
-  - opaque read operation identity and stale-completion rejection
+  - toolkit-neutral brightness read/write application flow
+  - typed brightness dependencies and production TV/config/notification adapters
+  - opaque operation identities, single-write enforcement, and stale-completion rejection
 - `presentation/brightness.rs`
-  - toolkit-neutral Loading, Ready, and Failed declarations
-  - semantic Retry and Cancel intents
+  - toolkit-neutral Loading, Ready, Applying, and Failed declarations
+  - semantic Propose, Apply, Retry, and Cancel intents
 - `events.rs`
   - canonical runtime event envelope and source classification
 - `policy.rs`
@@ -462,10 +463,12 @@ The `brightness get` and `brightness set` commands use the TV picture
 abstraction in `tv.rs` for typed OLED brightness validation and live TV
 read/write operations. The interactive Zenity brightness dialog delegates its
 TV operations back through those CLI commands. The GTK brightness window uses
-the same typed read capability directly through the core brightness application
-flow. A worker keeps the blocking TV read off the GTK main loop; opaque operation
+the same typed picture read/write capabilities directly through the core
+brightness application flow. Workers keep blocking TV operations off the GTK
+main loop; the application permits one write at a time, and opaque operation
 identity prevents late results from replacing newer or closed presentation
-state.
+state. Successful GTK writes retain the existing brightness success
+notification.
 The `volume` family uses the TV audio abstraction for typed volume and mute
 operations. Setting or stepping volume explicitly unmutes after the volume
 operation; mute toggle reads the current state before writing its inverse.

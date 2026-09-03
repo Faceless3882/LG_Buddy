@@ -6,7 +6,9 @@ use std::process::Command as ProcessCommand;
 use std::process::Output;
 use std::time::Duration;
 
-use crate::brightness::read_current_brightness_with;
+use crate::brightness::{
+    notify_brightness_success_with, read_current_brightness_with, write_brightness_with,
+};
 use crate::config::{load_config, resolve_config_path_from_env, Config};
 use crate::events::RuntimeEvent;
 use crate::lifecycle::ThreadSleeper;
@@ -691,17 +693,11 @@ fn notify_brightness_success<N: Notifier>(
     notifier: &N,
     brightness: OledBrightness,
 ) -> Result<(), RunError> {
-    notifier
-        .notify(&Notification::new(
-            "LG TV",
-            format!("Brightness set to {brightness}%"),
+    notify_brightness_success_with(notifier, brightness).map_err(|err| {
+        RunError::Policy(format!(
+            "brightness was set to {brightness}%, but desktop notification failed: {err}"
         ))
-        .map(|_| ())
-        .map_err(|err| {
-            RunError::Policy(format!(
-                "brightness was set to {brightness}%, but desktop notification failed: {err}"
-            ))
-        })
+    })
 }
 
 fn notify_brightness_failure<N: Notifier>(notifier: &N, primary: RunError) -> RunError {
@@ -723,10 +719,7 @@ fn set_oled_brightness<C: TvClient>(
     tv_client: &C,
     brightness: OledBrightness,
 ) -> Result<(), RunError> {
-    let tv = TvDevice::new(tv_client, config.tv_ip);
-    tv.picture()
-        .set_oled_brightness(brightness)
-        .map(|_| ())
+    write_brightness_with(config, tv_client, brightness)
         .map_err(|err| RunError::Policy(format!("failed to set brightness: {err}")))
 }
 

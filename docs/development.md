@@ -209,7 +209,7 @@ the branch contract and recovery process, see
 | --- | --- |
 | `crates/lg-buddy/src/lib.rs` | CLI parsing and command dispatch |
 | `crates/lg-buddy/src/commands.rs` | Runtime command entrypoints and dependency assembly |
-| `crates/lg-buddy/src/brightness.rs` | Toolkit-neutral brightness read flow and production read adapter |
+| `crates/lg-buddy/src/brightness.rs` | Toolkit-neutral brightness read/write flow and production adapters |
 | `crates/lg-buddy/src/events.rs` | Canonical runtime event vocabulary |
 | `crates/lg-buddy/src/policy.rs` | Policy outcome, action, no-action, diagnostic, and state-transition types |
 | `crates/lg-buddy/src/presentation/` | Toolkit-neutral GUI presentation declarations owned by the application |
