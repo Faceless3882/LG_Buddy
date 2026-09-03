@@ -28,7 +28,7 @@ trap cleanup EXIT
 command -v gapplication >/dev/null || fail "gapplication is required for the GUI launch smoke test."
 command -v xdotool >/dev/null || fail "xdotool is required for the GUI launch smoke test."
 
-GDK_BACKEND=x11 GDK_DEBUG=no-portals NO_AT_BRIDGE=1 \
+ADW_DISABLE_PORTAL=1 GDK_BACKEND=x11 GDK_DEBUG=no-portals NO_AT_BRIDGE=1 \
     "$GUI_BINARY" brightness &
 GUI_PID=$!
 
@@ -49,7 +49,7 @@ done
 
 [ "${#WINDOW_IDS[@]}" -eq 1 ] || fail "GUI did not present the brightness window."
 
-GDK_BACKEND=x11 GDK_DEBUG=no-portals NO_AT_BRIDGE=1 \
+ADW_DISABLE_PORTAL=1 GDK_BACKEND=x11 GDK_DEBUG=no-portals NO_AT_BRIDGE=1 \
     "$GUI_BINARY" brightness
 mapfile -t WINDOW_IDS < <(
     xdotool search --onlyvisible --name "^${WINDOW_TITLE}$" 2>/dev/null || true

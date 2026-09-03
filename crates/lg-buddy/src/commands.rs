@@ -6,6 +6,7 @@ use std::process::Command as ProcessCommand;
 use std::process::Output;
 use std::time::Duration;
 
+use crate::brightness::read_current_brightness_with;
 use crate::config::{load_config, resolve_config_path_from_env, Config};
 use crate::events::RuntimeEvent;
 use crate::lifecycle::ThreadSleeper;
@@ -534,7 +535,8 @@ fn run_brightness_command_with<W: Write, C: TvClient>(
     match command {
         BrightnessCommand::Prompt => unreachable!("prompt is handled by the dialog wrapper"),
         BrightnessCommand::Get => {
-            let brightness = read_oled_brightness(config, tv_client)?;
+            let brightness = read_current_brightness_with(config, tv_client)
+                .map_err(|err| RunError::Policy(format!("failed to read brightness: {err}")))?;
             writeln!(writer, "{brightness}")?;
             Ok(())
         }
@@ -714,16 +716,6 @@ fn append_notification_failure(primary: RunError, notification_err: Notification
         primary: Box::new(primary),
         notification: notification_err,
     }
-}
-
-fn read_oled_brightness<C: TvClient>(
-    config: &Config,
-    tv_client: &C,
-) -> Result<OledBrightness, RunError> {
-    let tv = TvDevice::new(tv_client, config.tv_ip);
-    tv.picture()
-        .oled_brightness()
-        .map_err(|err| RunError::Policy(format!("failed to read brightness: {err}")))
 }
 
 fn set_oled_brightness<C: TvClient>(

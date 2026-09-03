@@ -8,7 +8,7 @@ For the top-level system, desktop, and service event paths that enter the
 runtime, see [Runtime event handler map](runtime-event-handler-map.md).
 
 For the application-owned presentation contract and GTK renderer boundary,
-including the target beyond the initial loading shell, see
+including the target beyond the currently delivered slice, see
 [GUI target architecture](gui-target-architecture.md). The architecture below
 describes the current implementation.
 
@@ -29,8 +29,9 @@ one setup surface:
   - `systemd/`
 
 The Rust application owns operational behavior and toolkit-neutral presentation
-state. The GTK crate renders that state. The remaining shell layer exists for
-configuration, installation, and removal.
+state. The GUI crate uses a libadwaita application/window shell and GTK widgets
+to render that state. The remaining shell layer exists for configuration,
+installation, and removal.
 
 ## High-Level Runtime Shape
 
@@ -99,8 +100,9 @@ The main runtime consumers are:
 - TTY users invoking the CLI directly
 - the installed Zenity brightness dialog, which delegates back through the
   CLI/API command surface
-- the standalone `lg-buddy-gui brightness` GTK loading shell, which currently
-  renders application-owned presentation state without TV operations
+- the standalone `lg-buddy-gui brightness` GTK window, which asynchronously
+  reads the current OLED brightness and renders application-owned Loading,
+  Ready, or Failed presentation state
 
 ```mermaid
 flowchart LR
@@ -123,7 +125,7 @@ flowchart LR
 
     subgraph Frontend["Frontend"]
         ZENITY["zenity brightness dialog<br/>interactive prompt"]
-        GTK["lg-buddy-gui<br/>brightness loading shell"]
+        GTK["lg-buddy-gui<br/>libadwaita / GTK brightness window"]
     end
 
     subgraph Rust["Rust Runtime"]
@@ -138,7 +140,8 @@ flowchart LR
         PHASE["runtime_phase.rs<br/>machine sleep phase provider"]
         CONFIG["config.rs<br/>config.env parsing"]
         STATE["state.rs<br/>runtime markers"]
-        PRESENTATION["presentation/brightness.rs<br/>toolkit-neutral Loading state"]
+        BRIGHTNESS["brightness.rs<br/>brightness application flow"]
+        PRESENTATION["presentation/brightness.rs<br/>Loading / Ready / Failed declarations"]
 
         subgraph SessionSubsystem["Session Integration Subsystem"]
             BACKEND["backend.rs<br/>backend selection"]
@@ -186,6 +189,8 @@ flowchart LR
     NM --> MAIN
     TERMINAL --> MAIN
     ZENITY --> MAIN
+    GTK -->|"Retry / Cancel intents"| BRIGHTNESS
+    BRIGHTNESS --> PRESENTATION
     PRESENTATION --> GTK
     MAIN --> COMMANDS
     COMMANDS --> EVENTS
@@ -213,6 +218,8 @@ flowchart LR
     RUNNER -->|"AfterResume"| LIFECYCLE
     COMMANDS --> CONFIG
     COMMANDS --> STATE
+    BRIGHTNESS --> CONFIG
+    BRIGHTNESS --> TV
     SCREEN --> STATE
     LIFECYCLE --> STATE
     SCREEN --> TV
@@ -235,6 +242,13 @@ The intended split is:
   - CLI/API command entrypoints
   - config, state, and dependency loading for command execution
   - command output handoff
+- `brightness.rs`
+  - toolkit-neutral current-brightness application flow
+  - typed brightness read dependency and production TV/config adapter
+  - opaque read operation identity and stale-completion rejection
+- `presentation/brightness.rs`
+  - toolkit-neutral Loading, Ready, and Failed declarations
+  - semantic Retry and Cancel intents
 - `events.rs`
   - canonical runtime event envelope and source classification
 - `policy.rs`
@@ -446,8 +460,12 @@ update notification policy; that cache is not user configuration and is not
 part of the settings API.
 The `brightness get` and `brightness set` commands use the TV picture
 abstraction in `tv.rs` for typed OLED brightness validation and live TV
-read/write operations. The interactive brightness dialog delegates its TV
-operations back through those CLI commands.
+read/write operations. The interactive Zenity brightness dialog delegates its
+TV operations back through those CLI commands. The GTK brightness window uses
+the same typed read capability directly through the core brightness application
+flow. A worker keeps the blocking TV read off the GTK main loop; opaque operation
+identity prevents late results from replacing newer or closed presentation
+state.
 The `volume` family uses the TV audio abstraction for typed volume and mute
 operations. Setting or stepping volume explicitly unmutes after the volume
 operation; mute toggle reads the current state before writing its inverse.
