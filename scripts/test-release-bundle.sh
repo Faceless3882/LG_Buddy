@@ -332,6 +332,7 @@ assert_executable "$BUNDLE_DIR/bin/LG_Buddy_Common"
 assert_file "$BUNDLE_DIR/LG_Buddy_Brightness.desktop"
 assert_file "$BUNDLE_ICON"
 assert_mode "$BUNDLE_ICON" 644
+grep -F -q 'Name=LG Buddy' "$BUNDLE_DIR/LG_Buddy_Brightness.desktop"
 grep -F -q 'Icon=io.github.staphylococcus.LGBuddy' "$BUNDLE_DIR/LG_Buddy_Brightness.desktop"
 assert_file "$BUNDLE_DIR/README.md"
 assert_file "$BUNDLE_DIR/LICENSE"

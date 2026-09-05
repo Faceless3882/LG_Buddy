@@ -19,11 +19,13 @@ fn brightness_desktop_entry_uses_the_stable_headless_launcher() {
     let desktop_entry = fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
-            .join("LG_Buddy_Brightness.desktop"),
+            .join("io.github.staphylococcus.LGBuddy.desktop"),
     )
     .expect("read brightness desktop entry");
     let lines = desktop_entry.lines().collect::<Vec<_>>();
 
+    assert!(lines.contains(&"Name=LG Buddy"));
+    assert!(lines.contains(&"Icon=io.github.staphylococcus.LGBuddy"));
     assert!(lines.contains(&"Exec=/usr/bin/lg-buddy brightness"));
     assert!(lines.contains(&"Terminal=false"));
     assert!(!lines
