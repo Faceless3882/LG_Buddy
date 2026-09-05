@@ -118,8 +118,24 @@ PY
 }
 
 finish_gui() {
-    wait "$GUI_PID"
+    local status=0
+
+    for ((attempt = 0; attempt < 100; attempt++)); do
+        kill -0 "$GUI_PID" 2>/dev/null || break
+        sleep 0.1
+    done
+    if kill -0 "$GUI_PID" 2>/dev/null; then
+        fail "GUI did not exit after its closing action."
+    fi
+    wait "$GUI_PID" || status=$?
     GUI_PID=""
+    [ "$status" -eq 0 ] || fail "GUI exited with status $status."
+}
+
+send_closing_mnemonic() {
+    # The key-down event closes the window, so xdotool may see BadWindow while
+    # sending key-up. The following behavior and bounded process wait verify it.
+    xdotool key --window "$WINDOW_ID" "$1" 2>/dev/null || true
 }
 
 start_accessibility_bus() {
@@ -167,9 +183,9 @@ wait_for_calls get_picture_settings 1
 sleep 0.2
 xdotool windowfocus --sync "$WINDOW_ID"
 for _ in 1 2 3; do
-    xdotool key Tab Right
+    xdotool key --window "$WINDOW_ID" Tab Right
 done
-xdotool key alt+a
+send_closing_mnemonic alt+a
 wait_for_calls set_settings 1
 finish_gui
 python3 - "$STATE_FILE" <<'PY'
@@ -187,17 +203,17 @@ start_gui
 wait_for_calls get_picture_settings 1
 sleep 0.2
 xdotool windowfocus --sync "$WINDOW_ID"
-xdotool key alt+r
+xdotool key --window "$WINDOW_ID" alt+r
 wait_for_calls get_picture_settings 2
 xdotool windowfocus --sync "$WINDOW_ID"
-xdotool key alt+c
+send_closing_mnemonic alt+c
 finish_gui
 
 # Cancelling the loading window never writes a value.
 printf '%s\n' '{"backlight":37,"calls":[],"plan":{"get_picture_settings":[{"result":"success","stdout":"{\u0027backlight\u0027: 37}","delay_seconds":2}]}}' >"$STATE_FILE"
 start_gui
 xdotool windowfocus --sync "$WINDOW_ID"
-xdotool key alt+c
+send_closing_mnemonic alt+c
 finish_gui
 python3 - "$STATE_FILE" <<'PY'
 import json
@@ -237,7 +253,7 @@ if [ "${LG_BUDDY_TEST_PLATFORM_CONTRACT:-0}" = "1" ]; then
         fi
 
         xdotool windowfocus --sync "$WINDOW_ID"
-        xdotool key alt+c
+        send_closing_mnemonic alt+c
         finish_gui
     }
 
