@@ -136,12 +136,15 @@ headless CLI. Release bundles and packages must ship the GUI executable and
 declare its real GTK runtime dependencies separately from the existing CLI
 binary.
 
-The headless binary may retain its current static musl release target. The GTK
-binary is a separate dynamically linked Linux artifact built against the
-oldest supported GNU/GTK baseline. The release bundle must identify and verify
-both artifacts; the GUI must not force the service and CLI binary to adopt its
-linkage model. The exact minimum GTK and GNU ABI versions are release and
-packaging decisions validated on supported distribution baselines.
+The headless binary retains its static `x86_64-unknown-linux-musl` release
+target. The GTK binary is a separate dynamically linked
+`x86_64-unknown-linux-gnu` artifact. Ubuntu 24.04 is the oldest release-bundle
+build and runtime baseline: GTK 4.14, libadwaita 1.5, and GLIBC 2.39. The source
+contract remains limited to GTK 4.10 APIs and libadwaita 1, but compatibility
+below the tested bundle baseline is not claimed. Fedora 43 and current Arch
+validate the same built artifact on newer supported userspaces. The release
+manifest and embedded ELF identities verify both artifacts, so the GUI does
+not force the service and CLI binary to adopt its linkage model.
 
 ## Presentation Contract
 

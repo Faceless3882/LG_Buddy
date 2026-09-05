@@ -314,9 +314,15 @@ verifies the installed runtime against the candidate bytes and identity.
 
 The focused release-manifest suite covers deterministic serialization, schema
 and critical-field handling, duplicate and missing fields, canonical identity
-formats, archive layout, and binary version/channel/commit mismatches. The
-bundle smoke test then exercises the same validator against the generated and
-installed release binary.
+formats, archive layout, and runtime/GUI target and identity mismatches. The
+bundle smoke test exercises the same validator against both generated and
+installed executables, verifies their static/dynamic linkage split, and drives
+the installed GTK window through mocked read, apply, failure/retry, and cancel
+paths under Xvfb. Fedora and Arch lanes repeat installed launch checks with
+keyboard-only behavior, external AT-SPI role/name/value checks, visibly distinct
+light/dark rendering, and 1x/2x window-geometry coverage. The display-backed
+renderer suite separately asserts the same GTK semantics directly at the widget
+boundary.
 
 The Rust release-bundle acquisition suite covers exact asset selection, fresh
 release metadata, bounded responses and downloads, GitHub and published digest

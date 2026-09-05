@@ -50,32 +50,6 @@ assert_executable() {
     fi
 }
 
-install_gui_candidate_fixture() {
-    local bundle_root="$1"
-    local gui_binary="$bundle_root/lg-buddy-gui"
-
-    # #144 tests the installer contract before #145 adds the real GUI to
-    # release archives and their manifest.
-    [ ! -e "$gui_binary" ] || return 0
-    cat >"$gui_binary" <<'EOF'
-#!/bin/sh
-set -eu
-
-case "${1:-}" in
-    --version|-V)
-        [ "$#" -eq 1 ] || exit 2
-        exec "$(dirname "$0")/lg-buddy" --version
-        ;;
-    brightness)
-        [ "$#" -eq 1 ] || exit 2
-        exit 0
-        ;;
-    *) exit 2 ;;
-esac
-EOF
-    chmod 755 "$gui_binary"
-}
-
 assert_hidden_compatibility_alias() {
     local binary="$1"
     local command_name="$2"
@@ -232,6 +206,7 @@ validate_archive_paths() {
 }
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+GUI_TARGET="x86_64-unknown-linux-gnu"
 ARCHIVE=""
 WORK_DIR=""
 SKIP_PIP_INSTALL=0
@@ -330,6 +305,7 @@ if [ -n "$EXPECTED_TAG" ]; then
     MANIFEST_EXPECTATIONS+=(
         --expected-release-tag "$EXPECTED_TAG"
         --expected-target "$EXPECTED_TARGET"
+        --expected-gui-target "$GUI_TARGET"
     )
 fi
 
@@ -340,6 +316,8 @@ python3 "$SCRIPT_DIR/release_bundle_manifest.py" validate \
 validate_archive_paths "$ARCHIVE"
 tar -C "$EXTRACT_DIR" -xzf "$ARCHIVE"
 BUNDLE_DIR="$(find "$EXTRACT_DIR" -mindepth 1 -maxdepth 1 -type d | head -n1)"
+BUNDLE_GUI="$BUNDLE_DIR/docs/lg-buddy-gui-$GUI_TARGET"
+BUNDLE_ICON="$BUNDLE_DIR/docs/io.github.staphylococcus.LGBuddy.svg"
 
 [ -n "$BUNDLE_DIR" ] || {
     echo "Release archive did not contain a top-level bundle directory."
@@ -352,6 +330,9 @@ assert_executable "$BUNDLE_DIR/uninstall.sh"
 assert_executable "$BUNDLE_DIR/lg-buddy"
 assert_executable "$BUNDLE_DIR/bin/LG_Buddy_Common"
 assert_file "$BUNDLE_DIR/LG_Buddy_Brightness.desktop"
+assert_file "$BUNDLE_ICON"
+assert_mode "$BUNDLE_ICON" 644
+grep -F -q 'Icon=io.github.staphylococcus.LGBuddy' "$BUNDLE_DIR/LG_Buddy_Brightness.desktop"
 assert_file "$BUNDLE_DIR/README.md"
 assert_file "$BUNDLE_DIR/LICENSE"
 assert_file "$BUNDLE_DIR/release-manifest.json"
@@ -371,6 +352,7 @@ assert_file "$BUNDLE_DIR/systemd/LG_Buddy_update_check.timer"
 python3 "$SCRIPT_DIR/release_bundle_manifest.py" validate \
     --manifest "$BUNDLE_DIR/release-manifest.json" \
     --binary "$BUNDLE_DIR/lg-buddy" \
+    --gui-binary "$BUNDLE_GUI" \
     "${MANIFEST_EXPECTATIONS[@]}"
 assert_cli_surface "$BUNDLE_DIR/lg-buddy"
 
@@ -380,8 +362,12 @@ printf '%s\n' "$VERSION_OUTPUT" | grep -q "^version: "
 printf '%s\n' "$VERSION_OUTPUT" | grep -q "^channel: "
 printf '%s\n' "$VERSION_OUTPUT" | grep -q "^commit: "
 
-install_gui_candidate_fixture "$BUNDLE_DIR"
-assert_executable "$BUNDLE_DIR/lg-buddy-gui"
+assert_executable "$BUNDLE_GUI"
+[ "$("$BUNDLE_GUI" --version)" = "$VERSION_OUTPUT" ] || {
+    echo "Bundled GUI identity did not match the runtime candidate."
+    exit 1
+}
+bash "$SCRIPT_DIR/test-release-linkage.sh" "$BUNDLE_DIR/lg-buddy" "$BUNDLE_GUI"
 
 PAYLOAD_REFUSAL_ROOT="$WORK_DIR/payload-refusal-root"
 PAYLOAD_REFUSAL_HOME="$WORK_DIR/payload-refusal-home"
@@ -397,7 +383,7 @@ cat >"$PAYLOAD_REFUSAL_SUDO" <<'EOF'
 exit 97
 EOF
 chmod 755 "$PAYLOAD_REFUSAL_SUDO"
-mv "$BUNDLE_DIR/lg-buddy-gui" "$GUI_FIXTURE_SNAPSHOT"
+mv "$BUNDLE_GUI" "$GUI_FIXTURE_SNAPSHOT"
 if (
     export HOME="$PAYLOAD_REFUSAL_HOME"
     export XDG_CONFIG_HOME="$PAYLOAD_REFUSAL_HOME/.config"
@@ -411,7 +397,7 @@ if (
     echo "Fresh install unexpectedly accepted a missing GUI candidate."
     exit 1
 fi
-mv "$GUI_FIXTURE_SNAPSHOT" "$BUNDLE_DIR/lg-buddy-gui"
+mv "$GUI_FIXTURE_SNAPSHOT" "$BUNDLE_GUI"
 grep -F -q 'LG Buddy GUI binary not found' "$MISSING_GUI_OUTPUT"
 [ ! -e "$PAYLOAD_REFUSAL_SUDO_MARKER" ] || {
     echo "Missing GUI candidate requested sudo."
@@ -422,7 +408,7 @@ grep -F -q 'LG Buddy GUI binary not found' "$MISSING_GUI_OUTPUT"
     exit 1
 }
 
-chmod 775 "$BUNDLE_DIR/lg-buddy-gui"
+chmod 775 "$BUNDLE_GUI"
 if (
     export HOME="$PAYLOAD_REFUSAL_HOME"
     export XDG_CONFIG_HOME="$PAYLOAD_REFUSAL_HOME/.config"
@@ -436,7 +422,7 @@ if (
     echo "Fresh install unexpectedly accepted an unsafe GUI candidate."
     exit 1
 fi
-chmod 755 "$BUNDLE_DIR/lg-buddy-gui"
+chmod 755 "$BUNDLE_GUI"
 grep -F -q 'GUI binary is writable by its group or by other users' "$UNSAFE_GUI_OUTPUT"
 [ ! -e "$PAYLOAD_REFUSAL_SUDO_MARKER" ] || {
     echo "Unsafe GUI candidate requested sudo."
@@ -542,8 +528,11 @@ USER_SCREEN_SERVICE="$HOME/.config/systemd/user/LG_Buddy_screen.service"
 USER_UPDATE_CHECK_SERVICE="$HOME/.config/systemd/user/LG_Buddy_update_check.service"
 USER_UPDATE_CHECK_TIMER="$HOME/.config/systemd/user/LG_Buddy_update_check.timer"
 USER_UPDATE_CHECK_OVERRIDE="$HOME/.config/systemd/user/LG_Buddy_update_check.service.d/config.conf"
-DESKTOP_ENTRY="$INSTALL_ROOT/usr/share/applications/LG_Buddy_Brightness.desktop"
-USER_DESKTOP_ENTRY="$HOME/Desktop/LG_Buddy_Brightness.desktop"
+DESKTOP_ENTRY="$INSTALL_ROOT/usr/share/applications/io.github.staphylococcus.LGBuddy.desktop"
+LEGACY_DESKTOP_ENTRY="$INSTALL_ROOT/usr/share/applications/LG_Buddy_Brightness.desktop"
+USER_DESKTOP_ENTRY="$HOME/Desktop/io.github.staphylococcus.LGBuddy.desktop"
+LEGACY_USER_DESKTOP_ENTRY="$HOME/Desktop/LG_Buddy_Brightness.desktop"
+INSTALLED_ICON="$INSTALL_ROOT/usr/share/icons/hicolor/scalable/apps/io.github.staphylococcus.LGBuddy.svg"
 NM_SLEEP_HOOK="$INSTALL_ROOT/etc/NetworkManager/dispatcher.d/pre-down.d/LG_Buddy_sleep"
 NM_LIFECYCLE_HOOK="$INSTALL_ROOT/etc/NetworkManager/dispatcher.d/pre-down.d/LG_Buddy_lifecycle"
 
@@ -556,7 +545,7 @@ assert_executable "$INSTALLED_BINARY"
 assert_executable "$INSTALLED_GUI"
 assert_mode "$INSTALLED_GUI" 755
 assert_owner_uid "$INSTALLED_GUI" "$(id -u)"
-cmp -s "$BUNDLE_DIR/lg-buddy-gui" "$INSTALLED_GUI"
+cmp -s "$BUNDLE_GUI" "$INSTALLED_GUI"
 [ "$("$INSTALLED_GUI" --version)" = "$VERSION_OUTPUT" ] || {
     echo "Installed GUI identity did not match the runtime candidate."
     exit 1
@@ -565,6 +554,10 @@ assert_executable "$INSTALLED_VENV_PIP"
 assert_file "$INSTALLED_POINTER"
 assert_lifecycle_topology_installed
 assert_file "$DESKTOP_ENTRY"
+[ ! -e "$LEGACY_DESKTOP_ENTRY" ] || fail "Fresh install left the legacy desktop entry behind."
+assert_file "$INSTALLED_ICON"
+assert_mode "$INSTALLED_ICON" 644
+cmp -s "$BUNDLE_ICON" "$INSTALLED_ICON"
 if grep -q 'LG_BUDDY_CONFIG' "$NM_LIFECYCLE_HOOK"; then
     echo "NetworkManager lifecycle hook should rely on installed config pointer, not embed LG_BUDDY_CONFIG."
     exit 1
@@ -588,6 +581,11 @@ fi
 
 assert_cli_surface "$INSTALLED_BINARY"
 
+if [ -n "${DISPLAY:-}" ]; then
+    bash "$SCRIPT_DIR/test-gui-launch.sh" "$INSTALLED_BINARY"
+    bash "$SCRIPT_DIR/test-release-gui-behavior.sh" "$INSTALLED_BINARY" "$CONFIG_FILE"
+fi
+
 INSTALLED_VERSION_OUTPUT="$("$INSTALLED_BINARY" --version)"
 printf '%s\n' "$INSTALLED_VERSION_OUTPUT" | grep -q "^lg-buddy "
 printf '%s\n' "$INSTALLED_VERSION_OUTPUT" | grep -q "^version: "
@@ -596,6 +594,7 @@ printf '%s\n' "$INSTALLED_VERSION_OUTPUT" | grep -q "^commit: "
 python3 "$SCRIPT_DIR/release_bundle_manifest.py" validate \
     --manifest "$BUNDLE_DIR/release-manifest.json" \
     --binary "$INSTALLED_BINARY" \
+    --gui-binary "$INSTALLED_GUI" \
     "${MANIFEST_EXPECTATIONS[@]}"
 
 # Existing profiles without the platform key remain on bscpylgtv. Rewriting
@@ -756,13 +755,13 @@ EOF
 chmod 755 "$SUDO_SPY"
 
 GUI_CANDIDATE_SNAPSHOT="$WORK_DIR/lg-buddy-gui.candidate"
-cp -p "$BUNDLE_DIR/lg-buddy-gui" "$GUI_CANDIDATE_SNAPSHOT"
-cat >"$BUNDLE_DIR/lg-buddy-gui" <<'EOF'
+cp -p "$BUNDLE_GUI" "$GUI_CANDIDATE_SNAPSHOT"
+cat >"$BUNDLE_GUI" <<'EOF'
 #!/bin/sh
 [ "${1:-}" = "--version" ] || [ "${1:-}" = "-V" ] || exit 2
 printf 'lg-buddy 0.0.0\nversion: 0.0.0\nchannel: dev\ncommit: mismatched\n'
 EOF
-chmod 755 "$BUNDLE_DIR/lg-buddy-gui"
+chmod 755 "$BUNDLE_GUI"
 if (
     export LG_BUDDY_SUDO_CMD="$SUDO_SPY"
     export LG_BUDDY_SUDO_MARKER="$SUDO_MARKER"
@@ -772,7 +771,7 @@ if (
     echo "Upgrade unexpectedly passed with a mismatched GUI candidate."
     exit 1
 fi
-mv "$GUI_CANDIDATE_SNAPSHOT" "$BUNDLE_DIR/lg-buddy-gui"
+mv "$GUI_CANDIDATE_SNAPSHOT" "$BUNDLE_GUI"
 grep -F -q 'GUI candidate identity does not match the runtime candidate' "$GUI_IDENTITY_REFUSAL_OUTPUT"
 [ ! -e "$SUDO_MARKER" ] || {
     echo "Mismatched GUI candidate requested sudo."
@@ -943,7 +942,7 @@ cmp -s "$NATIVE_ACCESS_TOKEN_SNAPSHOT" "$NATIVE_ACCESS_TOKEN_FILE" || {
     exit 1
 }
 cmp -s "$BUNDLE_DIR/lg-buddy" "$INSTALLED_BINARY"
-cmp -s "$BUNDLE_DIR/lg-buddy-gui" "$INSTALLED_GUI"
+cmp -s "$BUNDLE_GUI" "$INSTALLED_GUI"
 [ "$("$INSTALLED_GUI" --version)" = "$INSTALLED_VERSION_OUTPUT" ] || {
     echo "Upgraded GUI identity did not match the runtime candidate."
     exit 1
@@ -953,6 +952,8 @@ cmp -s "$BUNDLE_DIR/systemd/LG_Buddy_lifecycle.service" "$LIFECYCLE_SERVICE"
 cmp -s "$BUNDLE_DIR/systemd/lg_buddy.conf" "$TMPFILES_CONFIG"
 cmp -s "$BUNDLE_DIR/LG_Buddy_Brightness.desktop" "$DESKTOP_ENTRY"
 cmp -s "$BUNDLE_DIR/LG_Buddy_Brightness.desktop" "$USER_DESKTOP_ENTRY"
+[ ! -e "$LEGACY_USER_DESKTOP_ENTRY" ] || fail "Upgrade left the legacy user desktop entry behind."
+cmp -s "$BUNDLE_ICON" "$INSTALLED_ICON"
 cmp -s "$BUNDLE_DIR/systemd/LG_Buddy_screen.service" "$USER_SCREEN_SERVICE"
 cmp -s "$BUNDLE_DIR/systemd/LG_Buddy_update_check.service" "$USER_UPDATE_CHECK_SERVICE"
 cmp -s "$BUNDLE_DIR/systemd/LG_Buddy_update_check.timer" "$USER_UPDATE_CHECK_TIMER"
@@ -986,6 +987,10 @@ touch "$HEALTHY_VENV_MARKER"
 }
 [ ! -e "$USER_DESKTOP_ENTRY" ] || {
     echo "Upgrade recreated a user-removed Desktop launcher."
+    exit 1
+}
+[ ! -e "$LEGACY_USER_DESKTOP_ENTRY" ] || {
+    echo "Upgrade recreated the legacy user Desktop launcher."
     exit 1
 }
 
@@ -1063,6 +1068,10 @@ export LG_BUDDY_REMOVE_CONFIG="1"
 }
 [ ! -e "$DESKTOP_ENTRY" ] || {
     echo "Desktop entry still present after uninstall: $DESKTOP_ENTRY"
+    exit 1
+}
+[ ! -e "$INSTALLED_ICON" ] || {
+    echo "Application icon still present after uninstall: $INSTALLED_ICON"
     exit 1
 }
 [ ! -e "$NM_SLEEP_HOOK" ] || {

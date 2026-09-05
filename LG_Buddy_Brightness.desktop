@@ -4,6 +4,6 @@ Type=Application
 Name=TV Brightness
 Comment=Control LG TV OLED Pixel Brightness
 Exec=/usr/bin/lg-buddy brightness
-Icon=display-brightness
+Icon=io.github.staphylococcus.LGBuddy
 Terminal=false
 Categories=Utility;

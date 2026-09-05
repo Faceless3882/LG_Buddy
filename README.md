@@ -46,9 +46,10 @@ Fresh installation selects the native `lg_webos` control path, which does not
 require Python. Native-only packages can omit the Python client, `venv`, and
 `pip`. The release-bundle installer still provisions `bscpylgtv` as an explicit
 compatibility fallback, so it checks for Python 3 with a `venv` that provisions
-`pip`, plus `zenity`. The GTK brightness window requires GTK 4.10 or newer and
-libadwaita 1; the installer verifies that the GUI executable can load and has
-the same release identity as the runtime before changing the installation.
+`pip`, plus `zenity`. Official release bundles target the Ubuntu 24.04 runtime
+baseline: GTK 4.14, libadwaita 1.5, and glibc 2.39 or newer. The installer
+verifies that the GUI executable can load and has the same release identity as
+the runtime before changing the installation.
 Zenity remains the compatibility fallback when the GUI executable is absent.
 `swayidle` is needed only by an existing explicit selection or as the deprecated
 compatibility fallback.

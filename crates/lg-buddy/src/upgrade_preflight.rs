@@ -55,6 +55,16 @@ const fn requirement(path: &'static str, policy: InstallerPathPolicy) -> Install
     InstallerPathRequirement { path, policy }
 }
 
+const SYSTEM_DESKTOP_ENTRY_PATHS: &[&str] = &[
+    "/usr/share/applications/io.github.staphylococcus.LGBuddy.desktop",
+    "/usr/share/applications/LG_Buddy_Brightness.desktop",
+];
+
+const USER_DESKTOP_ENTRY_PATHS: &[&str] = &[
+    "Desktop/io.github.staphylococcus.LGBuddy.desktop",
+    "Desktop/LG_Buddy_Brightness.desktop",
+];
+
 const SYSTEM_PATH_REQUIREMENTS: &[InstallerPathRequirement] = &[
     requirement("/usr/bin/lg-buddy", InstallerPathPolicy::ReplaceExecutable),
     requirement(
@@ -81,10 +91,6 @@ const SYSTEM_PATH_REQUIREMENTS: &[InstallerPathRequirement] = &[
         "/etc/NetworkManager/dispatcher.d/pre-down.d/LG_Buddy_lifecycle",
         InstallerPathPolicy::ReplaceExecutable,
     ),
-    requirement(
-        "/usr/share/applications/LG_Buddy_Brightness.desktop",
-        InstallerPathPolicy::ReplaceFile,
-    ),
     requirement("/usr/bin", InstallerPathPolicy::MutateDirectory),
     requirement("/etc/systemd/system", InstallerPathPolicy::MutateDirectory),
     requirement(
@@ -110,10 +116,29 @@ const SYSTEM_PATH_REQUIREMENTS: &[InstallerPathRequirement] = &[
     ),
 ];
 
-const OPTIONAL_SYSTEM_PATH_REQUIREMENTS: &[InstallerPathRequirement] = &[requirement(
-    "/usr/bin/lg-buddy-gui",
-    InstallerPathPolicy::ReplaceExecutable,
-)];
+const OPTIONAL_SYSTEM_PATH_REQUIREMENTS: &[InstallerPathRequirement] = &[
+    requirement(
+        "/usr/bin/lg-buddy-gui",
+        InstallerPathPolicy::ReplaceExecutable,
+    ),
+    requirement("/usr/share/icons", InstallerPathPolicy::MutateDirectory),
+    requirement(
+        "/usr/share/icons/hicolor",
+        InstallerPathPolicy::MutateDirectory,
+    ),
+    requirement(
+        "/usr/share/icons/hicolor/scalable",
+        InstallerPathPolicy::MutateDirectory,
+    ),
+    requirement(
+        "/usr/share/icons/hicolor/scalable/apps",
+        InstallerPathPolicy::MutateDirectory,
+    ),
+    requirement(
+        "/usr/share/icons/hicolor/scalable/apps/io.github.staphylococcus.LGBuddy.svg",
+        InstallerPathPolicy::ReplaceFile,
+    ),
+];
 
 const PYTHON_REPAIR_PATH_REQUIREMENTS: &[InstallerPathRequirement] = &[requirement(
     "/usr/bin/LG_Buddy_PIP",
@@ -178,7 +203,14 @@ const CANDIDATE_PATH_REQUIREMENTS: &[InstallerPathRequirement] = &[
     requirement("release-manifest.json", InstallerPathPolicy::ReadableInput),
     requirement("install.sh", InstallerPathPolicy::ExecutableInput),
     requirement("lg-buddy", InstallerPathPolicy::ExecutableInput),
-    requirement("lg-buddy-gui", InstallerPathPolicy::ExecutableInput),
+    requirement(
+        "docs/lg-buddy-gui-x86_64-unknown-linux-gnu",
+        InstallerPathPolicy::ReadableInput,
+    ),
+    requirement(
+        "docs/io.github.staphylococcus.LGBuddy.svg",
+        InstallerPathPolicy::ReadableInput,
+    ),
     requirement(
         "LG_Buddy_Brightness.desktop",
         InstallerPathPolicy::ReadableInput,
@@ -421,10 +453,6 @@ impl InstalledLayout {
     fn user_systemd_path(&self, path: &str) -> PathBuf {
         self.user_home.join(".config/systemd/user").join(path)
     }
-
-    fn user_desktop_entry(&self) -> PathBuf {
-        self.user_home.join("Desktop/LG_Buddy_Brightness.desktop")
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -641,6 +669,15 @@ fn evaluate_installed_state(
             check,
         );
     }
+    checker.check_replace_file_alternatives(
+        &SYSTEM_DESKTOP_ENTRY_PATHS
+            .iter()
+            .map(|path| facts.layout.system_path(path))
+            .collect::<Vec<_>>(),
+        facts.system_owner_uid,
+        Some(system_trust),
+        "installed-layout",
+    );
     for requirement in OPTIONAL_SYSTEM_PATH_REQUIREMENTS {
         checker.check_optional_requirement(
             &facts.layout.system_path(requirement.path),
@@ -675,13 +712,15 @@ fn evaluate_installed_state(
             check,
         );
     }
-    checker.check_optional_requirement(
-        &facts.layout.user_desktop_entry(),
-        facts.user_owner_uid,
-        Some(user_trust),
-        InstallerPathPolicy::ReplaceFile,
-        "user-desktop",
-    );
+    for path in USER_DESKTOP_ENTRY_PATHS {
+        checker.check_optional_requirement(
+            &facts.layout.user_home.join(path),
+            facts.user_owner_uid,
+            Some(user_trust),
+            InstallerPathPolicy::ReplaceFile,
+            "user-desktop",
+        );
+    }
 
     for path in LEGACY_SYSTEM_PATHS {
         checker.check_absent(&facts.layout.system_path(path));
@@ -987,6 +1026,39 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
         match self.filesystem.path_facts(path) {
             Err(err) if err.kind() == io::ErrorKind::NotFound => {}
             _ => self.check_requirement(path, owner_uid, trusted_root, policy, check),
+        }
+    }
+
+    fn check_replace_file_alternatives(
+        &mut self,
+        paths: &[PathBuf],
+        owner_uid: u32,
+        trusted_root: Option<TrustedRoot<'_>>,
+        check: &'static str,
+    ) {
+        let mut found = false;
+        for path in paths {
+            match self.filesystem.path_facts(path) {
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                _ => {
+                    found = true;
+                    self.check_requirement(
+                        path,
+                        owner_uid,
+                        trusted_root,
+                        InstallerPathPolicy::ReplaceFile,
+                        check,
+                    );
+                }
+            }
+        }
+        if !found {
+            self.report.refuse(
+                check,
+                paths.first().cloned(),
+                "no supported LG Buddy desktop entry is installed",
+                "restore the desktop entry from a current release-bundle installation",
+            );
         }
     }
 
@@ -1514,7 +1586,7 @@ mod tests {
     }
 
     #[test]
-    fn installed_gui_is_optional_for_first_upgrade_but_validated_when_present() {
+    fn new_gui_installation_paths_are_optional_but_validated_when_present() {
         let fixture = InstalledFixture::new("optional-installed-gui");
         let gui = fixture.facts.layout.system_path("/usr/bin/lg-buddy-gui");
 
@@ -1532,6 +1604,17 @@ mod tests {
             &unsafe_installation,
             "installed-layout",
             &gui,
+            "found Symlink",
+        );
+
+        fs::remove_file(&gui).unwrap();
+        let icons = fixture.facts.layout.system_path("/usr/share/icons");
+        symlink(&fixture.config_directory, &icons).unwrap();
+        let unsafe_icon_directory = evaluate_initial_preflight(&OsFilesystemFacts, &fixture.facts);
+        assert_failure(
+            &unsafe_icon_directory,
+            "installed-layout",
+            &icons,
             "found Symlink",
         );
     }
@@ -1583,7 +1666,11 @@ mod tests {
     #[test]
     fn existing_user_desktop_launcher_must_be_safely_replaceable() {
         let fixture = InstalledFixture::new("user-desktop-launcher");
-        let launcher = fixture.facts.layout.user_desktop_entry();
+        let launcher = fixture
+            .facts
+            .layout
+            .user_home
+            .join("Desktop/io.github.staphylococcus.LGBuddy.desktop");
         fs::create_dir_all(launcher.parent().unwrap()).unwrap();
         write_file(&launcher, false);
         set_mode(&launcher, 0o400);
@@ -1602,6 +1689,35 @@ mod tests {
             "user-desktop",
             &launcher,
             "not writable by its owner",
+        );
+    }
+
+    #[test]
+    fn installed_desktop_entry_accepts_legacy_or_application_id_filename() {
+        let fixture = InstalledFixture::new("desktop-entry-alternatives");
+        let legacy = fixture
+            .facts
+            .layout
+            .system_path("/usr/share/applications/LG_Buddy_Brightness.desktop");
+        let current = fixture
+            .facts
+            .layout
+            .system_path("/usr/share/applications/io.github.staphylococcus.LGBuddy.desktop");
+
+        let legacy_report = evaluate_initial_preflight(&OsFilesystemFacts, &fixture.facts);
+        assert!(legacy_report.compatible(), "{}", legacy_report.render());
+
+        fs::rename(&legacy, &current).unwrap();
+        let current_report = evaluate_initial_preflight(&OsFilesystemFacts, &fixture.facts);
+        assert!(current_report.compatible(), "{}", current_report.render());
+
+        fs::remove_file(&current).unwrap();
+        let missing_report = evaluate_initial_preflight(&OsFilesystemFacts, &fixture.facts);
+        assert_failure(
+            &missing_report,
+            "installed-layout",
+            &current,
+            "no supported LG Buddy desktop entry",
         );
     }
 
@@ -1760,7 +1876,11 @@ mod tests {
         for (label, path, mode) in [
             ("writable-manifest", "release-manifest.json", 0o660),
             ("writable-installer", "install.sh", 0o770),
-            ("writable-gui", "lg-buddy-gui", 0o770),
+            (
+                "writable-gui",
+                "docs/lg-buddy-gui-x86_64-unknown-linux-gnu",
+                0o660,
+            ),
             ("writable-input-directory", "systemd", 0o770),
         ] {
             let fixture = InstalledFixture::new(label);
@@ -2290,11 +2410,15 @@ mod tests {
     }
 
     #[test]
-    fn candidate_preflight_requires_owner_usable_executable_modes() {
+    fn candidate_preflight_requires_owner_usable_input_modes() {
         for (label, path, mode) in [
             ("unreadable-installer", "install.sh", 0o100),
             ("other-executable", "install.sh", 0o401),
-            ("non-executable-gui", "lg-buddy-gui", 0o400),
+            (
+                "unreadable-gui",
+                "docs/lg-buddy-gui-x86_64-unknown-linux-gnu",
+                0o000,
+            ),
         ] {
             let fixture = InstalledFixture::new(label);
             let executable = fixture.candidate_root.join(path);
@@ -2310,7 +2434,11 @@ mod tests {
                 &report,
                 "candidate-layout",
                 &executable,
-                "not readable and executable by its owner",
+                if path == "install.sh" {
+                    "not readable and executable by its owner"
+                } else {
+                    "not readable by its owner"
+                },
             );
         }
     }
@@ -2589,6 +2717,10 @@ mod tests {
                 matches!(requirement.policy, InstallerPathPolicy::ReplaceExecutable),
             );
         }
+        write_file(
+            &layout.system_path("/usr/share/applications/LG_Buddy_Brightness.desktop"),
+            false,
+        );
     }
 
     fn create_relative_requirements(base: &Path, requirements: &[InstallerPathRequirement]) {

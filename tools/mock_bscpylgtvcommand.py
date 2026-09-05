@@ -16,6 +16,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 
@@ -220,6 +221,10 @@ def execute_planned_step(
     command_args: list[str],
     step: dict[str, object],
 ) -> int:
+    delay_seconds = step.get("delay_seconds", 0)
+    if not isinstance(delay_seconds, (int, float)) or delay_seconds < 0:
+        raise TypeError("plan delay_seconds must be a non-negative number")
+    time.sleep(delay_seconds)
     result = step.get("result")
     state_update = step.get("state_update")
     if state_update is not None and not isinstance(state_update, dict):

@@ -31,32 +31,6 @@ assert_executable() {
     [ -x "$1" ] || fail "Expected executable not found: $1"
 }
 
-install_gui_candidate_fixture() {
-    local bundle_root="$1"
-    local gui_binary="$bundle_root/lg-buddy-gui"
-
-    # #144 covers installer upgrades before #145 adds the real GUI to release
-    # archives and their manifest.
-    [ ! -e "$gui_binary" ] || return 0
-    cat >"$gui_binary" <<'EOF'
-#!/bin/sh
-set -eu
-
-case "${1:-}" in
-    --version|-V)
-        [ "$#" -eq 1 ] || exit 2
-        exec "$(dirname "$0")/lg-buddy" --version
-        ;;
-    brightness)
-        [ "$#" -eq 1 ] || exit 2
-        exit 0
-        ;;
-    *) exit 2 ;;
-esac
-EOF
-    chmod 755 "$gui_binary"
-}
-
 validate_archive_paths() {
     local archive="$1"
     local entry=""
@@ -101,6 +75,7 @@ tree_digest() {
 }
 
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
+GUI_TARGET="x86_64-unknown-linux-gnu"
 PREVIOUS_ARCHIVE=""
 PREVIOUS_SHA256=""
 PREVIOUS_TAG=""
@@ -166,6 +141,7 @@ python3 "$SCRIPT_DIR/release_bundle_manifest.py" validate \
     --expected-version "$CANDIDATE_VERSION" \
     --expected-channel "$CANDIDATE_CHANNEL" \
     --expected-target "$CANDIDATE_TARGET" \
+    --expected-gui-target "$GUI_TARGET" \
     --expected-commit "$CANDIDATE_COMMIT"
 
 PYTHONPATH="$SCRIPT_DIR" python3 - "$PREVIOUS_VERSION" "$CANDIDATE_VERSION" <<'PY'
@@ -200,10 +176,13 @@ trap cleanup EXIT
 
 PREVIOUS_BUNDLE="$(extract_bundle "$PREVIOUS_ARCHIVE" "$WORK_DIR/previous")"
 CANDIDATE_BUNDLE="$(extract_bundle "$CANDIDATE_ARCHIVE" "$WORK_DIR/candidate")"
+CANDIDATE_GUI="$CANDIDATE_BUNDLE/docs/lg-buddy-gui-$GUI_TARGET"
+CANDIDATE_ICON="$CANDIDATE_BUNDLE/docs/io.github.staphylococcus.LGBuddy.svg"
 assert_executable "$PREVIOUS_BUNDLE/install.sh"
 assert_executable "$PREVIOUS_BUNDLE/lg-buddy"
 assert_executable "$CANDIDATE_BUNDLE/install.sh"
 assert_executable "$CANDIDATE_BUNDLE/lg-buddy"
+assert_file "$CANDIDATE_ICON"
 python3 "$SCRIPT_DIR/release_bundle_manifest.py" validate \
     --manifest "$PREVIOUS_BUNDLE/release-manifest.json" \
     --binary "$PREVIOUS_BUNDLE/lg-buddy" \
@@ -215,13 +194,18 @@ python3 "$SCRIPT_DIR/release_bundle_manifest.py" validate \
 python3 "$SCRIPT_DIR/release_bundle_manifest.py" validate \
     --manifest "$CANDIDATE_BUNDLE/release-manifest.json" \
     --binary "$CANDIDATE_BUNDLE/lg-buddy" \
+    --gui-binary "$CANDIDATE_GUI" \
     --expected-release-tag "$CANDIDATE_TAG" \
     --expected-version "$CANDIDATE_VERSION" \
     --expected-channel "$CANDIDATE_CHANNEL" \
     --expected-target "$CANDIDATE_TARGET" \
+    --expected-gui-target "$GUI_TARGET" \
     --expected-commit "$CANDIDATE_COMMIT"
-install_gui_candidate_fixture "$CANDIDATE_BUNDLE"
-assert_executable "$CANDIDATE_BUNDLE/lg-buddy-gui"
+assert_executable "$CANDIDATE_GUI"
+
+# The v1.4 updater treats new docs payloads as data and extracts them mode 600.
+# Exercise the candidate install exactly as that updater hands it off.
+chmod 600 "$CANDIDATE_GUI" "$CANDIDATE_ICON"
 
 INSTALL_ROOT="$WORK_DIR/root"
 HOME_DIR="$WORK_DIR/home"
@@ -259,8 +243,11 @@ TMPFILES_CONFIG="$INSTALL_ROOT/etc/tmpfiles.d/lg_buddy.conf"
 SYSTEM_SERVICE_OVERRIDE="$INSTALL_ROOT/etc/systemd/system/LG_Buddy.service.d/config.conf"
 LIFECYCLE_SERVICE_OVERRIDE="$INSTALL_ROOT/etc/systemd/system/LG_Buddy_lifecycle.service.d/config.conf"
 NM_LIFECYCLE_HOOK="$INSTALL_ROOT/etc/NetworkManager/dispatcher.d/pre-down.d/LG_Buddy_lifecycle"
-SYSTEM_DESKTOP_ENTRY="$INSTALL_ROOT/usr/share/applications/LG_Buddy_Brightness.desktop"
-USER_DESKTOP_ENTRY="$HOME_DIR/Desktop/LG_Buddy_Brightness.desktop"
+SYSTEM_DESKTOP_ENTRY="$INSTALL_ROOT/usr/share/applications/io.github.staphylococcus.LGBuddy.desktop"
+LEGACY_SYSTEM_DESKTOP_ENTRY="$INSTALL_ROOT/usr/share/applications/LG_Buddy_Brightness.desktop"
+USER_DESKTOP_ENTRY="$HOME_DIR/Desktop/io.github.staphylococcus.LGBuddy.desktop"
+LEGACY_USER_DESKTOP_ENTRY="$HOME_DIR/Desktop/LG_Buddy_Brightness.desktop"
+INSTALLED_ICON="$INSTALL_ROOT/usr/share/icons/hicolor/scalable/apps/io.github.staphylococcus.LGBuddy.svg"
 USER_SCREEN_SERVICE="$HOME_DIR/.config/systemd/user/LG_Buddy_screen.service"
 USER_SCREEN_OVERRIDE="$HOME_DIR/.config/systemd/user/LG_Buddy_screen.service.d/config.conf"
 USER_UPDATE_SERVICE="$HOME_DIR/.config/systemd/user/LG_Buddy_update_check.service"
@@ -272,7 +259,7 @@ VENV_MARKER="$INSTALL_ROOT/usr/bin/LG_Buddy_PIP/cross-version-native-marker"
 for installed_path in \
     "$CONFIG_FILE" "$INSTALLED_BINARY" "$INSTALLED_POINTER" "$SYSTEM_SERVICE" \
     "$LIFECYCLE_SERVICE" "$TMPFILES_CONFIG" "$NM_LIFECYCLE_HOOK" \
-    "$SYSTEM_DESKTOP_ENTRY" "$USER_DESKTOP_ENTRY" "$USER_SCREEN_SERVICE" \
+    "$LEGACY_SYSTEM_DESKTOP_ENTRY" "$LEGACY_USER_DESKTOP_ENTRY" "$USER_SCREEN_SERVICE" \
     "$USER_UPDATE_SERVICE" "$USER_UPDATE_TIMER"
 do
     assert_file "$installed_path"
@@ -375,8 +362,8 @@ mv "$CANDIDATE_SERVICE.incompatible" "$CANDIDATE_SERVICE"
 
 for stale_target in \
     "$INSTALLED_BINARY" "$SYSTEM_SERVICE" "$LIFECYCLE_SERVICE" \
-    "$TMPFILES_CONFIG" "$NM_LIFECYCLE_HOOK" "$SYSTEM_DESKTOP_ENTRY" \
-    "$USER_DESKTOP_ENTRY" "$USER_SCREEN_SERVICE" "$USER_UPDATE_SERVICE" \
+    "$TMPFILES_CONFIG" "$NM_LIFECYCLE_HOOK" "$LEGACY_SYSTEM_DESKTOP_ENTRY" \
+    "$LEGACY_USER_DESKTOP_ENTRY" "$USER_SCREEN_SERVICE" "$USER_UPDATE_SERVICE" \
     "$USER_UPDATE_TIMER"
 do
     printf 'stale previous-version asset\n' >"$stale_target"
@@ -436,13 +423,16 @@ cmp -s "$TOKEN_SNAPSHOT" "$NATIVE_TOKEN_FILE" || fail "Cross-version upgrade cha
 cmp -s "$CANDIDATE_BUNDLE/lg-buddy" "$INSTALLED_BINARY"
 assert_executable "$INSTALLED_GUI"
 [ "$(stat -c '%a' "$INSTALLED_GUI")" = "755" ] || fail "Installed GUI mode is not 755."
-cmp -s "$CANDIDATE_BUNDLE/lg-buddy-gui" "$INSTALLED_GUI"
+cmp -s "$CANDIDATE_GUI" "$INSTALLED_GUI"
 [ "$("$INSTALLED_GUI" --version)" = "$("$INSTALLED_BINARY" --version)" ] || fail "Installed GUI identity does not match the runtime."
 cmp -s "$CANDIDATE_BUNDLE/systemd/LG_Buddy.service" "$SYSTEM_SERVICE"
 cmp -s "$CANDIDATE_BUNDLE/systemd/LG_Buddy_lifecycle.service" "$LIFECYCLE_SERVICE"
 cmp -s "$CANDIDATE_BUNDLE/systemd/lg_buddy.conf" "$TMPFILES_CONFIG"
 cmp -s "$CANDIDATE_BUNDLE/LG_Buddy_Brightness.desktop" "$SYSTEM_DESKTOP_ENTRY"
 cmp -s "$CANDIDATE_BUNDLE/LG_Buddy_Brightness.desktop" "$USER_DESKTOP_ENTRY"
+[ ! -e "$LEGACY_SYSTEM_DESKTOP_ENTRY" ] || fail "Cross-version upgrade left the legacy system desktop entry behind."
+[ ! -e "$LEGACY_USER_DESKTOP_ENTRY" ] || fail "Cross-version upgrade left the legacy user desktop entry behind."
+cmp -s "$CANDIDATE_ICON" "$INSTALLED_ICON"
 cmp -s "$CANDIDATE_BUNDLE/systemd/LG_Buddy_screen.service" "$USER_SCREEN_SERVICE"
 cmp -s "$CANDIDATE_BUNDLE/systemd/LG_Buddy_update_check.service" "$USER_UPDATE_SERVICE"
 cmp -s "$CANDIDATE_BUNDLE/systemd/LG_Buddy_update_check.timer" "$USER_UPDATE_TIMER"
@@ -472,10 +462,12 @@ grep -q '^updates_channel=prerelease$' "$CONFIG_FILE"
 python3 "$SCRIPT_DIR/release_bundle_manifest.py" validate \
     --manifest "$CANDIDATE_BUNDLE/release-manifest.json" \
     --binary "$INSTALLED_BINARY" \
+    --gui-binary "$INSTALLED_GUI" \
     --expected-release-tag "$CANDIDATE_TAG" \
     --expected-version "$CANDIDATE_VERSION" \
     --expected-channel "$CANDIDATE_CHANNEL" \
     --expected-target "$CANDIDATE_TARGET" \
+    --expected-gui-target "$GUI_TARGET" \
     --expected-commit "$CANDIDATE_COMMIT"
 
 echo "Cross-version upgrade smoke test passed: $PREVIOUS_VERSION -> $CANDIDATE_VERSION"

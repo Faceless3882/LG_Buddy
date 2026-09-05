@@ -8,7 +8,8 @@ use semver::Version;
 
 use crate::release_bundle::{
     acquire_release_bundle, resolve_release_identity, verify_release_binary_identity,
-    BundleAcquisitionError, ReleaseIdentity, VerifiedReleaseBundle,
+    verify_release_gui_binary_identity, BundleAcquisitionError, ReleaseIdentity,
+    VerifiedReleaseBundle,
 };
 use crate::updates::{discover_install_candidate, ReleaseInfo, UpdatesError};
 use crate::upgrade_preflight::{current_host_preflight, CompatibilityReport};
@@ -234,8 +235,11 @@ impl UpdateInstallRuntime for SystemUpdateInstallRuntime {
         &mut self,
         expected: &ReleaseIdentity,
     ) -> Result<ReleaseIdentity, UpdateInstallError> {
-        verify_release_binary_identity(&installed_binary_path(), expected)
-            .map_err(UpdateInstallError::InstalledIdentity)
+        let identity = verify_release_binary_identity(&installed_binary_path(), expected)
+            .map_err(UpdateInstallError::InstalledIdentity)?;
+        verify_release_gui_binary_identity(&installed_gui_binary_path(), expected)
+            .map_err(UpdateInstallError::InstalledIdentity)?;
+        Ok(identity)
     }
 }
 
@@ -260,6 +264,13 @@ fn installed_binary_path() -> PathBuf {
         .filter(|root| !root.is_empty())
         .map(PathBuf::from);
     installed_binary_path_for_root(install_root)
+}
+
+fn installed_gui_binary_path() -> PathBuf {
+    let install_root = std::env::var_os("LG_BUDDY_INSTALL_ROOT")
+        .filter(|root| !root.is_empty())
+        .map(PathBuf::from);
+    installed_binary_path_for_root(install_root).with_file_name("lg-buddy-gui")
 }
 
 fn installed_binary_path_for_root(install_root: Option<PathBuf>) -> PathBuf {
