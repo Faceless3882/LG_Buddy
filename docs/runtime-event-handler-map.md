@@ -120,7 +120,7 @@ Current native-runtime inputs:
 
 | Provider surface | Runtime representation | Consumed by |
 | --- | --- | --- |
-| `org.gnome.ScreenSaver.ActiveChanged(true)` | Non-authoritative idle observation | GNOME runner; does not change the LG Buddy deadline |
+| `org.gnome.ScreenSaver.ActiveChanged(true)` | Non-authoritative idle observation | GNOME source -> shared runner; does not change the LG Buddy deadline |
 | `org.gnome.ScreenSaver.ActiveChanged(false)` | `ProviderActive` | `InactivityEngine` |
 | `org.gnome.ScreenSaver.WakeUpScreen` | `WakeRequested` | `InactivityEngine` |
 | Recent activity reported by `org.gnome.Mutter.IdleMonitor.GetIdletime` | `DesktopActivityObserved` | `InactivityEngine` |
@@ -160,10 +160,9 @@ swayidle timeout/resume
   -> screen policy
 ```
 
-`sources/desktop/swayidle.rs` models hook-to-`SessionEvent` mapping, including
-`BeforeSleep`, `AfterResume`, `Lock`, and `Unlock`, but the production monitor
-currently starts `swayidle` with direct `screen off` and `screen on` commands.
-Those richer hook events are not consumed by the monitor runner.
+`sources/desktop/swayidle.rs` owns the production process invocation and creates
+only the delegated timeout/resume command shape shown above. It does not expose
+an unused hook-to-event capability model.
 
 This deprecated path remains for existing explicit selections and as an
 automatic compatibility fallback on unsupported native sessions. It is
@@ -229,8 +228,7 @@ Current lifecycle signal mapping:
 
 The current `SessionEventDispatcher` handles these session events when a
 backend path dispatches them. The production `swayidle` path delegates timeout
-and resume to direct `screen off` / `screen on` CLI/API commands; richer
-`swayidle` hook events are modeled but not consumed by default.
+and resume to direct `screen off` / `screen on` CLI/API commands.
 
 | Session event | Current action |
 | --- | --- |
@@ -250,15 +248,16 @@ records a runtime-phase no-action decision and leaves TV/state untouched. If the
 phase read fails, screen policy fails open and proceeds with the ordinary
 screen action.
 
-The lock observer resolves only the current UID's active, local graphical
-logind session. `XDG_SESSION_ID`, when present, is validated; otherwise exactly
-one eligible session must exist. It watches logind bus ownership and re-resolves
-and reconciles the session after logind restarts. Missing, ambiguous, or
-unavailable session state produces a diagnostic without changing inactivity
-behavior or native backend eligibility. A desktop or locker that never updates
-`LockedHint` simply produces no lock events. Unlock never sends a wake, restore,
-or activity event. Fresh independent activity observed while locked remains able
-to restore the screen through the existing marker policy.
+The source-owned logind lock observer resolves only the current UID's active,
+local graphical session. `XDG_SESSION_ID`, when present, is validated; otherwise
+exactly one eligible session must exist. The source owns the system-bus
+connection, subscriptions, owner rebinding, reconciliation, and translation to
+normalized lock observations. Missing, ambiguous, or unavailable session state
+produces a diagnostic without changing inactivity behavior or native backend
+eligibility. A desktop or locker that never updates `LockedHint` simply produces
+no lock events. Unlock never sends a wake, restore, or activity event. Fresh
+independent activity observed while locked remains able to restore the screen
+through the existing marker policy.
 
 ## Lifecycle Default And Migration Stance
 

@@ -305,7 +305,7 @@ Disabling automatic checks does not disable manual `updates check` or
 
 These documents cover details intentionally omitted from this user guide:
 
-- [Session backend model](session-backend-model.md): backend capabilities,
+- [Session backend model](session-backend-model.md): source observations,
   event semantics, protocol requirements, and idle-timeout ownership.
 - [Gamepad activity subsystem](gamepad-subsystem.md): device discovery,
   permissions, adapters, and hardware testing.

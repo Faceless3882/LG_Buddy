@@ -10,27 +10,28 @@ events that consume these semantics, see
 
 GNOME, native Wayland, `swayidle`, and future backends do not expose the same APIs or the same
 event richness. LG Buddy should not force them to look identical at the
-transport layer. Instead, the `session` module should define:
+transport layer. Instead, the `session` module defines:
 
 - the canonical event meanings LG Buddy cares about
-- the capability model for optional behavior
-- the ownership model for idle timing
+- normalized observations with source identity and observation time
 
-Backend-specific modules should only map their native surface into that shared
-contract.
+Source modules own their provider-specific connection or process, validation,
+polling, and translation into that shared contract. The runner selects sources,
+owns worker lifetime and inactivity timing, and dispatches policy.
 
 ## Design Rules
 
 1. `session` owns semantics.
-2. Backend modules own provider-specific mapping.
-3. Missing backend capabilities stay missing.
+2. Source modules own provider-specific runtime mechanics and mapping.
+3. Missing provider observations stay missing.
 4. LG Buddy does not invent synthetic provider behavior just to fill gaps in the
    interface.
 5. Auxiliary input sources belong to the session runtime, not desktop backend
    modules.
 
-That means a backend can say "I do not emit `WakeRequested`" or "idle timeout is
-desktop-managed" without being treated as incomplete.
+That means a source can omit `WakeRequested` without being treated as
+incomplete. No source-facing capability object is needed when runtime behavior
+does not consume it.
 
 ## Canonical Events
 
@@ -68,66 +69,28 @@ These are the semantic events the runtime should reason about.
   `true` maps to `Lock`; `false` maps to `Unlock` only after a prior locked
   state. Unlock is informational and never requests screen restore.
 
-## Capability Model
+## Runtime Contract
 
-Backends should advertise what they can actually do.
+Native sources publish `SessionObservation` values. Each observation carries a
+canonical session event or inactivity fact, an `EventSource`, and the time it
+was observed. Source modules do not decide whether to blank or restore the
+screen.
 
-The current Rust shape is:
-
-```rust
-enum IdleTimeoutSource {
-    DesktopEnvironment,
-    LgBuddyConfigured,
-}
-
-struct SessionBackendCapabilities {
-    idle_timeout_source: IdleTimeoutSource,
-    wake_requested: bool,
-    before_sleep: bool,
-    after_resume: bool,
-    lock_unlock: bool,
-    early_user_activity: bool,
-}
-```
-
-### Capability Meanings
-
-| Capability | Meaning |
-| --- | --- |
-| `idle_timeout_source` | Who owns the idle timeout policy for this backend. |
-| `wake_requested` | Whether the backend can emit `WakeRequested`. |
-| `before_sleep` | Whether the backend can emit `BeforeSleep`. |
-| `after_resume` | Whether the backend can emit `AfterResume`. |
-| `lock_unlock` | Whether the backend can emit `Lock` and `Unlock`. |
-| `early_user_activity` | Whether the backend can emit `UserActivity` before `Active`. |
-
-### Idle Timeout Ownership
-
-This needs to be explicit because different providers work differently.
-
-`DesktopEnvironment`
-- The compositor or desktop already owns idle timing.
-- LG Buddy reacts to the resulting events.
-- No current production backend uses this mode.
-
-`LgBuddyConfigured`
-- LG Buddy must supply or manage the timeout value.
-- The backend tool or adapter consumes that LG Buddy-controlled value.
-- Examples: GNOME, native Wayland, and `swayidle`.
-
-This is separate from startup and wake retry delays.
-
-Those delays are runtime policy, not session-backend idle policy.
+GNOME and native Wayland feed the shared runner. LG Buddy owns their configured
+inactivity deadline. The delegated `swayidle` source instead receives the same
+configured timeout and invokes LG Buddy's existing `screen off` and `screen on`
+CLI/API commands. Startup and wake retry delays remain runtime policy and are
+unrelated to session-source timing.
 
 ## Provider Map
 
 This is the current mapping for the known backends, with implementation status called out explicitly.
 
-| Backend | Idle | Active | WakeRequested | UserActivity | BeforeSleep | AfterResume | Lock/Unlock | Idle Timeout Source | Current Rust Status |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| GNOME | Yes | Yes | Yes | Yes | No current surface in LG Buddy | No current surface in LG Buddy | No desktop-provider surface; optional logind overlay | `LgBuddyConfigured` | Implemented with LG Buddy-owned timeout policy over ScreenSaver and Mutter observations |
-| Native Wayland | Observed but not authoritative | Resumed notification | No | Yes | No | No | No desktop-provider surface; optional logind overlay | `LgBuddyConfigured` | Explicit opt-in using `ext_idle_notifier_v1` version 2 or newer |
-| `swayidle` | Yes | Yes | No | No direct equivalent | Yes | Yes | Yes, when built with systemd support | `LgBuddyConfigured` | Implemented for delegated `timeout -> Idle` and `resume -> Active`; `before-sleep`, `after-resume`, `lock`, and `unlock` are modeled but not executed |
+| Backend | Idle | Active | WakeRequested | UserActivity | Lock/Unlock | Timing and execution |
+| --- | --- | --- | --- | --- | --- | --- |
+| GNOME | Observed but not authoritative | Yes | Yes | Yes | Optional logind source | Shared runner owns the configured deadline over ScreenSaver and Mutter observations |
+| Native Wayland | Observed but not authoritative | Resumed notification | No | Yes | Optional logind source | Shared runner owns the configured deadline using `ext_idle_notifier_v1` version 2 or newer |
+| `swayidle` | Delegated timeout command | Delegated resume command | No | No direct equivalent | No shared logind observer | Source-owned process receives the configured timeout and invokes the CLI/API screen commands |
 
 ## Provider-Specific Mapping
 
@@ -232,12 +195,8 @@ Current mapping:
 
 | Provider surface | Canonical meaning | Current Rust Status |
 | --- | --- | --- |
-| `timeout <n> <cmd>` | `Idle` | Implemented |
-| `resume <cmd>` | `Active` | Implemented |
-| `before-sleep <cmd>` | `BeforeSleep` | Not implemented |
-| `after-resume <cmd>` | `AfterResume` | Not implemented |
-| `lock <cmd>` | `Lock` | Not implemented |
-| `unlock <cmd>` | `Unlock` | Not implemented |
+| `timeout <n> <cmd>` | Invoke `lg-buddy screen off` | Implemented |
+| `resume <cmd>` | Invoke `lg-buddy screen on` | Implemented |
 
 Notes:
 
@@ -254,21 +213,23 @@ The code split is:
 
 - `crates/lg-buddy/src/session.rs`
   - canonical events
-  - capability model
-  - backend-neutral traits and errors
+  - normalized source observations
 - `crates/lg-buddy/src/session/runner.rs`
-  - shared native-session orchestration and inactivity policy dispatch
+  - source selection, worker lifetime, observation multiplexing, shared
+    inactivity state, and policy dispatch
 - `crates/lg-buddy/src/session/gamepad/`
   - desktop-independent auxiliary input discovery and activity observations
 - `crates/lg-buddy/src/sources/desktop/gnome.rs`
-  - GNOME-specific probing and event mapping
+  - GNOME session-bus connection, subscriptions, owner validation, Mutter
+    polling, event loop, and observation mapping
 - `crates/lg-buddy/src/sources/desktop/wayland.rs`
   - native Wayland registry, seat, idle-notification, and activity mapping
 - `crates/lg-buddy/src/sources/linux/logind.rs`
-  - system lifecycle mapping plus optional current-session `LockedHint`
-    discovery and observation
+  - system lifecycle mapping plus the optional current-session lock observer,
+    including bus setup, session resolution, rebinding, and `LockedHint`
+    translation
 - `crates/lg-buddy/src/sources/desktop/swayidle.rs`
-  - `swayidle`-specific probing and event mapping
+  - production `swayidle` process invocation and timeout/resume command shape
 
 This keeps backend-specific details out of runtime policy and prevents each
 backend from quietly defining its own semantics.

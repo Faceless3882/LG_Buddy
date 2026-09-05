@@ -1,11 +1,18 @@
 use std::fmt;
 use std::os::fd::OwnedFd;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
-use crate::events::RuntimeEvent;
+use crate::events::{EventSource, RuntimeEvent};
+use crate::session::{SessionEvent, SessionObservation};
 use crate::session_bus::{
-    get_name_owner, parse_name_owner_changed_signal, BusMethodCall, BusSignal, BusSignalMatch,
-    BusValue, SessionBusClient, SessionBusError, DBUS_INTERFACE, DBUS_OBJECT_PATH,
-    DBUS_SERVICE_NAME,
+    get_name_owner, new_system_bus_client, parse_name_owner_changed_signal, BusMethodCall,
+    BusSignal, BusSignalMatch, BusValue, SessionBusClient, SessionBusError, DBUS_INTERFACE,
+    DBUS_OBJECT_PATH, DBUS_SERVICE_NAME,
 };
 
 pub const LOGIND_SERVICE_NAME: &str = "org.freedesktop.login1";
@@ -17,6 +24,7 @@ pub const LOGIND_INHIBIT_WHY: &str = "Handle LG TV power state around system sle
 const DBUS_PROPERTIES_INTERFACE: &str = "org.freedesktop.DBus.Properties";
 const GRAPHICAL_SESSION_TYPES: [&str; 2] = ["wayland", "x11"];
 const USER_SESSION_CLASSES: [&str; 3] = ["user", "user-early", "user-light"];
+const LOGIND_LOCK_PROCESS_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogindSession {
@@ -74,7 +82,7 @@ pub struct LockedHintTracker {
 }
 
 impl LockedHintTracker {
-    pub fn observe(&mut self, locked: bool) -> Option<crate::session::SessionEvent> {
+    pub fn observe(&mut self, locked: bool) -> Option<SessionEvent> {
         if self.locked == Some(locked) {
             return None;
         }
@@ -87,6 +95,153 @@ impl LockedHintTracker {
             (Some(true), true) => None,
         }
     }
+}
+
+#[derive(Debug)]
+pub(crate) struct LogindLockObserver {
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl Drop for LogindLockObserver {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+pub(crate) fn spawn_lock_observer<F, E>(mut publish: F, report_error: E) -> LogindLockObserver
+where
+    F: FnMut(SessionObservation) -> bool + Send + 'static,
+    E: FnOnce(LogindSessionError) + Send + 'static,
+{
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread_stop = Arc::clone(&stop);
+    let handle = thread::spawn(move || {
+        let result = new_system_bus_client()
+            .map_err(Into::into)
+            .and_then(|mut bus| run_lock_observer_process(&mut bus, &mut publish, &thread_stop));
+        if let Err(err) = result {
+            report_error(err);
+        }
+    });
+
+    LogindLockObserver {
+        stop,
+        handle: Some(handle),
+    }
+}
+
+fn run_lock_observer_process<F>(
+    bus: &mut impl SessionBusClient,
+    publish: &mut F,
+    stop: &AtomicBool,
+) -> Result<(), LogindSessionError>
+where
+    F: FnMut(SessionObservation) -> bool,
+{
+    let explicit_session_id = std::env::var("XDG_SESSION_ID").ok();
+    let current_uid = current_effective_uid();
+    run_lock_observer_for_session(
+        bus,
+        publish,
+        stop,
+        explicit_session_id.as_deref(),
+        current_uid,
+    )
+}
+
+fn run_lock_observer_for_session<F>(
+    bus: &mut impl SessionBusClient,
+    publish: &mut F,
+    stop: &AtomicBool,
+    explicit_session_id: Option<&str>,
+    current_uid: u32,
+) -> Result<(), LogindSessionError>
+where
+    F: FnMut(SessionObservation) -> bool,
+{
+    add_logind_owner_signal_match(bus)?;
+    let (mut session, owner, initial_locked) =
+        bind_lock_target(bus, explicit_session_id, current_uid)?;
+    let mut logind_owner = Some(owner);
+
+    let mut tracker = LockedHintTracker::default();
+    if !publish_locked_hint(publish, &mut tracker, initial_locked) {
+        return Ok(());
+    }
+
+    while !stop.load(Ordering::SeqCst) {
+        let Some(signal) = bus.process(LOGIND_LOCK_PROCESS_INTERVAL)? else {
+            continue;
+        };
+
+        if let Some(new_owner) = logind_owner_changed(&signal) {
+            if new_owner.is_none() {
+                logind_owner = None;
+                continue;
+            }
+
+            let (new_session, owner, locked) =
+                bind_lock_target(bus, explicit_session_id, current_uid)?;
+            session = new_session;
+            logind_owner = Some(owner);
+            if !publish_locked_hint(publish, &mut tracker, locked) {
+                return Ok(());
+            }
+            continue;
+        }
+
+        let Some(logind_owner) = logind_owner.as_deref() else {
+            continue;
+        };
+        let Some(change) = map_locked_hint_change(&signal, &session, logind_owner) else {
+            continue;
+        };
+        let locked = match change {
+            LockedHintChange::Changed(locked) => locked,
+            LockedHintChange::Invalidated => locked_hint(bus, &session)?,
+        };
+        if !publish_locked_hint(publish, &mut tracker, locked) {
+            return Ok(());
+        }
+    }
+
+    Ok(())
+}
+
+fn bind_lock_target(
+    bus: &mut impl SessionBusClient,
+    explicit_session_id: Option<&str>,
+    current_uid: u32,
+) -> Result<(LogindSession, String, bool), LogindSessionError> {
+    let session = resolve_current_graphical_session(bus, explicit_session_id, current_uid)?;
+    let owner = resolve_logind_owner(bus)?;
+    add_locked_hint_signal_match(bus, &session, &owner)?;
+    let locked = locked_hint(bus, &session)?;
+    Ok((session, owner, locked))
+}
+
+fn publish_locked_hint<F>(publish: &mut F, tracker: &mut LockedHintTracker, locked: bool) -> bool
+where
+    F: FnMut(SessionObservation) -> bool,
+{
+    let Some(event) = tracker.observe(locked) else {
+        return true;
+    };
+
+    publish(SessionObservation::Event {
+        event,
+        source: EventSource::LinuxLogind,
+        observed_at: Instant::now(),
+    })
+}
+
+fn current_effective_uid() -> u32 {
+    // SAFETY: `geteuid` has no preconditions and does not mutate process state.
+    unsafe { libc::geteuid() }
 }
 
 pub fn logind_signal_match() -> BusSignalMatch<'static> {
@@ -443,19 +598,21 @@ mod tests {
         acquire_sleep_delay_inhibitor, add_locked_hint_signal_match, add_logind_owner_signal_match,
         add_logind_signal_match, locked_hint, locked_hint_signal_match, logind_owner_changed,
         logind_owner_signal_match, logind_signal_match, map_locked_hint_change,
-        map_prepare_for_sleep_signal, resolve_current_graphical_session, LockedHintChange,
-        LockedHintTracker, LogindSession, LogindSessionError, LOGIND_INHIBIT_WHO,
-        LOGIND_INHIBIT_WHY, LOGIND_MANAGER_INTERFACE, LOGIND_MANAGER_PATH, LOGIND_SERVICE_NAME,
-        LOGIND_SESSION_INTERFACE,
+        map_prepare_for_sleep_signal, resolve_current_graphical_session,
+        run_lock_observer_for_session, LockedHintChange, LockedHintTracker, LogindSession,
+        LogindSessionError, LOGIND_INHIBIT_WHO, LOGIND_INHIBIT_WHY, LOGIND_MANAGER_INTERFACE,
+        LOGIND_MANAGER_PATH, LOGIND_SERVICE_NAME, LOGIND_SESSION_INTERFACE,
     };
     use super::{preparing_for_sleep, DBUS_PROPERTIES_INTERFACE};
     use crate::events::{EventSource, RuntimeEvent, RuntimeEventKind};
+    use crate::session::{SessionEvent, SessionObservation};
     use crate::session_bus::{
         BusMethodCall, BusReply, BusSignal, BusSignalMatch, BusValue, SessionBusClient,
         SessionBusError, DBUS_INTERFACE, DBUS_OBJECT_PATH, DBUS_SERVICE_NAME,
     };
     use std::collections::VecDeque;
     use std::os::fd::AsRawFd;
+    use std::sync::atomic::AtomicBool;
     use std::time::Duration;
 
     const LOGIND_OWNER: &str = ":1.42";
@@ -465,6 +622,7 @@ mod tests {
         calls: Vec<(String, String, String, String, Vec<BusValue>)>,
         matches: Vec<OwnedBusSignalMatch>,
         replies: VecDeque<BusReply>,
+        process_results: VecDeque<Result<Option<BusSignal>, SessionBusError>>,
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -510,7 +668,9 @@ mod tests {
         }
 
         fn process(&mut self, _timeout: Duration) -> Result<Option<BusSignal>, SessionBusError> {
-            unreachable!("process is not used by logind tests")
+            self.process_results
+                .pop_front()
+                .expect("test should provide every expected bus process result")
         }
     }
 
@@ -970,6 +1130,125 @@ mod tests {
         assert_eq!(
             map_locked_hint_change(&changed.clone().with_sender(":1.99"), &target, LOGIND_OWNER),
             None
+        );
+    }
+
+    #[test]
+    fn lock_observer_reconciles_initial_locked_hint() {
+        let target = session("34");
+        let mut bus = FakeBus::default();
+        bus.replies.extend([
+            BusReply::new(vec![BusValue::ObjectPath(target.path.clone())]),
+            session_properties_reply(1000, false, "wayland", "user", true),
+            BusReply::new(vec![BusValue::String(LOGIND_OWNER.to_string())]),
+            BusReply::new(vec![variant(BusValue::Bool(true))]),
+        ]);
+        let stop = AtomicBool::new(true);
+        let mut observations = Vec::new();
+
+        run_lock_observer_for_session(
+            &mut bus,
+            &mut |observation| {
+                observations.push(observation);
+                true
+            },
+            &stop,
+            Some("34"),
+            1000,
+        )
+        .expect("initial LockedHint should be reconciled before the signal loop");
+
+        assert!(matches!(
+            observations.as_slice(),
+            [SessionObservation::Event {
+                event: SessionEvent::Lock,
+                source: EventSource::LinuxLogind,
+                ..
+            }]
+        ));
+        assert_eq!(bus.matches.len(), 2);
+        assert_eq!(
+            bus.calls
+                .iter()
+                .map(|call| call.3.as_str())
+                .collect::<Vec<_>>(),
+            vec!["GetSession", "GetAll", "GetNameOwner", "Get"]
+        );
+    }
+
+    #[test]
+    fn lock_observer_rebinds_after_logind_restarts() {
+        let target = session("34");
+        let bind_replies = |owner: &str| {
+            [
+                BusReply::new(vec![BusValue::ObjectPath(target.path.clone())]),
+                session_properties_reply(1000, false, "wayland", "user", true),
+                BusReply::new(vec![BusValue::String(owner.to_string())]),
+                BusReply::new(vec![variant(BusValue::Bool(false))]),
+            ]
+        };
+        let mut bus = FakeBus::default();
+        bus.replies.extend(bind_replies(LOGIND_OWNER));
+        bus.replies.extend(bind_replies(":1.99"));
+        bus.process_results.extend([
+            Ok(Some(owner_changed(LOGIND_SERVICE_NAME, LOGIND_OWNER, ""))),
+            Ok(Some(owner_changed(LOGIND_SERVICE_NAME, "", ":1.99"))),
+            Ok(Some(
+                properties_changed(
+                    &target,
+                    vec![(
+                        BusValue::String("LockedHint".to_string()),
+                        variant(BusValue::Bool(true)),
+                    )],
+                    Vec::new(),
+                )
+                .with_sender(":1.99"),
+            )),
+            Err(SessionBusError::Transport("stop test loop".to_string())),
+        ]);
+        let stop = AtomicBool::new(false);
+        let mut observations = Vec::new();
+
+        assert_eq!(
+            run_lock_observer_for_session(
+                &mut bus,
+                &mut |observation| {
+                    observations.push(observation);
+                    true
+                },
+                &stop,
+                Some("34"),
+                1000,
+            ),
+            Err(LogindSessionError::Bus(SessionBusError::Transport(
+                "stop test loop".to_string()
+            )))
+        );
+
+        assert!(matches!(
+            observations.as_slice(),
+            [SessionObservation::Event {
+                event: SessionEvent::Lock,
+                source: EventSource::LinuxLogind,
+                ..
+            }]
+        ));
+        assert_eq!(bus.matches.len(), 3);
+        assert_eq!(
+            bus.calls
+                .iter()
+                .map(|call| call.3.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "GetSession",
+                "GetAll",
+                "GetNameOwner",
+                "Get",
+                "GetSession",
+                "GetAll",
+                "GetNameOwner",
+                "Get",
+            ]
         );
     }
 
