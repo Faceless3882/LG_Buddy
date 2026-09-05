@@ -278,6 +278,7 @@ impl LifecycleEvent {
             RuntimeEventKind::MachinePreparingForSleep => Some(Self::MachinePreparingForSleep),
             RuntimeEventKind::MachineResumed => Some(Self::MachineResumed),
             RuntimeEventKind::SessionIdle
+            | RuntimeEventKind::SessionTimedPowerOff
             | RuntimeEventKind::SessionActive
             | RuntimeEventKind::SessionLocked
             | RuntimeEventKind::SessionUnlocked

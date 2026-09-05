@@ -8,11 +8,13 @@ import argparse
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
 DEFAULT_STATE = {
     "emissions": [],
+    "linger_seconds": 0.0,
 }
 
 
@@ -85,6 +87,7 @@ def main(argv: list[str]) -> int:
         return 2
 
     emit_planned_events(state, timeout_command, resume_command)
+    time.sleep(float(state.get("linger_seconds", 0.0)))
     save_state(state_path, state)
     return 0
 

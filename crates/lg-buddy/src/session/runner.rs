@@ -5,6 +5,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::os::fd::OwnedFd;
 use std::path::Path;
+use std::process;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc, Arc, Mutex,
@@ -55,9 +56,17 @@ const LIFECYCLE_MONITOR_TEST_TIMEOUT_SECS_ENV: &str =
 const LIFECYCLE_MONITOR_TEST_EVENT_LIMIT_ENV: &str = "LG_BUDDY_LIFECYCLE_MONITOR_TEST_EVENT_LIMIT";
 const GAMEPAD_ACTIVITY_SOURCE_ENV: &str = "LG_BUDDY_GAMEPAD_ACTIVITY_SOURCE";
 const GAMEPAD_ACTIVITY_TEST_AFTER_SECS_ENV: &str = "LG_BUDDY_GAMEPAD_ACTIVITY_TEST_AFTER_SECS";
+const TIMED_POWER_OFF_TEST_AFTER_SECS_ENV: &str = "LG_BUDDY_TIMED_POWER_OFF_TEST_AFTER_SECS";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreenOffResult {
+    pub output: String,
+    pub blank_succeeded: bool,
+}
 
 pub trait SessionActionExecutor {
-    fn screen_off(&mut self, event: RuntimeEvent) -> Result<String, RunError>;
+    fn screen_off(&mut self, event: RuntimeEvent) -> Result<ScreenOffResult, RunError>;
+    fn timed_power_off(&mut self, event: RuntimeEvent) -> Result<String, RunError>;
     fn screen_on(&mut self, event: RuntimeEvent) -> Result<String, RunError>;
     fn before_sleep(&mut self, event: RuntimeEvent) -> Result<String, RunError>;
     fn after_resume(&mut self, event: RuntimeEvent) -> Result<String, RunError>;
@@ -77,8 +86,18 @@ pub trait SessionActionExecutor {
 pub struct RuntimeActionExecutor;
 
 impl SessionActionExecutor for RuntimeActionExecutor {
-    fn screen_off(&mut self, event: RuntimeEvent) -> Result<String, RunError> {
-        run_action(|writer| crate::screen::run_screen_off_from_env_for_event(writer, event))
+    fn screen_off(&mut self, event: RuntimeEvent) -> Result<ScreenOffResult, RunError> {
+        let mut output = Vec::new();
+        let result =
+            crate::screen::run_screen_off_from_env_for_event_with_result(&mut output, event)?;
+        Ok(ScreenOffResult {
+            output: String::from_utf8_lossy(&output).into_owned(),
+            blank_succeeded: result.blank_succeeded,
+        })
+    }
+
+    fn timed_power_off(&mut self, event: RuntimeEvent) -> Result<String, RunError> {
+        run_action(|writer| crate::screen::run_timed_power_off_from_env_for_event(writer, event))
     }
 
     fn screen_on(&mut self, event: RuntimeEvent) -> Result<String, RunError> {
@@ -196,26 +215,14 @@ impl<E: SessionActionExecutor> SessionEventDispatcher<E> {
         match event {
             SessionEvent::Idle => {
                 writeln!(writer, "LG Buddy Monitor: Session became idle.")?;
-                let runtime_event = RuntimeEvent::from_session_event(source, event);
-                match self.executor.screen_off(runtime_event) {
-                    Ok(output) => write_command_output(writer, &output)?,
-                    Err(err) => {
-                        writeln!(writer, "LG Buddy Monitor: screen-off action failed. {err}")?
-                    }
-                }
+                let _ = self.dispatch_screen_off(writer, source, event)?;
             }
             SessionEvent::Lock => {
                 writeln!(
                     writer,
                     "LG Buddy Monitor: Session locked; requesting screen blank."
                 )?;
-                let runtime_event = RuntimeEvent::from_session_event(source, event);
-                match self.executor.screen_off(runtime_event) {
-                    Ok(output) => write_command_output(writer, &output)?,
-                    Err(err) => {
-                        writeln!(writer, "LG Buddy Monitor: screen-off action failed. {err}")?
-                    }
-                }
+                let _ = self.dispatch_screen_off(writer, source, event)?;
             }
             SessionEvent::Active | SessionEvent::WakeRequested | SessionEvent::UserActivity => {
                 writeln!(
@@ -268,6 +275,43 @@ impl<E: SessionActionExecutor> SessionEventDispatcher<E> {
             }
         }
 
+        Ok(())
+    }
+
+    fn dispatch_screen_off<W: Write>(
+        &mut self,
+        writer: &mut W,
+        source: EventSource,
+        event: SessionEvent,
+    ) -> Result<bool, SessionRunnerError> {
+        let runtime_event = RuntimeEvent::from_session_event(source, event);
+        match self.executor.screen_off(runtime_event) {
+            Ok(result) => {
+                write_command_output(writer, &result.output)?;
+                Ok(result.blank_succeeded)
+            }
+            Err(err) => {
+                writeln!(writer, "LG Buddy Monitor: screen-off action failed. {err}")?;
+                Ok(false)
+            }
+        }
+    }
+
+    fn dispatch_timed_power_off<W: Write>(
+        &mut self,
+        writer: &mut W,
+    ) -> Result<(), SessionRunnerError> {
+        let event = RuntimeEvent::new(
+            EventSource::DesktopSession,
+            crate::events::RuntimeEventKind::SessionTimedPowerOff,
+        );
+        match self.executor.timed_power_off(event) {
+            Ok(output) => write_command_output(writer, &output)?,
+            Err(err) => writeln!(
+                writer,
+                "LG Buddy Monitor: timed power-off action failed. {err}"
+            )?,
+        }
         Ok(())
     }
 
@@ -625,7 +669,12 @@ fn run_monitor_with_executor<W: Write, E: SessionActionExecutor>(
                         })?;
                         return run_wayland_monitor(writer, &mut dispatcher, connection);
                     }
-                    ScreenBackend::Swayidle => return run_swayidle_monitor(writer),
+                    ScreenBackend::Swayidle => {
+                        let mut dispatcher = SessionEventDispatcher::new(
+                            executor.take().expect("executor available"),
+                        );
+                        return run_swayidle_monitor(writer, &mut dispatcher);
+                    }
                     ScreenBackend::Auto => {
                         return Err(SessionRunnerError::Failed {
                             backend: ScreenBackend::Auto,
@@ -773,12 +822,53 @@ where
     S: FnOnce(mpsc::Sender<RunnerMessage>, Arc<LatestInactivityObservation>) -> JoinHandle<()>,
     L: FnOnce(mpsc::Sender<RunnerMessage>) -> Option<LogindLockObserver>,
 {
+    run_session_monitor_with_lock_monitor(
+        writer,
+        dispatcher,
+        backend,
+        InitialBlankTrigger::Deadline,
+        spawn_monitor,
+        spawn_lock_monitor,
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InitialBlankTrigger {
+    Deadline,
+    Provider,
+}
+
+fn run_session_monitor_with_lock_monitor<W, E, S, L>(
+    writer: &mut W,
+    dispatcher: &mut SessionEventDispatcher<E>,
+    backend: ScreenBackend,
+    initial_blank_trigger: InitialBlankTrigger,
+    spawn_monitor: S,
+    spawn_lock_monitor: L,
+) -> Result<(), SessionRunnerError>
+where
+    W: Write,
+    E: SessionActionExecutor,
+    S: FnOnce(mpsc::Sender<RunnerMessage>, Arc<LatestInactivityObservation>) -> JoinHandle<()>,
+    L: FnOnce(mpsc::Sender<RunnerMessage>) -> Option<LogindLockObserver>,
+{
     let blank_after = Duration::from_millis(resolve_idle_timeout_ms());
+    let power_off_after = resolve_timed_power_off_after();
     let started_at = Instant::now();
-    let mut inactivity = if session_screen_ownership_marker_exists(backend)? {
-        InactivityEngine::new_with_restore_pending(blank_after, started_at)
+    let marker_exists = session_screen_ownership_marker_exists(backend)?;
+    let mut inactivity = if marker_exists && initial_blank_trigger == InitialBlankTrigger::Provider
+    {
+        InactivityEngine::new_provider_driven_with_restore_pending(power_off_after, started_at)
+    } else if marker_exists {
+        InactivityEngine::new_with_restore_pending_and_power_off_after(
+            blank_after,
+            power_off_after,
+            started_at,
+        )
+    } else if initial_blank_trigger == InitialBlankTrigger::Provider {
+        InactivityEngine::new_provider_driven(power_off_after, started_at)
     } else {
-        InactivityEngine::new(blank_after, started_at)
+        InactivityEngine::new_with_power_off_after(blank_after, power_off_after, started_at)
     };
 
     let (sender, receiver) = mpsc::channel();
@@ -789,7 +879,7 @@ where
     let mut monitor_result = Ok(());
 
     loop {
-        let message = match inactivity.time_until_blank(Instant::now()) {
+        let message = match inactivity.time_until_action(Instant::now()) {
             Some(wait) => match receiver.recv_timeout(wait) {
                 Ok(message) => message,
                 Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -831,10 +921,20 @@ where
             )?,
             RunnerMessage::SessionEvent {
                 event: SessionEvent::Idle,
+                source,
                 ..
             } => {
-                // Provider idle is observational. Only LG Buddy's inactivity
-                // deadline decides when to blank.
+                if initial_blank_trigger == InitialBlankTrigger::Provider
+                    && inactivity.observe_provider_idle() == InactivityDecision::BlankNow
+                {
+                    handle_blank_request(
+                        writer,
+                        dispatcher,
+                        &mut inactivity,
+                        source,
+                        SessionEvent::Idle,
+                    )?;
+                }
             }
             RunnerMessage::SessionEvent {
                 event: SessionEvent::Active,
@@ -902,22 +1002,50 @@ where
     monitor_result
 }
 
-fn run_swayidle_monitor<W: Write>(writer: &mut W) -> Result<(), SessionRunnerError> {
+fn run_swayidle_monitor<W: Write, E: SessionActionExecutor>(
+    writer: &mut W,
+    dispatcher: &mut SessionEventDispatcher<E>,
+) -> Result<(), SessionRunnerError> {
     let idle_timeout_secs = resolve_idle_timeout_secs();
-    let current_exe = std::env::current_exe()?;
+    let marker = ScreenOwnershipMarker::from_env(StateScope::Session).map_err(|err| {
+        SessionRunnerError::Failed {
+            backend: ScreenBackend::Swayidle,
+            message: format!("failed to resolve swayidle event path: {err}"),
+        }
+    })?;
+    let event_path = marker
+        .state_dir()
+        .join(format!("swayidle-session-events-{}", process::id()));
 
     writeln!(
         writer,
         "LG Buddy Monitor: Using swayidle backend (timeout: {idle_timeout_secs}s)."
     )?;
 
-    run_swayidle_source(idle_timeout_secs, &current_exe).map_err(|err| match err {
-        SwayidleSourceError::Io(err) => SessionRunnerError::Io(err.to_string()),
-        SwayidleSourceError::Exited(_) => SessionRunnerError::Failed {
-            backend: ScreenBackend::Swayidle,
-            message: err.to_string(),
+    run_session_monitor_with_lock_monitor(
+        writer,
+        dispatcher,
+        ScreenBackend::Swayidle,
+        InitialBlankTrigger::Provider,
+        move |sender, _latest_observation| {
+            thread::spawn(move || {
+                let event_sender = sender.clone();
+                let result =
+                    run_swayidle_source(idle_timeout_secs, &event_path, move |observation| {
+                        send_source_observation(&event_sender, observation)
+                    })
+                    .map_err(|err| match err {
+                        SwayidleSourceError::Io(err) => SessionRunnerError::Io(err.to_string()),
+                        SwayidleSourceError::Exited(_) => SessionRunnerError::Failed {
+                            backend: ScreenBackend::Swayidle,
+                            message: err.to_string(),
+                        },
+                    });
+                let _ = sender.send(RunnerMessage::MonitorExited(result));
+            })
         },
-    })
+        |sender| Some(spawn_logind_lock_monitor(sender)),
+    )
 }
 
 fn map_gnome_source_error(err: GnomeSourceError) -> SessionRunnerError {
@@ -962,6 +1090,15 @@ fn session_screen_ownership_marker_exists(
 
 fn resolve_idle_timeout_ms() -> u64 {
     resolve_idle_timeout_secs().saturating_mul(1000)
+}
+
+fn resolve_timed_power_off_after() -> Duration {
+    std::env::var(TIMED_POWER_OFF_TEST_AFTER_SECS_ENV)
+        .ok()
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .and_then(|value| Duration::try_from_secs_f64(value).ok())
+        .unwrap_or(InactivityEngine::DEFAULT_POWER_OFF_AFTER)
 }
 
 fn resolve_lifecycle_monitor_test_timeout() -> Option<Duration> {
@@ -1474,10 +1611,12 @@ fn handle_inactivity_observation<W: Write, E: SessionActionExecutor>(
     observation: InactivityObservation,
     observed_at: Instant,
 ) -> Result<(), SessionRunnerError> {
+    let canceled_power_off = inactivity.timed_power_off_pending();
     let decision = inactivity.observe_activity(observation, observed_at);
     let event = match (observation, decision) {
         (_, InactivityDecision::NoOp) => None,
         (_, InactivityDecision::BlankNow) => None,
+        (_, InactivityDecision::TimedPowerOffNow) => None,
         (InactivityObservation::ProviderActive, InactivityDecision::RestoreNow) => {
             Some(SessionEvent::Active)
         }
@@ -1492,6 +1631,12 @@ fn handle_inactivity_observation<W: Write, E: SessionActionExecutor>(
     };
 
     if let Some(event) = event {
+        if canceled_power_off {
+            writeln!(
+                writer,
+                "LG Buddy Monitor: Activity canceled the pending timed power-off."
+            )?;
+        }
         dispatcher.dispatch_event_from_source(writer, source, event)?;
     }
 
@@ -1504,8 +1649,22 @@ fn handle_inactivity_timeout<W: Write, E: SessionActionExecutor>(
     inactivity: &mut InactivityEngine,
     observed_at: Instant,
 ) -> Result<(), SessionRunnerError> {
-    if inactivity.observe_time(observed_at) == InactivityDecision::BlankNow {
-        dispatcher.dispatch_event(writer, SessionEvent::Idle)?;
+    match inactivity.observe_time(observed_at) {
+        InactivityDecision::BlankNow => handle_blank_request(
+            writer,
+            dispatcher,
+            inactivity,
+            EventSource::DesktopSession,
+            SessionEvent::Idle,
+        )?,
+        InactivityDecision::TimedPowerOffNow => {
+            writeln!(
+                writer,
+                "LG Buddy Monitor: Timed power-off deadline reached; rechecking ownership, input, and lifecycle eligibility."
+            )?;
+            dispatcher.dispatch_timed_power_off(writer)?;
+        }
+        InactivityDecision::RestoreNow | InactivityDecision::NoOp => {}
     }
 
     Ok(())
@@ -1519,7 +1678,41 @@ fn handle_session_lock<W: Write, E: SessionActionExecutor>(
     observed_at: Instant,
 ) -> Result<(), SessionRunnerError> {
     if inactivity.observe_lock(observed_at) == InactivityDecision::BlankNow {
-        dispatcher.dispatch_event_from_source(writer, source, SessionEvent::Lock)?;
+        handle_blank_request(writer, dispatcher, inactivity, source, SessionEvent::Lock)?;
+    }
+
+    Ok(())
+}
+
+fn handle_blank_request<W: Write, E: SessionActionExecutor>(
+    writer: &mut W,
+    dispatcher: &mut SessionEventDispatcher<E>,
+    inactivity: &mut InactivityEngine,
+    source: EventSource,
+    event: SessionEvent,
+) -> Result<(), SessionRunnerError> {
+    match event {
+        SessionEvent::Idle => writeln!(writer, "LG Buddy Monitor: Session became idle.")?,
+        SessionEvent::Lock => writeln!(
+            writer,
+            "LG Buddy Monitor: Session locked; requesting screen blank."
+        )?,
+        _ => unreachable!("only idle and lock request automatic blanking"),
+    }
+
+    let blank_succeeded = dispatcher.dispatch_screen_off(writer, source, event)?;
+    inactivity.complete_blank(blank_succeeded, Instant::now());
+    if blank_succeeded {
+        writeln!(
+            writer,
+            "LG Buddy Monitor: Screen blank succeeded; timed power-off scheduled in {}s.",
+            resolve_timed_power_off_after().as_secs_f64()
+        )?;
+    } else {
+        writeln!(
+            writer,
+            "LG Buddy Monitor: Screen was not blanked; timed power-off was not scheduled."
+        )?;
     }
 
     Ok(())
@@ -1571,6 +1764,7 @@ mod tests {
     use crate::sources::linux::logind::{
         LogindSessionError, LOGIND_MANAGER_INTERFACE, LOGIND_MANAGER_PATH, LOGIND_SERVICE_NAME,
     };
+    use crate::state::ScreenOwnershipMarker;
     use crate::RunError;
     use std::collections::VecDeque;
     use std::fs;
@@ -1596,6 +1790,11 @@ mod tests {
         before_sleep_events: Vec<RuntimeEvent>,
         after_resume_events: Vec<RuntimeEvent>,
         screen_off_output: String,
+        screen_off_blank_succeeded: bool,
+        timed_power_off_calls: usize,
+        timed_power_off_events: Vec<RuntimeEvent>,
+        timed_power_off_output: String,
+        timed_power_off_error: Option<String>,
         screen_on_output: String,
         before_sleep_output: String,
         after_resume_output: String,
@@ -1618,13 +1817,25 @@ mod tests {
     }
 
     impl SessionActionExecutor for FakeActionExecutor {
-        fn screen_off(&mut self, event: RuntimeEvent) -> Result<String, RunError> {
+        fn screen_off(&mut self, event: RuntimeEvent) -> Result<super::ScreenOffResult, RunError> {
             self.screen_off_calls += 1;
             self.screen_off_events.push(event);
             if let Some(message) = &self.screen_off_error {
                 return Err(RunError::Policy(message.clone()));
             }
-            Ok(self.screen_off_output.clone())
+            Ok(super::ScreenOffResult {
+                output: self.screen_off_output.clone(),
+                blank_succeeded: self.screen_off_blank_succeeded,
+            })
+        }
+
+        fn timed_power_off(&mut self, event: RuntimeEvent) -> Result<String, RunError> {
+            self.timed_power_off_calls += 1;
+            self.timed_power_off_events.push(event);
+            if let Some(message) = &self.timed_power_off_error {
+                return Err(RunError::Policy(message.clone()));
+            }
+            Ok(self.timed_power_off_output.clone())
         }
 
         fn screen_on(&mut self, event: RuntimeEvent) -> Result<String, RunError> {
@@ -2324,6 +2535,135 @@ system_sleep_wake_policy={policy}
     }
 
     #[test]
+    fn successful_blank_dispatches_one_timed_power_off_after_the_grace_period() {
+        let executor = FakeActionExecutor {
+            screen_off_blank_succeeded: true,
+            timed_power_off_output: "timed power-off output\n".to_string(),
+            ..FakeActionExecutor::default()
+        };
+        let mut dispatcher = SessionEventDispatcher::new(executor);
+        let started_at = Instant::now();
+        let mut inactivity = InactivityEngine::new_with_power_off_after(
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            started_at,
+        );
+        let mut output = Vec::new();
+
+        handle_inactivity_timeout(
+            &mut output,
+            &mut dispatcher,
+            &mut inactivity,
+            started_at + Duration::from_secs(1),
+        )
+        .expect("blank at inactivity deadline");
+        handle_inactivity_timeout(
+            &mut output,
+            &mut dispatcher,
+            &mut inactivity,
+            started_at + Duration::from_secs(2),
+        )
+        .expect("power off at post-blank deadline");
+        handle_inactivity_timeout(
+            &mut output,
+            &mut dispatcher,
+            &mut inactivity,
+            started_at + Duration::from_secs(3),
+        )
+        .expect("do not retry timed power-off");
+
+        assert_eq!(dispatcher.executor.screen_off_calls, 1);
+        assert_eq!(dispatcher.executor.timed_power_off_calls, 1);
+        assert_eq!(
+            dispatcher.executor.timed_power_off_events,
+            vec![RuntimeEvent::new(
+                EventSource::DesktopSession,
+                RuntimeEventKind::SessionTimedPowerOff,
+            )]
+        );
+        let output = String::from_utf8(output).expect("utf8");
+        assert!(output.contains("Timed power-off deadline reached"));
+        assert!(output.contains("timed power-off output"));
+    }
+
+    #[test]
+    fn unsuccessful_blank_does_not_dispatch_timed_power_off() {
+        let mut dispatcher = SessionEventDispatcher::new(FakeActionExecutor::default());
+        let started_at = Instant::now();
+        let mut inactivity = InactivityEngine::new_with_power_off_after(
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            started_at,
+        );
+        let mut output = Vec::new();
+
+        handle_inactivity_timeout(
+            &mut output,
+            &mut dispatcher,
+            &mut inactivity,
+            started_at + Duration::from_secs(1),
+        )
+        .expect("screen-off skip completes");
+        handle_inactivity_timeout(
+            &mut output,
+            &mut dispatcher,
+            &mut inactivity,
+            started_at + Duration::from_secs(30),
+        )
+        .expect("no escalation follows the skip");
+
+        assert_eq!(dispatcher.executor.timed_power_off_calls, 0);
+        assert!(String::from_utf8(output)
+            .expect("utf8")
+            .contains("timed power-off was not scheduled"));
+    }
+
+    #[test]
+    fn activity_cancels_timed_power_off_before_restoring() {
+        let executor = FakeActionExecutor {
+            screen_off_blank_succeeded: true,
+            ..FakeActionExecutor::default()
+        };
+        let mut dispatcher = SessionEventDispatcher::new(executor);
+        let started_at = Instant::now();
+        let mut inactivity = InactivityEngine::new_with_power_off_after(
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            started_at,
+        );
+        let mut output = Vec::new();
+
+        handle_inactivity_timeout(
+            &mut output,
+            &mut dispatcher,
+            &mut inactivity,
+            started_at + Duration::from_secs(1),
+        )
+        .expect("blank at inactivity deadline");
+        handle_inactivity_observation(
+            &mut output,
+            &mut dispatcher,
+            &mut inactivity,
+            EventSource::AuxiliaryInput,
+            InactivityObservation::UserActivityObserved,
+            started_at + Duration::from_millis(1_500),
+        )
+        .expect("cancel and restore on activity");
+        handle_inactivity_timeout(
+            &mut output,
+            &mut dispatcher,
+            &mut inactivity,
+            started_at + Duration::from_secs(2),
+        )
+        .expect("canceled escalation remains canceled");
+
+        assert_eq!(dispatcher.executor.timed_power_off_calls, 0);
+        assert_eq!(dispatcher.executor.screen_on_calls, 1);
+        let output = String::from_utf8(output).expect("utf8");
+        assert!(output.contains("Activity canceled the pending timed power-off"));
+    }
+
+    #[test]
     fn desktop_activity_restores_and_resets_the_timeout() {
         let executor = FakeActionExecutor {
             screen_off_output: "screen-off output\n".to_string(),
@@ -2474,6 +2814,52 @@ system_sleep_wake_policy={policy}
             vec![RuntimeEvent::new(
                 EventSource::AuxiliaryInput,
                 RuntimeEventKind::UserActivityObserved,
+            )]
+        );
+    }
+
+    #[test]
+    fn native_wayland_shared_runtime_applies_restart_power_off_grace() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let runtime_dir = unique_config_path("native-wayland-timed-power-off");
+        let marker = ScreenOwnershipMarker::new(runtime_dir.clone());
+        marker.create().expect("create session ownership marker");
+        std::env::set_var("LG_BUDDY_SESSION_RUNTIME_DIR", &runtime_dir);
+        std::env::set_var("LG_BUDDY_IDLE_TIMEOUT", "300");
+        std::env::set_var(super::TIMED_POWER_OFF_TEST_AFTER_SECS_ENV, "0.05");
+        std::env::set_var(super::GAMEPAD_ACTIVITY_SOURCE_ENV, "disabled");
+
+        let mut dispatcher = SessionEventDispatcher::new(FakeActionExecutor::default());
+        let mut output = Vec::new();
+        let result = run_native_session_monitor_with_lock_monitor(
+            &mut output,
+            &mut dispatcher,
+            ScreenBackend::Wayland,
+            |sender, _latest_inactivity| {
+                thread::spawn(move || {
+                    thread::sleep(Duration::from_millis(150));
+                    let _ = sender.send(RunnerMessage::MonitorExited(Ok(())));
+                })
+            },
+            |_| None,
+        );
+
+        std::env::remove_var("LG_BUDDY_SESSION_RUNTIME_DIR");
+        std::env::remove_var("LG_BUDDY_IDLE_TIMEOUT");
+        std::env::remove_var(super::TIMED_POWER_OFF_TEST_AFTER_SECS_ENV);
+        std::env::remove_var(super::GAMEPAD_ACTIVITY_SOURCE_ENV);
+        fs::remove_dir_all(&runtime_dir).expect("remove runtime directory");
+
+        result.expect("native Wayland shared runtime should process the deadline");
+        assert_eq!(dispatcher.executor.screen_off_calls, 0);
+        assert_eq!(dispatcher.executor.timed_power_off_calls, 1);
+        assert_eq!(
+            dispatcher.executor.timed_power_off_events,
+            vec![RuntimeEvent::new(
+                EventSource::DesktopSession,
+                RuntimeEventKind::SessionTimedPowerOff,
             )]
         );
     }

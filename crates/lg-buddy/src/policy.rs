@@ -67,6 +67,7 @@ pub enum ActionKind {
     TvScreenBlank,
     TvScreenRestore,
     TvPowerOffFallback,
+    TvTimedIdlePowerOff,
     TvInputRestore,
     WakeOnLan,
     TvSystemSleepPowerOff,

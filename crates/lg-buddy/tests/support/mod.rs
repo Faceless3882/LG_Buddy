@@ -266,6 +266,7 @@ impl MockSwayidle {
         };
         mock.save_state(json!({
             "emissions": [],
+            "linger_seconds": 0.0,
         }));
         mock
     }
@@ -298,6 +299,15 @@ impl MockSwayidle {
 
     pub fn queue_resume_emission(&self) {
         self.queue_emission("resume");
+    }
+
+    pub fn set_linger_seconds(&self, seconds: f64) {
+        let mut state = self.load_state();
+        state
+            .as_object_mut()
+            .expect("mock swayidle state object")
+            .insert("linger_seconds".to_string(), json!(seconds));
+        self.save_state(state);
     }
 
     fn script_path() -> PathBuf {

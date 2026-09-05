@@ -198,7 +198,10 @@ impl WebOsTestTv {
                     return webos_error(request_id, "401 insufficient permissions", json!({}));
                 }
                 assert_eq!(payload, &json!({}));
-                assert_eq!(self.power_state, WebOsPowerState::Active);
+                assert!(matches!(
+                    self.power_state,
+                    WebOsPowerState::Active | WebOsPowerState::ScreenOff
+                ));
                 response(
                     request_id,
                     json!({
@@ -220,7 +223,10 @@ impl WebOsTestTv {
                         "keys": ["backlight"],
                     })
                 );
-                assert_eq!(self.power_state, WebOsPowerState::Active);
+                assert!(matches!(
+                    self.power_state,
+                    WebOsPowerState::Active | WebOsPowerState::ScreenOff
+                ));
                 response(
                     request_id,
                     json!({
@@ -484,7 +490,10 @@ impl WebOsTestTv {
             POWER_OFF_URI => {
                 require_top_level_permission(permissions, "CONTROL_POWER", uri);
                 assert_eq!(payload, &json!({}));
-                assert_eq!(self.power_state, WebOsPowerState::Active);
+                assert!(matches!(
+                    self.power_state,
+                    WebOsPowerState::Active | WebOsPowerState::ScreenOff
+                ));
                 self.power_state = WebOsPowerState::PowerOff;
                 response(request_id, json!({"returnValue": true}))
             }

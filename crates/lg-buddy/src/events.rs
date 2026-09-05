@@ -59,6 +59,7 @@ pub enum RuntimeEventKind {
     MachineResumed,
     NetworkTeardownImminent { machine_sleep_pending: Option<bool> },
     SessionIdle,
+    SessionTimedPowerOff,
     SessionActive,
     SessionLocked,
     SessionUnlocked,

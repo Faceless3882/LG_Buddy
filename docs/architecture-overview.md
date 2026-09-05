@@ -156,7 +156,7 @@ flowchart LR
                 NMGATE["sources/linux/network_manager.rs<br/>pre-down event source"]
                 GADAPTER["sources/desktop/gnome.rs<br/>GNOME bus + observation source"]
                 WADAPTER["sources/desktop/wayland.rs<br/>Wayland registry + observation source"]
-                SADAPTER["sources/desktop/swayidle.rs<br/>delegated process source"]
+                SADAPTER["sources/desktop/swayidle.rs<br/>process fact source"]
             end
         end
 
@@ -213,7 +213,8 @@ flowchart LR
 
     RUNNER -->|"starts"| SADAPTER
     SADAPTER --> SWAY
-    SWAY -->|"delegated timeout / resume<br/>screen off / screen on CLI"| MAIN
+    SWAY -->|"timeout / resume facts"| SADAPTER
+    SADAPTER -->|"SessionObservation"| RUNNER
     INPUT --> GAMEPAD
     GAMEPAD -->|"UserActivity"| RUNNER
     NOTIFICATIONS --> FDO_NOTIFY
@@ -222,7 +223,7 @@ flowchart LR
     RUNNER --> SESSIONNOTIFY
     SESSIONMODEL --> RUNNER
 
-    RUNNER -->|"Idle / Active / WakeRequested /<br/>UserActivity / Lock"| SCREEN
+    RUNNER -->|"Idle / Active / WakeRequested /<br/>UserActivity / Lock / TimedPowerOff"| SCREEN
     RUNNER -->|"AfterResume"| LIFECYCLE
     COMMANDS --> CONFIG
     COMMANDS --> STATE
@@ -328,9 +329,11 @@ The intended split is:
   - top-level event consumption is mapped separately in
     [runtime-event-handler-map.md](runtime-event-handler-map.md)
 - `session/inactivity.rs`
-  - owns the configured inactivity deadline
+  - owns the configured inactivity deadline and fixed five-minute post-blank
+    power-off deadline
   - resets the deadline from normalized activity observations and blanks when
     it expires
+  - arms power-off only after confirmed blank success and cancels it on activity
   - keeps blank and restore decisions edge-triggered instead of poll-triggered
 - `session/gamepad/`
   - discovers readable Linux gamepad-like input devices
@@ -370,8 +373,8 @@ The intended split is:
   - native Wayland capability probing and dynamic registry/seat ownership
   - maps zero-timeout resumed notifications into desktop activity facts
 - `sources/desktop/swayidle.rs`
-  - owns the production `swayidle` process and its timeout/resume command shape
-  - delegates actions through the CLI/API command path
+  - owns the production `swayidle` process and translates timeout/resume
+    callbacks into idle/activity facts
 
 The session-facing pieces should be read as one subsystem:
 
@@ -386,13 +389,13 @@ The session-facing pieces should be read as one subsystem:
   - owns gamepad device discovery, event-triggered refresh, and reconciliation
   - see [gamepad-subsystem.md](gamepad-subsystem.md) for adapter and lifecycle details
 - `session/runner.rs`
-  - owns shared native-session orchestration, including source selection,
+  - owns shared session orchestration, including source selection,
     worker lifetime, multiplexing, and gamepad activity
   - converts provider and auxiliary input into activity observations, resets
     the inactivity deadline, and dispatches source-classified runtime policy
   - treats `screen_idle_blank=disabled` as a passive user-session mode that
     preserves update notification handoff without TV idle blank/restore actions
-  - treats delegated `swayidle` as a CLI/API client for timeout/resume actions
+  - consumes `swayidle` timeout/resume facts through the same inactivity policy
   - owns the `lifecycle` event loop for system sleep/wake handling
 - `sources/linux/logind.rs`
   - adapts Linux system lifecycle signals and owns observation of an eligible
@@ -400,7 +403,7 @@ The session-facing pieces should be read as one subsystem:
 - `sources/desktop/gnome.rs`, `sources/desktop/wayland.rs`, and
   `sources/desktop/swayidle.rs`
   - own their provider-specific connection or process mechanics and expose
-    normalized observations or delegated CLI/API execution to the runner
+    normalized observations to the runner
 
 ## Command Model
 
@@ -576,6 +579,15 @@ Flow:
 7. If another input is active:
    - clear the marker
    - do nothing to the TV
+
+After a successful automatic blank, the inactivity engine starts a fixed
+five-minute grace period. Activity cancels it before restore. At expiry,
+`screen.rs` rechecks that automatic blanking is enabled, the session marker is
+present, the configured input is still active, and machine lifecycle allows a
+session action. It then attempts `power_off` once and preserves the marker for
+later activity restore. Input mismatch clears ownership; input-query failure
+skips without a blind power-off fallback. A monitor restart with an existing
+marker starts a fresh grace period.
 
 ### `screen on`
 
@@ -856,18 +868,9 @@ Wayland connection, registry, every advertised seat, and zero-timeout idle
 notifications. Resumed notifications become desktop activity observations in
 the shared inactivity runtime; compositor idle does not directly blank the TV.
 
-`sources/desktop/swayidle.rs` is the delegated-tool adapter. It currently provides:
-
-- production process invocation with command strings pointing back to the
-  current LG Buddy executable:
-
-- `screen off` for timeout
-- `screen on` for resume
-
-That means `swayidle` acts as a CLI/API client of LG Buddy. It is delegated, but
-not a separate quirks path for screen policy: the invoked commands load config
-and state normally, construct canonical CLI/API runtime events, and enter
-`screen.rs` through the same command surface as manual invocations.
+`sources/desktop/swayidle.rs` is the compatibility process adapter. Its timeout
+callback publishes `Idle`; its resume callback publishes independent desktop
+activity. The adapter does not invoke TV-facing commands or own screen policy.
 
 The session subsystem is intentionally asymmetric where the providers are
 asymmetric:
@@ -875,9 +878,9 @@ asymmetric:
 - the current GNOME provider treats ScreenSaver active/wake and recent Mutter
   input as activity that resets LG Buddy's inactivity deadline; ScreenSaver
   idle is not a blanking authority
-- the shared native-session runtime consumes gamepad activity directly from
+- the shared session runtime consumes gamepad activity directly from
   Linux input devices as `AuxiliaryInput`, independently of desktop providers;
-  GNOME and native Wayland use this runtime
+  every enabled monitor backend uses this runtime
 - the same runtime opportunistically observes `LockedHint` on the current
   graphical logind session; lock requests the normal session blank policy,
   unlock is informational, fresh independent activity can restore while locked,
@@ -885,10 +888,9 @@ asymmetric:
   or lack of support does not affect the selected desktop backend
 - the gamepad source refreshes its device set from Linux device add, remove, and
   change events, with periodic reconciliation for missed events
-- delegated `swayidle` monitor execution is implemented as CLI/API delegation
-  for `timeout` and `resume` parity with the shell monitor
+- `swayidle` timeout and resume callbacks feed the shared inactivity engine
 - system lifecycle is handled by the NetworkManager pre-down gate plus logind
-  lifecycle service, while lock state is optional in the shared native runtime
+  lifecycle service, while lock state is optional in the shared session runtime
 
 `swayidle` remains an explicit and automatic compatibility fallback during the
 1.x migration window, but emits a deprecation notice and is not offered by
@@ -972,7 +974,6 @@ The shell layer still owns:
 
 What is still not implemented:
 
-- `swayidle` `before-sleep`, `after-resume`, `lock`, and `unlock` handling
 - additional desktop backends
 - an immutable-distribution install layout that avoids conventional `/usr`
   writes

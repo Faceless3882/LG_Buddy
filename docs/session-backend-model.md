@@ -64,7 +64,7 @@ These are the semantic events the runtime should reason about.
   - Some providers expose an explicit wake request.
   - Others only expose idle/resume transitions.
 - Lock state is an optional cross-cutting Linux source, not a prerequisite of a
-  selected desktop backend. The shared native runtime observes the resolved
+  selected desktop backend. The shared session runtime observes the resolved
   graphical logind session's `LockedHint` when available. Initial or changed
   `true` maps to `Lock`; `false` maps to `Unlock` only after a prior locked
   state. Unlock is informational and never requests screen restore.
@@ -76,11 +76,11 @@ canonical session event or inactivity fact, an `EventSource`, and the time it
 was observed. Source modules do not decide whether to blank or restore the
 screen.
 
-GNOME and native Wayland feed the shared runner. LG Buddy owns their configured
-inactivity deadline. The delegated `swayidle` source instead receives the same
-configured timeout and invokes LG Buddy's existing `screen off` and `screen on`
-CLI/API commands. Startup and wake retry delays remain runtime policy and are
-unrelated to session-source timing.
+GNOME and native Wayland feed activity facts to the shared runner, which owns
+their configured inactivity deadline. `swayidle` owns its initial timeout but
+publishes `Idle` and independent desktop-activity observations back to the same
+runner. All three backends therefore share blank, restore, and post-blank
+power-off policy.
 
 ## Provider Map
 
@@ -90,7 +90,7 @@ This is the current mapping for the known backends, with implementation status c
 | --- | --- | --- | --- | --- | --- | --- |
 | GNOME | Observed but not authoritative | Yes | Yes | Yes | Optional logind source | Shared runner owns the configured deadline over ScreenSaver and Mutter observations |
 | Native Wayland | Observed but not authoritative | Resumed notification | No | Yes | Optional logind source | Shared runner owns the configured deadline using `ext_idle_notifier_v1` version 2 or newer |
-| `swayidle` | Delegated timeout command | Delegated resume command | No | No direct equivalent | No shared logind observer | Source-owned process receives the configured timeout and invokes the CLI/API screen commands |
+| `swayidle` | Timeout becomes `Idle` | Resume becomes independent desktop activity | No | No direct equivalent | Optional logind source | Source process owns the configured initial timeout; shared runner owns policy and post-blank timing |
 
 ## Provider-Specific Mapping
 
@@ -120,7 +120,7 @@ Notes:
 ### Auxiliary Activity Sources
 
 Linux gamepad input is a desktop-independent auxiliary activity source. The
-shared native-session runtime owns its lifecycle and feeds
+shared session runtime owns its lifecycle and feeds
 `UserActivityObserved` into the same inactivity engine as the selected desktop
 provider. Resulting runtime events retain the `AuxiliaryInput` source.
 
@@ -130,13 +130,13 @@ reconciles in case an event is missed. Standard controller input is read from
 evdev. Logitech G923 wheel and pedal activity has a narrow raw HID fallback for
 hosts where those reports do not appear on the evdev node.
 
-GNOME and native Wayland use the shared native-session runtime. The Wayland
+GNOME, native Wayland, and `swayidle` use the shared session runtime. The Wayland
 provider owns only its connection, registry, seats, notifications, and activity
 facts; it does not acquire gamepad responsibility.
 
 ### Session Lock State
 
-GNOME and native Wayland also start an optional system-bus observer for the
+Every enabled monitor backend also starts an optional system-bus observer for the
 current graphical logind session. Session selection accepts only an active,
 local `x11` or `wayland` session in a user class and owned by the current UID.
 An explicit `XDG_SESSION_ID` is validated against those rules; without it, LG
@@ -172,8 +172,7 @@ monitoring. If the desktop or locker never updates `LockedHint`, no lock event i
 observed and ordinary monitoring likewise continues unchanged. It does not use
 desktop-name checks, logind lock-request signals, locker hooks, or a Wayland
 session-lock protocol. The logind observer is not a backend eligibility or
-selection requirement. The delegated `swayidle` path does not host the shared
-native observer.
+selection requirement.
 
 ### Native Wayland
 
@@ -195,8 +194,8 @@ Current mapping:
 
 | Provider surface | Canonical meaning | Current Rust Status |
 | --- | --- | --- |
-| `timeout <n> <cmd>` | Invoke `lg-buddy screen off` | Implemented |
-| `resume <cmd>` | Invoke `lg-buddy screen on` | Implemented |
+| `timeout <n> <cmd>` | Publish `Idle` to the shared runner | Implemented |
+| `resume <cmd>` | Publish independent desktop activity to the shared runner | Implemented |
 
 Notes:
 
@@ -206,6 +205,9 @@ Notes:
 - `swayidle` does not provide a clear equivalent of GNOME's `WakeRequested`.
 - `swayidle` does not provide a Mutter-style early activity surface.
 - LG Buddy owns the configured timeout value for this backend.
+- The shared runner owns lock observation, screen policy, and the post-blank
+  power-off deadline. Gamepad activity can cancel that second deadline, but
+  does not reset swayidle's source-owned initial timeout.
 
 ## Module Ownership
 
@@ -229,7 +231,7 @@ The code split is:
     including bus setup, session resolution, rebinding, and `LockedHint`
     translation
 - `crates/lg-buddy/src/sources/desktop/swayidle.rs`
-  - production `swayidle` process invocation and timeout/resume command shape
+  - production `swayidle` process invocation and timeout/resume fact transport
 
 This keeps backend-specific details out of runtime policy and prevents each
 backend from quietly defining its own semantics.

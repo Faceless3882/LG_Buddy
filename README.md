@@ -8,7 +8,8 @@ LG Buddy can:
 
 - turn the TV on at boot and wake
 - turn the TV off at shutdown and before system sleep
-- blank and restore the panel on supported desktop idle backends
+- blank and restore the panel on supported desktop idle backends, then power it
+  off after five additional minutes without activity
 - keep the panel awake when supported gamepads are active
 - adjust OLED pixel brightness from a desktop dialog or the command line
 - control TV volume and mute from the command line
