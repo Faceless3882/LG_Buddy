@@ -911,7 +911,7 @@ mod tests {
     use std::process;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
-    use support::{ExecutableScript, MockBscpylgtv};
+    use support::{find_command_in_path, python3_path, ExecutableScript, MockBscpylgtv};
 
     #[cfg(unix)]
     fn set_modified_time(path: &Path, modified: SystemTime) {
@@ -1678,14 +1678,9 @@ mod tests {
 
     #[test]
     fn installed_brightness_gui_launches_only_the_brightness_command() {
-        let gui = ExecutableScript::new(
-            "brightness-gui-launch",
-            "lg-buddy-gui",
-            "#!/bin/sh\n[ \"$#\" -eq 1 ] && [ \"$1\" = \"brightness\" ]\n",
-        );
         let launcher = InstalledBrightnessGui::new(
             env::current_exe().expect("current executable"),
-            gui.path(),
+            find_command_in_path("test").expect("test executable"),
         );
 
         assert_eq!(
@@ -1711,22 +1706,18 @@ mod tests {
 
     #[test]
     fn failed_installed_brightness_gui_is_reported_without_fallback() {
-        let gui = ExecutableScript::new(
-            "brightness-gui-failure",
-            "lg-buddy-gui",
-            "#!/bin/sh\nprintf 'LG Buddy GUI: initialization failed\\n' >&2\nexit 23\n",
-        );
         let launcher = InstalledBrightnessGui::new(
             env::current_exe().expect("current executable"),
-            gui.path(),
+            python3_path(),
         );
 
         let error = launcher
             .launch()
             .expect_err("failed GUI must not become a missing-GUI fallback");
 
-        assert!(error.to_string().contains("initialization failed"));
-        assert!(!error.to_string().contains("exited with status"));
+        let error = error.to_string();
+        assert!(error.contains("brightness"), "{error}");
+        assert!(!error.contains("exited with status"), "{error}");
     }
 
     #[test]

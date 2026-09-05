@@ -1686,7 +1686,7 @@ pub fn prime_isolated_path_dependencies() {
     let _ = dbus_daemon_path();
 }
 
-fn python3_path() -> PathBuf {
+pub fn python3_path() -> PathBuf {
     static PYTHON3_PATH: OnceLock<PathBuf> = OnceLock::new();
 
     PYTHON3_PATH
@@ -1711,7 +1711,7 @@ fn dbus_daemon_path() -> PathBuf {
         .clone()
 }
 
-fn find_command_in_path(command: &str) -> Option<PathBuf> {
+pub fn find_command_in_path(command: &str) -> Option<PathBuf> {
     if command.contains(std::path::MAIN_SEPARATOR) {
         let path = PathBuf::from(command);
         return path.is_file().then_some(path);
