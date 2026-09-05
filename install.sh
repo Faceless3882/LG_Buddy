@@ -156,6 +156,12 @@ APPLICATIONS_DIR="$(prefix_path "/usr/share/applications")"
 DESKTOP_ENTRY_NAME="io.github.staphylococcus.LGBuddy.desktop"
 DESKTOP_ENTRY_PATH="${APPLICATIONS_DIR}/${DESKTOP_ENTRY_NAME}"
 LEGACY_DESKTOP_ENTRY_PATH="${APPLICATIONS_DIR}/LG_Buddy_Brightness.desktop"
+DESKTOP_ENTRY_SOURCE="${SCRIPT_DIR}/${DESKTOP_ENTRY_NAME}"
+if [ ! -f "$DESKTOP_ENTRY_SOURCE" ]; then
+    # Release archives retain this internal name for compatibility with
+    # updaters shipped before the application-ID filename was adopted.
+    DESKTOP_ENTRY_SOURCE="${SCRIPT_DIR}/LG_Buddy_Brightness.desktop"
+fi
 APP_ICON_DIR="$(prefix_path "/usr/share/icons/hicolor/scalable/apps")"
 APP_ICON_PATH="${APP_ICON_DIR}/${APP_ICON_NAME}"
 USER_DESKTOP_ENTRY_PATH="${HOME}/Desktop/${DESKTOP_ENTRY_NAME}"
@@ -639,15 +645,15 @@ if [ "$UPGRADE_MODE" -eq 0 ]; then
 fi
 echo "Installing brightness control desktop entry..."
 run_privileged install -d "$APPLICATIONS_DIR"
-run_privileged install -m 644 "$SCRIPT_DIR/LG_Buddy_Brightness.desktop" "$DESKTOP_ENTRY_PATH"
+run_privileged install -m 644 "$DESKTOP_ENTRY_SOURCE" "$DESKTOP_ENTRY_PATH"
 run_privileged rm -f "$LEGACY_DESKTOP_ENTRY_PATH"
 run_privileged install -d "$APP_ICON_DIR"
 run_privileged install -m 644 "$APP_ICON" "$APP_ICON_PATH"
 if [ "$UPGRADE_MODE" -eq 0 ]; then
-    cp "$SCRIPT_DIR/LG_Buddy_Brightness.desktop" "$USER_DESKTOP_ENTRY_PATH" 2>/dev/null || true
+    cp "$DESKTOP_ENTRY_SOURCE" "$USER_DESKTOP_ENTRY_PATH" 2>/dev/null || true
     rm -f "$LEGACY_USER_DESKTOP_ENTRY_PATH"
 elif [ -f "$USER_DESKTOP_ENTRY_PATH" ] || [ -f "$LEGACY_USER_DESKTOP_ENTRY_PATH" ]; then
-    cp "$SCRIPT_DIR/LG_Buddy_Brightness.desktop" "$USER_DESKTOP_ENTRY_PATH"
+    cp "$DESKTOP_ENTRY_SOURCE" "$USER_DESKTOP_ENTRY_PATH"
     rm -f "$LEGACY_USER_DESKTOP_ENTRY_PATH"
 fi
 echo "Done."

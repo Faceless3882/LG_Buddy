@@ -79,7 +79,10 @@ install -m 755 "$REPO_ROOT/install.sh" "$BUNDLE_DIR/install.sh"
 install -m 755 "$REPO_ROOT/configure.sh" "$BUNDLE_DIR/configure.sh"
 install -m 755 "$REPO_ROOT/uninstall.sh" "$BUNDLE_DIR/uninstall.sh"
 install -m 755 "$REPO_ROOT/bin/LG_Buddy_Common" "$BUNDLE_DIR/bin/LG_Buddy_Common"
-install -m 644 "$REPO_ROOT/LG_Buddy_Brightness.desktop" "$BUNDLE_DIR/LG_Buddy_Brightness.desktop"
+# Keep the legacy archive member name until pre-1.5 updaters no longer need to
+# validate new bundles. install.sh still installs the application-ID filename.
+install -m 644 "$REPO_ROOT/io.github.staphylococcus.LGBuddy.desktop" \
+    "$BUNDLE_DIR/LG_Buddy_Brightness.desktop"
 install -m 644 "$REPO_ROOT/README.md" "$BUNDLE_DIR/README.md"
 install -m 644 "$REPO_ROOT/LICENSE" "$BUNDLE_DIR/LICENSE"
 cp -R "$REPO_ROOT/docs/." "$BUNDLE_DIR/docs/"

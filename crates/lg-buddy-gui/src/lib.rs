@@ -17,6 +17,7 @@ use lg_buddy::brightness::{
 use lg_buddy::presentation::brightness::{BrightnessFrontendUpdate, BrightnessIntent};
 
 pub const APPLICATION_ID: &str = "io.github.staphylococcus.LGBuddy";
+pub const APPLICATION_NAME: &str = "LG Buddy";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GuiCommand {
@@ -79,6 +80,7 @@ pub fn run(command: GuiCommand) -> glib::ExitCode {
 }
 
 fn run_brightness_application() -> glib::ExitCode {
+    glib::set_application_name(APPLICATION_NAME);
     let application = adw::Application::builder()
         .application_id(APPLICATION_ID)
         .build();
