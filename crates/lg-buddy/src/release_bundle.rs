@@ -1199,7 +1199,7 @@ fn rewind_clone(file: &File) -> Result<File, BundleAcquisitionError> {
 #[derive(Debug)]
 struct StagingDirectory {
     path: PathBuf,
-    _lock: File,
+    lock: File,
     device: u64,
     inode: u64,
 }
@@ -1246,7 +1246,7 @@ impl StagingDirectory {
                     }
                     return Ok(Self {
                         path,
-                        _lock: lock,
+                        lock,
                         device: metadata.dev(),
                         inode: metadata.ino(),
                     });
@@ -1273,6 +1273,7 @@ impl Drop for StagingDirectory {
         }) {
             let _ = fs::remove_dir_all(&self.path);
         }
+        let _ = unsafe { libc::flock(self.lock.as_raw_fd(), libc::LOCK_UN) };
     }
 }
 
@@ -3437,6 +3438,23 @@ mod tests {
         assert!(cache_root.join(LOCK_FILE_NAME).is_file());
         let next = StagingDirectory::create(&cache_root).expect("next staging");
         drop(next);
+        fs::remove_dir_all(dir).expect("remove test directory");
+    }
+
+    #[test]
+    fn staging_drop_unlocks_a_duplicated_descriptor() {
+        let dir = temp_dir("staging-lock-duplicate");
+        let cache_root = dir.join("cache");
+        let staging = StagingDirectory::create(&cache_root).expect("create staging");
+        // A descriptor inherited across fork has the same locking semantics.
+        let duplicate = staging.lock.try_clone().expect("duplicate lock descriptor");
+
+        drop(staging);
+        let next = StagingDirectory::create(&cache_root)
+            .expect("explicit unlock must permit immediate reacquisition");
+
+        drop(next);
+        drop(duplicate);
         fs::remove_dir_all(dir).expect("remove test directory");
     }
 
