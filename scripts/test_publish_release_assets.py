@@ -13,12 +13,19 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from release_bundle_manifest import MANIFEST_NAME, ReleaseIdentity, render_manifest
+from release_bundle_manifest import (
+    MANIFEST_NAME,
+    ReleaseIdentity,
+    gui_bundle_path,
+    render_manifest,
+)
+from test_release_bundle_manifest import embedded_binary
 
 
 VERSION = "9.8.7-beta.1"
 TAG = f"v{VERSION}"
 TARGET = "x86_64-unknown-linux-musl"
+GUI_TARGET = "x86_64-unknown-linux-gnu"
 
 
 FAKE_GH = r"""#!/usr/bin/env python3
@@ -156,14 +163,21 @@ class PublishReleaseAssetsTests(unittest.TestCase):
             channel="prerelease",
             target=TARGET,
             commit=self.commit,
+            gui_target=GUI_TARGET,
         )
         bundle_name = f"lg-buddy-{VERSION}-{TARGET}"
         self.archive = self.dist / f"{bundle_name}.tar.gz"
         manifest = render_manifest(identity)
         with tarfile.open(self.archive, mode="w:gz") as bundle:
-            info = tarfile.TarInfo(f"{bundle_name}/{MANIFEST_NAME}")
-            info.size = len(manifest)
-            bundle.addfile(info, io.BytesIO(manifest))
+            for relative, content in (
+                (MANIFEST_NAME, manifest),
+                ("lg-buddy", embedded_binary(identity, TARGET)),
+                (gui_bundle_path(GUI_TARGET), embedded_binary(identity, GUI_TARGET)),
+            ):
+                info = tarfile.TarInfo(f"{bundle_name}/{relative}")
+                info.mode = 0o644 if relative == MANIFEST_NAME else 0o755
+                info.size = len(content)
+                bundle.addfile(info, io.BytesIO(content))
 
         digest = hashlib.sha256(self.archive.read_bytes()).hexdigest()
         self.checksums = self.dist / "sha256sums.txt"

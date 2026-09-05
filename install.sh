@@ -11,14 +11,22 @@ NONINTERACTIVE="${LG_BUDDY_NONINTERACTIVE:-0}"
 SKIP_SYSTEMD_ACTIONS="${LG_BUDDY_SKIP_SYSTEMD_ACTIONS:-0}"
 SKIP_PIP_INSTALL="${LG_BUDDY_SKIP_PIP_INSTALL:-0}"
 DEFAULT_RUNTIME_BINARY="$SCRIPT_DIR/lg-buddy"
-DEFAULT_GUI_BINARY="$SCRIPT_DIR/lg-buddy-gui"
+GUI_TARGET="x86_64-unknown-linux-gnu"
+DEFAULT_GUI_BINARY="$SCRIPT_DIR/docs/lg-buddy-gui-$GUI_TARGET"
+APP_ICON_NAME="io.github.staphylococcus.LGBuddy.svg"
+DEFAULT_APP_ICON="$SCRIPT_DIR/data/icons/hicolor/scalable/apps/$APP_ICON_NAME"
+if [ ! -f "$DEFAULT_APP_ICON" ]; then
+    DEFAULT_APP_ICON="$SCRIPT_DIR/docs/$APP_ICON_NAME"
+fi
 RUNTIME_BINARY="$DEFAULT_RUNTIME_BINARY"
 GUI_BINARY="$DEFAULT_GUI_BINARY"
+APP_ICON="$DEFAULT_APP_ICON"
 RUNTIME_BINARY_OVERRIDDEN=0
 GUI_BINARY_OVERRIDDEN=0
 UPGRADE_MODE=0
 MUTATION_STARTED=0
 UPGRADE_COMPLETED=0
+GUI_BINARY_STAGED_TMP=""
 
 usage() {
     cat <<EOF
@@ -31,7 +39,8 @@ Options:
 
 Defaults:
   --runtime-binary defaults to ./lg-buddy next to install.sh
-  --gui-binary defaults to ./lg-buddy-gui next to install.sh
+  --gui-binary defaults to ./docs/lg-buddy-gui-x86_64-unknown-linux-gnu
+               in an official release bundle
 EOF
     exit 1
 }
@@ -144,7 +153,13 @@ NM_PRE_DOWN_DIR="$(prefix_path "/etc/NetworkManager/dispatcher.d/pre-down.d")"
 NM_SLEEP_HOOK_PATH="${NM_PRE_DOWN_DIR}/LG_Buddy_sleep"
 NM_LIFECYCLE_HOOK_PATH="${NM_PRE_DOWN_DIR}/LG_Buddy_lifecycle"
 APPLICATIONS_DIR="$(prefix_path "/usr/share/applications")"
-DESKTOP_ENTRY_PATH="${APPLICATIONS_DIR}/LG_Buddy_Brightness.desktop"
+DESKTOP_ENTRY_NAME="io.github.staphylococcus.LGBuddy.desktop"
+DESKTOP_ENTRY_PATH="${APPLICATIONS_DIR}/${DESKTOP_ENTRY_NAME}"
+LEGACY_DESKTOP_ENTRY_PATH="${APPLICATIONS_DIR}/LG_Buddy_Brightness.desktop"
+APP_ICON_DIR="$(prefix_path "/usr/share/icons/hicolor/scalable/apps")"
+APP_ICON_PATH="${APP_ICON_DIR}/${APP_ICON_NAME}"
+USER_DESKTOP_ENTRY_PATH="${HOME}/Desktop/${DESKTOP_ENTRY_NAME}"
+LEGACY_USER_DESKTOP_ENTRY_PATH="${HOME}/Desktop/LG_Buddy_Brightness.desktop"
 USER_SYSTEMD_DIR="${HOME}/.config/systemd/user"
 USER_SCREEN_SERVICE_PATH="${USER_SYSTEMD_DIR}/LG_Buddy_screen.service"
 USER_SCREEN_OVERRIDE_DIR="${USER_SYSTEMD_DIR}/LG_Buddy_screen.service.d"
@@ -262,9 +277,8 @@ resolve_gui_binary() {
         exit 1
     fi
 
-    if [ ! -r "$GUI_BINARY" ] || [ ! -x "$GUI_BINARY" ]; then
-        echo "LG Buddy GUI binary is not readable and executable: $GUI_BINARY"
-        echo "Provide a regular executable lg-buddy-gui binary."
+    if [ ! -r "$GUI_BINARY" ]; then
+        echo "LG Buddy GUI binary is not readable: $GUI_BINARY"
         exit 1
     fi
 
@@ -272,6 +286,17 @@ resolve_gui_binary() {
         echo "LG Buddy GUI binary is writable by its group or by other users: $GUI_BINARY"
         echo "Remove unsafe write permissions before installing."
         exit 1
+    fi
+
+    if [ ! -x "$GUI_BINARY" ]; then
+        if [ "$GUI_BINARY_OVERRIDDEN" -eq 1 ]; then
+            echo "LG Buddy GUI binary is not executable: $GUI_BINARY"
+            echo "Provide a regular executable lg-buddy-gui binary."
+            exit 1
+        fi
+        GUI_BINARY_STAGED_TMP="$(mktemp)"
+        install -m 700 "$GUI_BINARY" "$GUI_BINARY_STAGED_TMP"
+        GUI_BINARY="$GUI_BINARY_STAGED_TMP"
     fi
 
     if [ "$GUI_BINARY" -ef "$RUNTIME_BINARY" ]; then
@@ -282,6 +307,20 @@ resolve_gui_binary() {
     echo "Using lg-buddy GUI binary: $GUI_BINARY"
 }
 
+resolve_app_icon() {
+    if [ -L "$APP_ICON" ] || [ ! -f "$APP_ICON" ]; then
+        echo "LG Buddy application icon is missing or is not a regular file: $APP_ICON"
+        exit 1
+    fi
+
+    if [ ! -r "$APP_ICON" ]; then
+        echo "LG Buddy application icon is not readable: $APP_ICON"
+        exit 1
+    fi
+
+    echo "Using LG Buddy application icon: $APP_ICON"
+}
+
 validate_candidate_binary_identity() {
     if ! CANDIDATE_VERSION_OUTPUT="$("$RUNTIME_BINARY" --version)"; then
         echo "LG Buddy runtime binary could not report its version identity: $RUNTIME_BINARY"
@@ -289,7 +328,7 @@ validate_candidate_binary_identity() {
     fi
     if ! GUI_VERSION_OUTPUT="$("$GUI_BINARY" --version)"; then
         echo "LG Buddy GUI binary could not report its version identity: $GUI_BINARY"
-        echo "Ensure GTK 4.10 or newer and libadwaita 1 runtime libraries are installed."
+        echo "Ensure GTK 4.14 or newer and libadwaita 1.5 or newer are installed."
         exit 1
     fi
     if [ "$GUI_VERSION_OUTPUT" != "$CANDIDATE_VERSION_OUTPUT" ]; then
@@ -418,6 +457,10 @@ cleanup() {
         rm -f "$NM_HOOK_TMP"
     fi
 
+    if [ -n "$GUI_BINARY_STAGED_TMP" ]; then
+        rm -f "$GUI_BINARY_STAGED_TMP"
+    fi
+
     if [ "$status" -ne 0 ] && [ "$UPGRADE_MODE" -eq 1 ] && [ "$MUTATION_STARTED" -eq 1 ] && [ "$UPGRADE_COMPLETED" -eq 0 ]; then
         echo "LG Buddy upgrade did not complete after installation changes began." >&2
         echo "The installation may be partial; rerun this verified bundle with --upgrade after correcting the reported failure." >&2
@@ -437,6 +480,7 @@ if [ "$UPGRADE_MODE" -eq 1 ]; then
     echo "Running candidate upgrade preflight..."
     "$RUNTIME_BINARY" upgrade-preflight "$SCRIPT_DIR"
     resolve_gui_binary
+    resolve_app_icon
     validate_candidate_binary_identity
     load_upgrade_configuration
 
@@ -451,6 +495,7 @@ if [ "$UPGRADE_MODE" -eq 1 ]; then
     fi
 else
     resolve_gui_binary
+    resolve_app_icon
     validate_candidate_binary_identity
     check_fresh_install_prerequisites
 
@@ -595,10 +640,15 @@ fi
 echo "Installing brightness control desktop entry..."
 run_privileged install -d "$APPLICATIONS_DIR"
 run_privileged install -m 644 "$SCRIPT_DIR/LG_Buddy_Brightness.desktop" "$DESKTOP_ENTRY_PATH"
+run_privileged rm -f "$LEGACY_DESKTOP_ENTRY_PATH"
+run_privileged install -d "$APP_ICON_DIR"
+run_privileged install -m 644 "$APP_ICON" "$APP_ICON_PATH"
 if [ "$UPGRADE_MODE" -eq 0 ]; then
-    cp "$SCRIPT_DIR/LG_Buddy_Brightness.desktop" ~/Desktop/ 2>/dev/null || true
-elif [ -f "$HOME/Desktop/LG_Buddy_Brightness.desktop" ]; then
-    cp "$SCRIPT_DIR/LG_Buddy_Brightness.desktop" "$HOME/Desktop/LG_Buddy_Brightness.desktop"
+    cp "$SCRIPT_DIR/LG_Buddy_Brightness.desktop" "$USER_DESKTOP_ENTRY_PATH" 2>/dev/null || true
+    rm -f "$LEGACY_USER_DESKTOP_ENTRY_PATH"
+elif [ -f "$USER_DESKTOP_ENTRY_PATH" ] || [ -f "$LEGACY_USER_DESKTOP_ENTRY_PATH" ]; then
+    cp "$SCRIPT_DIR/LG_Buddy_Brightness.desktop" "$USER_DESKTOP_ENTRY_PATH"
+    rm -f "$LEGACY_USER_DESKTOP_ENTRY_PATH"
 fi
 echo "Done."
 

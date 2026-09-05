@@ -30,6 +30,9 @@ const GITHUB_ASSET_ACCEPT: &str = "application/octet-stream";
 const GITHUB_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const GITHUB_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const RELEASE_TARGET: &str = "x86_64-unknown-linux-musl";
+const GUI_TARGET: &str = "x86_64-unknown-linux-gnu";
+const GUI_BUNDLE_PATH: &str = "docs/lg-buddy-gui-x86_64-unknown-linux-gnu";
+const APP_ICON_BUNDLE_PATH: &str = "docs/io.github.staphylococcus.LGBuddy.svg";
 const CHECKSUM_ASSET_NAME: &str = "sha256sums.txt";
 const MANIFEST_NAME: &str = "release-manifest.json";
 const ACQUISITION_DIR_NAME: &str = "release-bundles";
@@ -239,6 +242,23 @@ pub(crate) fn verify_release_binary_identity(
     Ok(observed)
 }
 
+pub(crate) fn verify_release_gui_binary_identity(
+    binary: &Path,
+    expected: &ReleaseIdentity,
+) -> Result<ReleaseIdentity, BundleAcquisitionError> {
+    let gui_expected = ReleaseIdentity {
+        target: GUI_TARGET.to_string(),
+        ..expected.clone()
+    };
+    let observed = read_embedded_binary_identity(binary, GUI_TARGET, expected.release_tag())?;
+    if observed != gui_expected {
+        return Err(BundleAcquisitionError::Binary(format!(
+            "GUI identity {observed:?} does not match verified release identity {gui_expected:?}"
+        )));
+    }
+    Ok(observed)
+}
+
 fn acquisition_cache_root_from_env() -> Result<PathBuf, BundleAcquisitionError> {
     let base = std::env::var_os("XDG_CACHE_HOME")
         .filter(|value| !value.is_empty())
@@ -297,6 +317,21 @@ fn acquire_release_bundle_with<S: GitHubSource, B: BinaryIdentityReader>(
         return Err(BundleAcquisitionError::Binary(format!(
             "identity {:?} does not match verified release identity {:?}",
             observed, expected
+        )));
+    }
+    let gui_observed = binary_reader.read_identity(
+        &root.join(GUI_BUNDLE_PATH),
+        GUI_TARGET,
+        fresh_release.tag_name(),
+    )?;
+    let gui_expected = ReleaseIdentity {
+        target: GUI_TARGET.to_string(),
+        ..expected.clone()
+    };
+    if gui_observed != gui_expected {
+        return Err(BundleAcquisitionError::Binary(format!(
+            "GUI identity {:?} does not match verified release identity {:?}",
+            gui_observed, gui_expected
         )));
     }
 
@@ -1465,7 +1500,7 @@ fn inspect_archive(
                     "entry `{path}` ended before its declared size"
                 )));
             }
-            manifest = Some(parse_manifest(&contents)?);
+            manifest = Some(parse_manifest_document(&contents)?);
         } else if entry_type == EntryType::Regular {
             let copied = io::copy(&mut entry, &mut io::sink())
                 .map_err(|err| BundleAcquisitionError::Archive(err.to_string()))?;
@@ -1483,10 +1518,16 @@ fn inspect_archive(
     let manifest = manifest.ok_or_else(|| {
         BundleAcquisitionError::Manifest(format!("archive does not contain `{MANIFEST_NAME}`"))
     })?;
-    if &manifest != expected {
+    if &manifest.identity != expected {
         return Err(BundleAcquisitionError::Manifest(format!(
             "identity {:?} does not match selected release identity {:?}",
-            manifest, expected
+            manifest.identity, expected
+        )));
+    }
+    if manifest.gui_target.as_deref() != Some(GUI_TARGET) {
+        return Err(BundleAcquisitionError::Manifest(format!(
+            "GUI target {:?} must be `{GUI_TARGET}`",
+            manifest.gui_target
         )));
     }
     Ok(ArchivePlan {
@@ -1631,6 +1672,8 @@ fn validate_archive_layout(
 fn required_relative_files() -> &'static [&'static str] {
     &[
         "lg-buddy",
+        GUI_BUNDLE_PATH,
+        APP_ICON_BUNDLE_PATH,
         "install.sh",
         "configure.sh",
         "uninstall.sh",
@@ -1774,6 +1817,7 @@ fn reject_archive_trailing_data<R: Read>(reader: &mut R) -> Result<(), BundleAcq
 fn executable_relative_files() -> &'static [&'static str] {
     &[
         "lg-buddy",
+        GUI_BUNDLE_PATH,
         "install.sh",
         "configure.sh",
         "uninstall.sh",
@@ -1793,7 +1837,14 @@ struct RawManifest {
     version: Option<String>,
     channel: Option<String>,
     target: Option<String>,
+    gui_target: Option<String>,
     commit: Option<String>,
+}
+
+#[derive(Debug)]
+struct ReleaseManifest {
+    identity: ReleaseIdentity,
+    gui_target: Option<String>,
 }
 
 impl<'de> Deserialize<'de> for RawManifest {
@@ -1822,6 +1873,7 @@ impl<'de> Deserialize<'de> for RawManifest {
                     version: None,
                     channel: None,
                     target: None,
+                    gui_target: None,
                     commit: None,
                 };
                 while let Some(key) = map.next_key::<String>()? {
@@ -1837,6 +1889,7 @@ impl<'de> Deserialize<'de> for RawManifest {
                         "version" => manifest.version = Some(map.next_value()?),
                         "channel" => manifest.channel = Some(map.next_value()?),
                         "target" => manifest.target = Some(map.next_value()?),
+                        "gui_target" => manifest.gui_target = Some(map.next_value()?),
                         "commit" => manifest.commit = Some(map.next_value()?),
                         _ => {
                             map.next_value::<IgnoredAny>()?;
@@ -1852,6 +1905,16 @@ impl<'de> Deserialize<'de> for RawManifest {
 }
 
 fn parse_manifest(contents: &[u8]) -> Result<ReleaseIdentity, BundleAcquisitionError> {
+    let manifest = parse_manifest_document(contents)?;
+    if manifest.gui_target.is_some() {
+        return Err(BundleAcquisitionError::Manifest(
+            "embedded binary identity must not declare gui_target".to_string(),
+        ));
+    }
+    Ok(manifest.identity)
+}
+
+fn parse_manifest_document(contents: &[u8]) -> Result<ReleaseManifest, BundleAcquisitionError> {
     if contents.len() as u64 > MAX_MANIFEST_BYTES {
         return Err(BundleAcquisitionError::Manifest(format!(
             "manifest exceeds the {MAX_MANIFEST_BYTES}-byte limit"
@@ -1928,12 +1991,28 @@ fn parse_manifest(contents: &[u8]) -> Result<ReleaseIdentity, BundleAcquisitionE
     }
     let commit = required_manifest_string(manifest.commit, "commit")?;
     validate_commit_sha(&commit).map_err(BundleAcquisitionError::Manifest)?;
-    Ok(ReleaseIdentity {
-        release_tag,
-        version,
-        channel,
-        target,
-        commit,
+    let gui_target = match manifest.gui_target {
+        Some(gui_target) if !valid_target(&gui_target) => {
+            return Err(BundleAcquisitionError::Manifest(format!(
+                "invalid GUI target `{gui_target}`"
+            )));
+        }
+        Some(gui_target) if gui_target == target => {
+            return Err(BundleAcquisitionError::Manifest(
+                "runtime and GUI targets must be distinct".to_string(),
+            ));
+        }
+        gui_target => gui_target,
+    };
+    Ok(ReleaseManifest {
+        identity: ReleaseIdentity {
+            release_tag,
+            version,
+            channel,
+            target,
+            commit,
+        },
+        gui_target,
     })
 }
 
@@ -2218,6 +2297,18 @@ mod tests {
 
     fn manifest_json(identity: &ReleaseIdentity) -> Vec<u8> {
         format!(
+            "{{\"schema_version\":1,\"critical\":[\"release_tag\",\"version\",\"channel\",\"target\",\"commit\"],\"release_tag\":\"{}\",\"version\":\"{}\",\"channel\":\"{}\",\"target\":\"{}\",\"gui_target\":\"{GUI_TARGET}\",\"commit\":\"{}\"}}\n",
+            identity.release_tag,
+            identity.version,
+            identity.channel.as_str(),
+            identity.target,
+            identity.commit
+        )
+        .into_bytes()
+    }
+
+    fn identity_json(identity: &ReleaseIdentity) -> Vec<u8> {
+        format!(
             "{{\"schema_version\":1,\"critical\":[\"release_tag\",\"version\",\"channel\",\"target\",\"commit\"],\"release_tag\":\"{}\",\"version\":\"{}\",\"channel\":\"{}\",\"target\":\"{}\",\"commit\":\"{}\"}}\n",
             identity.release_tag,
             identity.version,
@@ -2318,6 +2409,11 @@ mod tests {
                 manifest_json(identity)
             } else if *relative == "lg-buddy" {
                 embedded_identity_binary(identity)
+            } else if *relative == GUI_BUNDLE_PATH {
+                embedded_identity_binary(&ReleaseIdentity {
+                    target: GUI_TARGET.to_string(),
+                    ..identity.clone()
+                })
             } else {
                 format!("fixture for {relative}\n").into_bytes()
             };
@@ -2482,7 +2578,7 @@ mod tests {
         let identity_offset = bytes.len() as u64;
         let mut record = Vec::new();
         record.extend_from_slice(EMBEDDED_IDENTITY_PREFIX);
-        record.extend_from_slice(&manifest_json(identity));
+        record.extend_from_slice(&identity_json(identity));
         record.extend_from_slice(EMBEDDED_IDENTITY_SUFFIX);
         bytes.extend_from_slice(&record);
         while !bytes.len().is_multiple_of(8) {
@@ -2564,6 +2660,7 @@ mod tests {
 
     struct FakeBinaryIdentityReader {
         identity: ReleaseIdentity,
+        gui_identity: Option<ReleaseIdentity>,
         calls: AtomicUsize,
     }
 
@@ -2571,8 +2668,14 @@ mod tests {
         fn new(identity: ReleaseIdentity) -> Self {
             Self {
                 identity,
+                gui_identity: None,
                 calls: AtomicUsize::new(0),
             }
+        }
+
+        fn with_gui_identity(mut self, identity: ReleaseIdentity) -> Self {
+            self.gui_identity = Some(identity);
+            self
         }
     }
 
@@ -2604,11 +2707,19 @@ mod tests {
         fn read_identity(
             &self,
             _binary: &Path,
-            _target: &str,
+            target: &str,
             _release_tag: &str,
         ) -> Result<ReleaseIdentity, BundleAcquisitionError> {
             self.calls.fetch_add(1, Ordering::Relaxed);
-            Ok(self.identity.clone())
+            let identity = if target == GUI_TARGET {
+                self.gui_identity.as_ref().unwrap_or(&self.identity)
+            } else {
+                &self.identity
+            };
+            Ok(ReleaseIdentity {
+                target: target.to_string(),
+                ..identity.clone()
+            })
         }
     }
 
@@ -3069,6 +3180,20 @@ mod tests {
         assert_eq!(
             fs::symlink_metadata(root.join("release-manifest.json"))
                 .expect("manifest metadata")
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::symlink_metadata(root.join(GUI_BUNDLE_PATH))
+                .expect("GUI metadata")
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::symlink_metadata(root.join(APP_ICON_BUNDLE_PATH))
+                .expect("application icon metadata")
                 .mode()
                 & 0o777,
             0o600
@@ -3615,6 +3740,49 @@ mod tests {
             Err(BundleAcquisitionError::Binary(_))
         ));
         assert_eq!(binary_reader.calls.load(Ordering::Relaxed), 1);
+        assert!(fs::read_dir(&cache_root)
+            .expect("read cache root")
+            .all(|entry| entry.expect("cache entry").file_name() == LOCK_FILE_NAME));
+        fs::remove_dir_all(fixture_dir).expect("remove test directory");
+    }
+
+    #[test]
+    fn gui_identity_mismatch_removes_the_fully_extracted_stage() {
+        let identity = stable_identity();
+        let fixture_dir = temp_dir("gui-binary-mismatch");
+        let archive_path =
+            write_fixture_archive(&fixture_dir, &identity, &valid_fixture_entries(&identity));
+        let archive_name = archive_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("archive name")
+            .to_string();
+        let archive_bytes = read_file(&archive_path);
+        let checksum_bytes = format!("{}  {archive_name}\n", sha256(&archive_bytes)).into_bytes();
+        let source = FakeSource {
+            fresh_release: release_info(vec![
+                release_asset(1, &archive_name, &archive_bytes),
+                release_asset(2, CHECKSUM_ASSET_NAME, &checksum_bytes),
+            ]),
+            payloads: HashMap::from([(1, archive_bytes), (2, checksum_bytes)]),
+            commit: identity.commit.clone(),
+        };
+        let binary_reader =
+            FakeBinaryIdentityReader::new(identity.clone()).with_gui_identity(ReleaseIdentity {
+                commit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                ..identity
+            });
+        let cache_root = fixture_dir.join("cache");
+        assert!(matches!(
+            acquire_release_bundle_with(
+                &release_info(Vec::new()),
+                &cache_root,
+                &source,
+                &binary_reader,
+            ),
+            Err(BundleAcquisitionError::Binary(_))
+        ));
+        assert_eq!(binary_reader.calls.load(Ordering::Relaxed), 2);
         assert!(fs::read_dir(&cache_root)
             .expect("read cache root")
             .all(|entry| entry.expect("cache entry").file_name() == LOCK_FILE_NAME));

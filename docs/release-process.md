@@ -109,22 +109,36 @@ The workflow:
 
 Every release archive contains `release-manifest.json` at the bundle root. The
 schema-versioned JSON records the exact release tag, semantic version, release
-channel, Rust target triple, and full lowercase commit SHA. Version, tag, and
+channel, headless Rust target triple, GTK GUI target triple, and full lowercase commit SHA. Version, tag, and
 channel must agree: stable SemVer maps to `stable`, prerelease SemVer maps to
 `prerelease`, and the tag is exactly `v<version>`.
 
-Schema 1 marks all five identity fields as critical. Validators reject an
+Schema 1 keeps the original five identity fields critical and adds
+`gui_target` as a required extension for GUI-bearing bundles. Keeping it
+non-critical lets the public v1.4 updater read the new manifest. Validators reject an
 unsupported schema, duplicate JSON fields, missing identity fields, and unknown
 critical fields. Unknown non-critical fields may be ignored for compatible
 schema evolution. Official manifests use a deterministic field order and JSON
 rendering.
 
-The bundle builder derives version, channel, and commit from `lg-buddy
---version`; it cannot package a binary whose identity disagrees with its tag.
+The bundle builder derives version, channel, and commit from both executables;
+it cannot package binaries whose embedded identities, targets, or `--version`
+output disagree. The archive remains named for the static
+`x86_64-unknown-linux-musl` runtime. The dynamic
+`x86_64-unknown-linux-gnu` GUI is stored as
+`docs/lg-buddy-gui-x86_64-unknown-linux-gnu`: that established namespace is
+understood by the v1.4 updater. The named application icon is likewise carried
+under `docs/` for compatibility. The installer publishes them as
+`/usr/bin/lg-buddy-gui` and under the hicolor application-icon directory, and
+safely restores GUI executable mode when an older updater extracted it as data.
 Smoke validation checks the manifest before executing installer code and then
 compares it with both the bundled and installed binary. Publishing validates
 the manifest directly from each archive without extracting or executing archive
-content.
+content. CI builds on Ubuntu 24.04, establishing GTK 4.14, libadwaita 1.5, and
+a maximum GLIBC 2.39 symbol baseline. Fedora 43 and current Arch lanes install
+and launch the same artifact under Xvfb, drive it without a pointer, inspect its
+AT-SPI tree, and compare its light/dark and 1x/2x rendering; Ubuntu remains the
+ABI baseline.
 
 ## Upgrade compatibility preflight
 
@@ -205,6 +219,6 @@ binary paths explicitly:
 
 ```bash
 ./install.sh \
-  --runtime-binary ./target/release/lg-buddy \
-  --gui-binary ./target/release/lg-buddy-gui
+  --runtime-binary ./target/x86_64-unknown-linux-musl/release/lg-buddy \
+  --gui-binary ./target/x86_64-unknown-linux-gnu/release/lg-buddy-gui
 ```

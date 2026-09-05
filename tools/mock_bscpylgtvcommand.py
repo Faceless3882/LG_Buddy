@@ -16,6 +16,8 @@ import argparse
 import json
 import os
 import sys
+import tempfile
+import time
 from pathlib import Path
 
 
@@ -65,8 +67,20 @@ def load_state(path: Path) -> dict[str, object]:
 
 def save_state(path: Path, state: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        delete=False,
+    ) as handle:
         json.dump(state, handle, sort_keys=True)
+        temporary_path = Path(handle.name)
+
+    try:
+        os.replace(temporary_path, path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 
 def record_call(
@@ -220,6 +234,10 @@ def execute_planned_step(
     command_args: list[str],
     step: dict[str, object],
 ) -> int:
+    delay_seconds = step.get("delay_seconds", 0)
+    if not isinstance(delay_seconds, (int, float)) or delay_seconds < 0:
+        raise TypeError("plan delay_seconds must be a non-negative number")
+    time.sleep(delay_seconds)
     result = step.get("result")
     state_update = step.get("state_update")
     if state_update is not None and not isinstance(state_update, dict):

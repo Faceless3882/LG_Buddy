@@ -43,16 +43,31 @@ class RepositoryFixture:
         )
         return result.stdout.strip()
 
-    def write_version(self, version: str, lock_version: str | None = None) -> None:
+    def write_version(
+        self,
+        version: str,
+        lock_version: str | None = None,
+        gui_version: str | None = None,
+        gui_lock_version: str | None = None,
+    ) -> None:
         manifest = self.path / "crates/lg-buddy/Cargo.toml"
         manifest.parent.mkdir(parents=True, exist_ok=True)
         manifest.write_text(
             f'[package]\nname = "lg-buddy"\nversion = "{version}"\n',
             encoding="utf-8",
         )
+        gui_manifest = self.path / "crates/lg-buddy-gui/Cargo.toml"
+        gui_manifest.parent.mkdir(parents=True, exist_ok=True)
+        gui_manifest.write_text(
+            '[package]\nname = "lg-buddy-gui"\n'
+            f'version = "{gui_version or version}"\n',
+            encoding="utf-8",
+        )
         (self.path / "Cargo.lock").write_text(
             'version = 4\n\n[[package]]\nname = "lg-buddy"\n'
-            f'version = "{lock_version or version}"\n',
+            f'version = "{lock_version or version}"\n\n'
+            '[[package]]\nname = "lg-buddy-gui"\n'
+            f'version = "{gui_lock_version or gui_version or version}"\n',
             encoding="utf-8",
         )
 
@@ -159,6 +174,16 @@ class PromotionTests(unittest.TestCase):
     def test_lockfile_mismatch_is_rejected(self) -> None:
         head = self.repository.candidate("1.4.0-beta.1", "1.3.0")
         with self.assertRaisesRegex(PromotionError, "does not match Cargo.lock"):
+            self.repository.validate("prerelease", head)
+
+    def test_gui_version_mismatch_is_rejected(self) -> None:
+        self.repository.git("switch", "dev")
+        self.repository.write_version("1.4.0-beta.1", gui_version="1.3.0")
+        self.repository.git("add", ".")
+        self.repository.git("commit", "-m", "mismatch gui")
+        head = self.repository.git("rev-parse", "HEAD")
+
+        with self.assertRaisesRegex(PromotionError, "lg-buddy-gui"):
             self.repository.validate("prerelease", head)
 
     def test_stable_version_must_strictly_advance_main(self) -> None:

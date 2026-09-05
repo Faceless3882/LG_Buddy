@@ -14,7 +14,8 @@ from functools import total_ordering
 from pathlib import Path
 
 
-MANIFEST_PATH = "crates/lg-buddy/Cargo.toml"
+RUNTIME_MANIFEST_PATH = "crates/lg-buddy/Cargo.toml"
+GUI_MANIFEST_PATH = "crates/lg-buddy-gui/Cargo.toml"
 LOCK_PATH = "Cargo.lock"
 SEMVER_RE = re.compile(
     r"^(?P<major>0|[1-9][0-9]*)\."
@@ -110,27 +111,29 @@ def object_at_ref(repository: Path, ref: str, path: str) -> bytes:
     return result.stdout
 
 
-def package_version_at_ref(repository: Path, ref: str) -> str:
-    manifest = tomllib.loads(object_at_ref(repository, ref, MANIFEST_PATH).decode())
+def package_version_at_ref(repository: Path, ref: str, manifest_path: str) -> str:
+    manifest = tomllib.loads(object_at_ref(repository, ref, manifest_path).decode())
     try:
         version = manifest["package"]["version"]
     except (KeyError, TypeError) as error:
-        raise PromotionError(f"missing package.version in {MANIFEST_PATH} at {ref}") from error
+        raise PromotionError(f"missing package.version in {manifest_path} at {ref}") from error
     if not isinstance(version, str):
-        raise PromotionError(f"package.version in {MANIFEST_PATH} at {ref} is not a string")
+        raise PromotionError(f"package.version in {manifest_path} at {ref} is not a string")
     SemVer.parse(version)
     return version
 
 
-def lock_version_at_ref(repository: Path, ref: str) -> str:
+def lock_version_at_ref(repository: Path, ref: str, package_name: str) -> str:
     lock = tomllib.loads(object_at_ref(repository, ref, LOCK_PATH).decode())
     matches = [
         package.get("version")
         for package in lock.get("package", [])
-        if package.get("name") == "lg-buddy"
+        if package.get("name") == package_name
     ]
     if len(matches) != 1 or not isinstance(matches[0], str):
-        raise PromotionError(f"expected exactly one lg-buddy package in {LOCK_PATH} at {ref}")
+        raise PromotionError(
+            f"expected exactly one {package_name} package in {LOCK_PATH} at {ref}"
+        )
     SemVer.parse(matches[0])
     return matches[0]
 
@@ -162,11 +165,18 @@ def validate_release_identity(
     current_main_ref: str,
     current_prerelease_ref: str,
 ) -> dict[str, object]:
-    version_text = package_version_at_ref(repository, head_sha)
-    lock_version = lock_version_at_ref(repository, head_sha)
+    version_text = package_version_at_ref(repository, head_sha, RUNTIME_MANIFEST_PATH)
+    gui_version = package_version_at_ref(repository, head_sha, GUI_MANIFEST_PATH)
+    lock_version = lock_version_at_ref(repository, head_sha, "lg-buddy")
+    gui_lock_version = lock_version_at_ref(repository, head_sha, "lg-buddy-gui")
     if lock_version != version_text:
         raise PromotionError(
             f"crate version {version_text} does not match Cargo.lock version {lock_version}"
+        )
+    if gui_version != version_text or gui_lock_version != version_text:
+        raise PromotionError(
+            "lg-buddy-gui crate and Cargo.lock versions must match "
+            f"lg-buddy {version_text}; found {gui_version} and {gui_lock_version}"
         )
 
     version = SemVer.parse(version_text)
@@ -183,7 +193,9 @@ def validate_release_identity(
     ):
         if resolve(repository, current_ref) == head_sha:
             continue
-        current_text = package_version_at_ref(repository, current_ref)
+        current_text = package_version_at_ref(
+            repository, current_ref, RUNTIME_MANIFEST_PATH
+        )
         if version <= SemVer.parse(current_text):
             raise PromotionError(
                 f"candidate {version_text} must advance {channel} from {current_text}"
@@ -282,7 +294,7 @@ def validate_merged_promotion(
     require_ancestor(repository, previous_sha, head_sha)
 
     if target == "prerelease" and main_sha == head_sha:
-        version = package_version_at_ref(repository, head_sha)
+        version = package_version_at_ref(repository, head_sha, RUNTIME_MANIFEST_PATH)
         return {
             "publish": False,
             "version": version,

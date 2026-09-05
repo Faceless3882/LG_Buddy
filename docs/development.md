@@ -71,7 +71,7 @@ relocation and subprocess tests. Only a missing path selects the temporary
 Zenity compatibility flow.
 
 The local installer accepts the GUI and runtime as separate build artifacts.
-Shipping both artifacts in official release bundles is tracked separately.
+Official release bundles ship and verify both.
 
 Official release builds inject version identity into the binary:
 
@@ -149,28 +149,37 @@ Build a release bundle locally with:
 ```bash
 LG_BUDDY_RELEASE_VERSION=0.0.0-dev \
 LG_BUDDY_BUILD_COMMIT="$(git rev-parse HEAD)" \
-cargo build --release -p lg-buddy --target x86_64-unknown-linux-gnu
-./scripts/build-release-bundle.sh --target x86_64-unknown-linux-gnu --version 0.0.0-dev
+cargo build --locked --release -p lg-buddy --target x86_64-unknown-linux-musl
+LG_BUDDY_RELEASE_VERSION=0.0.0-dev \
+LG_BUDDY_BUILD_COMMIT="$(git rev-parse HEAD)" \
+cargo build --locked --release -p lg-buddy-gui --target x86_64-unknown-linux-gnu
+./scripts/build-release-bundle.sh \
+  --target x86_64-unknown-linux-musl \
+  --gui-target x86_64-unknown-linux-gnu \
+  --version 0.0.0-dev
 ```
 
 The builder requires a full release commit and expects the matching release
-binary to exist under:
+artifacts to exist under:
 
 ```text
 ./target/<target>/release/lg-buddy
+./target/<gui-target>/release/lg-buddy-gui
 ```
 
 Smoke test a generated release bundle with:
 
 ```bash
-./scripts/test-release-bundle.sh --archive ./dist/lg-buddy-0.0.0-dev-x86_64-unknown-linux-gnu.tar.gz
+dbus-run-session -- xvfb-run -a ./scripts/test-release-bundle.sh \
+  --archive ./dist/lg-buddy-0.0.0-dev-x86_64-unknown-linux-musl.tar.gz
 ```
 
 The smoke test validates `release-manifest.json` against the archive name and
-bundled binary before running installer code. It then installs into a temporary
+bundled runtime and GUI before running installer code. It then installs into a temporary
 root and exercises upgrade refusal, preservation, Python repair, owned-file
-replacement, service ordering, installed identity, lifecycle topology, and
-uninstall cleanup without mutating the host installation.
+replacement, service ordering, installed identity, mocked GUI read/apply/failure/
+cancel behavior, lifecycle topology, and uninstall cleanup without mutating the
+host installation.
 
 Run the cross-version smoke with explicit previous and candidate archives:
 
@@ -245,6 +254,10 @@ the branch contract and recovery process, see
 | `scripts/release_bundle_manifest.py` | Release-bundle identity manifest creator and validator |
 | `scripts/build-release-bundle.sh` | Release bundle builder |
 | `scripts/test-installed-gui.sh` | Installed GTK launcher and removal smoke test |
+| `scripts/test-release-gui-behavior.sh` | Display-backed installed GUI behavior smoke test |
+| `scripts/test-release-gui-accessibility.py` | External AT-SPI contract probe for the installed GTK GUI |
+| `scripts/xwd_mean.py` | Standard-library XWD luminance probe for release theme smoke tests |
+| `scripts/test-release-linkage.sh` | Static runtime and GNU GUI linkage baseline check |
 | `scripts/test-release-bundle.sh` | Release bundle smoke test |
 | `scripts/test-cross-version-upgrade.sh` | Pinned previous-to-candidate archive upgrade smoke test |
 | `scripts/test-production-upgrade-canary.sh` | Post-publication production GitHub upgrade canary |
