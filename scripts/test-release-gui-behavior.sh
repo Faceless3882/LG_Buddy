@@ -169,9 +169,9 @@ wait_for_calls get_picture_settings 1
 sleep 0.2
 xdotool windowfocus --sync "$WINDOW_ID"
 for _ in 1 2 3; do
-    xdotool key --window "$WINDOW_ID" Tab Right
+    xdotool key Tab Right
 done
-xdotool key --window "$WINDOW_ID" alt+a
+xdotool key alt+a
 wait_for_calls set_settings 1
 finish_gui
 python3 - "$STATE_FILE" <<'PY'
@@ -189,17 +189,17 @@ start_gui
 wait_for_calls get_picture_settings 1
 sleep 0.2
 xdotool windowfocus --sync "$WINDOW_ID"
-xdotool key --window "$WINDOW_ID" alt+r
+xdotool key alt+r
 wait_for_calls get_picture_settings 2
 xdotool windowfocus --sync "$WINDOW_ID"
-xdotool key --window "$WINDOW_ID" alt+c
+xdotool key alt+c
 finish_gui
 
 # Cancelling the loading window never writes a value.
 printf '%s\n' '{"backlight":37,"calls":[],"plan":{"get_picture_settings":[{"result":"success","stdout":"{\u0027backlight\u0027: 37}","delay_seconds":2}]}}' >"$STATE_FILE"
 start_gui
 xdotool windowfocus --sync "$WINDOW_ID"
-xdotool key --window "$WINDOW_ID" alt+c
+xdotool key alt+c
 finish_gui
 python3 - "$STATE_FILE" <<'PY'
 import json
@@ -239,7 +239,7 @@ if [ "${LG_BUDDY_TEST_PLATFORM_CONTRACT:-0}" = "1" ]; then
         fi
 
         xdotool windowfocus --sync "$WINDOW_ID"
-        xdotool key --window "$WINDOW_ID" alt+c
+        xdotool key alt+c
         finish_gui
     }
 
