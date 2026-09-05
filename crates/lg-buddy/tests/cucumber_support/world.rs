@@ -98,6 +98,13 @@ impl LgBuddyWorld {
             .set("LG_BUDDY_IDLE_TIMEOUT", seconds.to_string());
     }
 
+    pub fn set_timed_power_off_grace_secs(&mut self, seconds: f64) {
+        self.ensure_env().set(
+            "LG_BUDDY_TIMED_POWER_OFF_TEST_AFTER_SECS",
+            seconds.to_string(),
+        );
+    }
+
     pub fn remember_config_contents(&mut self) {
         self.config_snapshot = Some(self.read_config_contents());
     }
@@ -650,6 +657,14 @@ exit 1\n",
             .as_ref()
             .expect("mock swayidle configured")
             .queue_resume_emission();
+    }
+
+    pub fn swayidle_stays_open_for_secs(&mut self, seconds: f64) {
+        self.install_swayidle_stub();
+        self.swayidle
+            .as_ref()
+            .expect("mock swayidle configured")
+            .set_linger_seconds(seconds);
     }
 
     pub fn install_systemctl_stub(&mut self, reboot_pending: bool) {

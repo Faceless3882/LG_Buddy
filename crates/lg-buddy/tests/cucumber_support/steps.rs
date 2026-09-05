@@ -26,6 +26,14 @@ fn idle_timeout_seconds(world: &mut LgBuddyWorld, seconds: u64) {
     world.set_idle_timeout_secs(seconds);
 }
 
+#[given(regex = r#"the timed power-off grace is ([0-9]+(?:\.[0-9]+)?) seconds"#)]
+fn timed_power_off_grace_seconds(world: &mut LgBuddyWorld, seconds: String) {
+    let seconds = seconds
+        .parse::<f64>()
+        .unwrap_or_else(|err| panic!("invalid timed power-off grace `{seconds}`: {err}"));
+    world.set_timed_power_off_grace_secs(seconds);
+}
+
 #[given("the current config is remembered")]
 fn current_config_is_remembered(world: &mut LgBuddyWorld) {
     world.remember_config_contents();
@@ -327,6 +335,14 @@ fn swayidle_will_emit_timeout(world: &mut LgBuddyWorld) {
 #[given("swayidle will emit a resume event")]
 fn swayidle_will_emit_resume(world: &mut LgBuddyWorld) {
     world.swayidle_emits_resume();
+}
+
+#[given(regex = r#"swayidle stays open for ([0-9]+(?:\.[0-9]+)?) seconds"#)]
+fn swayidle_stays_open_for_seconds(world: &mut LgBuddyWorld, seconds: String) {
+    let seconds = seconds
+        .parse::<f64>()
+        .unwrap_or_else(|err| panic!("invalid swayidle linger `{seconds}`: {err}"));
+    world.swayidle_stays_open_for_secs(seconds);
 }
 
 #[given("the next input restore attempt powers the TV back on")]

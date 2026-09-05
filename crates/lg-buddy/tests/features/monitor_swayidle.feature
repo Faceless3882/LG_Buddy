@@ -1,5 +1,5 @@
 Feature: swayidle monitor
-  LG Buddy should translate delegated swayidle hooks into TV behavior through the monitor loop.
+  LG Buddy should consume swayidle idle and activity facts through the shared monitor policy.
 
   Scenario: swayidle timeout blanks the configured TV input
     Given a temporary LG Buddy config using input HDMI_2
@@ -17,6 +17,25 @@ Feature: swayidle monitor
     And the TV client received "turn_screen_off"
     And the session marker exists
     And the TV screen is blanked
+
+  Scenario: swayidle idle feeds the shared timed power-off policy
+    Given a temporary LG Buddy config using input HDMI_2
+    And the timed power-off grace is 0.2 seconds
+    And LG Buddy session runtime is isolated
+    And a mock TV client
+    And the TV is on input HDMI_2
+    And the executable PATH is isolated
+    And swayidle is installed
+    And the backend override is "swayidle"
+    And swayidle will emit an idle timeout
+    And swayidle stays open for 0.5 seconds
+    When I run the command "monitor"
+    Then the command succeeds
+    And stdout contains "Timed power-off deadline reached"
+    And the TV client received "turn_screen_off" exactly 1 times
+    And the TV client received "power_off" exactly 1 times
+    And the session marker exists
+    And the TV is powered off
 
   Scenario: swayidle resume restores a previously blanked TV output
     Given a temporary LG Buddy config using input HDMI_3

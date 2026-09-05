@@ -238,6 +238,18 @@ pub(crate) fn run_screen_off_from_env_for_event<W: Write>(
     writer: &mut W,
     event: RuntimeEvent,
 ) -> Result<(), RunError> {
+    run_screen_off_from_env_for_event_with_result(writer, event).map(|_| ())
+}
+
+#[derive(Debug)]
+pub(crate) struct ScreenOffActionResult {
+    pub(crate) blank_succeeded: bool,
+}
+
+pub(crate) fn run_screen_off_from_env_for_event_with_result<W: Write>(
+    writer: &mut W,
+    event: RuntimeEvent,
+) -> Result<ScreenOffActionResult, RunError> {
     let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
     let config = load_config(&config_path).map_err(RunError::Config)?;
     let marker =
@@ -252,7 +264,7 @@ pub(crate) fn run_screen_off_from_env_for_event<W: Write>(
     let lifecycle_status =
         SystemMarkerLifecycleStatusProvider::from_env().map_err(RunError::StateDir)?;
 
-    run_screen_off_with_event(
+    run_screen_off_with_result_for_event(
         writer,
         &config,
         &marker,
@@ -261,6 +273,53 @@ pub(crate) fn run_screen_off_from_env_for_event<W: Write>(
         &mut phase_provider,
         &lifecycle_status,
     )
+    .map(|result| ScreenOffActionResult {
+        blank_succeeded: result.blank_succeeded,
+    })
+}
+
+pub(crate) fn run_timed_power_off_from_env_for_event<W: Write>(
+    writer: &mut W,
+    event: RuntimeEvent,
+) -> Result<(), RunError> {
+    let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
+    let config = load_config(&config_path).map_err(RunError::Config)?;
+    let marker =
+        ScreenOwnershipMarker::from_env(StateScope::Session).map_err(RunError::StateDir)?;
+    if !config.screen_idle_blank.is_enabled() {
+        writeln!(
+            writer,
+            "LG Buddy Timed Power Off: Screen idle blanking is disabled; skipping power-off."
+        )?;
+        return Ok(());
+    }
+    if !marker.exists() {
+        writeln!(
+            writer,
+            "LG Buddy Timed Power Off: Screen ownership marker is absent; skipping power-off."
+        )?;
+        return Ok(());
+    }
+    let tv_client = build_tv_client(
+        &config_path,
+        config.tv_ip,
+        config.tv_platform,
+        TvClientBuildOptions::production(),
+    )?;
+    let mut phase_provider = LogindRuntimePhaseProvider::from_system_bus();
+    let lifecycle_status =
+        SystemMarkerLifecycleStatusProvider::from_env().map_err(RunError::StateDir)?;
+
+    run_timed_power_off_with_event(
+        writer,
+        &config,
+        &marker,
+        &tv_client,
+        event,
+        &mut phase_provider,
+        &lifecycle_status,
+    )
+    .map(|_| ())
 }
 
 pub(crate) fn run_screen_on_from_env<W: Write>(writer: &mut W) -> Result<(), RunError> {
@@ -328,6 +387,7 @@ pub(crate) fn run_screen_off_with<W: Write>(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn run_screen_off_with_event<
     W: Write,
     C: TvClient,
@@ -374,6 +434,7 @@ pub(crate) fn run_screen_off_with_outcome<W: Write, C: TvClient>(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn run_screen_off_with_outcome_for_event<
     W: Write,
     C: TvClient,
@@ -388,6 +449,38 @@ pub(crate) fn run_screen_off_with_outcome_for_event<
     phase_provider: &mut P,
     lifecycle_status: &L,
 ) -> Result<PolicyOutcome, RunError> {
+    run_screen_off_with_result_for_event(
+        writer,
+        config,
+        marker,
+        tv_client,
+        event,
+        phase_provider,
+        lifecycle_status,
+    )
+    .map(|result| result.outcome)
+}
+
+struct ScreenOffExecutionResult {
+    #[cfg(test)]
+    outcome: PolicyOutcome,
+    blank_succeeded: bool,
+}
+
+fn run_screen_off_with_result_for_event<
+    W: Write,
+    C: TvClient,
+    P: RuntimePhaseProvider,
+    L: SystemLifecycleStatusProvider,
+>(
+    writer: &mut W,
+    config: &Config,
+    marker: &ScreenOwnershipMarker,
+    tv_client: &C,
+    event: RuntimeEvent,
+    phase_provider: &mut P,
+    lifecycle_status: &L,
+) -> Result<ScreenOffExecutionResult, RunError> {
     let mut outcome = PolicyOutcome::new();
     if !apply_screen_action_eligibility(
         writer,
@@ -398,10 +491,15 @@ pub(crate) fn run_screen_off_with_outcome_for_event<
         lifecycle_status,
         &mut outcome,
     )? {
-        return Ok(outcome);
+        return Ok(ScreenOffExecutionResult {
+            #[cfg(test)]
+            outcome,
+            blank_succeeded: false,
+        });
     }
 
     let tv = TvDevice::new(tv_client, config.tv_ip);
+    let mut blank_succeeded = false;
 
     match tv.input().current() {
         Ok(current_input) => {
@@ -414,7 +512,7 @@ pub(crate) fn run_screen_off_with_outcome_for_event<
             let next = decision.next;
             outcome.merge(decision.outcome);
             if next == ScreenOffNext::Blank {
-                execute_screen_blank(writer, config, marker, &tv, &mut outcome)?;
+                blank_succeeded = execute_screen_blank(writer, config, marker, &tv, &mut outcome)?;
             }
         }
         Err(err) => {
@@ -438,6 +536,156 @@ pub(crate) fn run_screen_off_with_outcome_for_event<
                     &mut outcome,
                 )?;
             }
+        }
+    }
+
+    Ok(ScreenOffExecutionResult {
+        #[cfg(test)]
+        outcome,
+        blank_succeeded,
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn run_timed_power_off_with<W: Write, C: TvClient>(
+    writer: &mut W,
+    config: &Config,
+    marker: &ScreenOwnershipMarker,
+    tv_client: &C,
+) -> Result<PolicyOutcome, RunError> {
+    let mut phase_provider = NoopRuntimePhaseProvider;
+    let lifecycle_status = NoopSystemLifecycleStatusProvider;
+    run_timed_power_off_with_event(
+        writer,
+        config,
+        marker,
+        tv_client,
+        RuntimeEvent::new(
+            EventSource::DesktopSession,
+            RuntimeEventKind::SessionTimedPowerOff,
+        ),
+        &mut phase_provider,
+        &lifecycle_status,
+    )
+}
+
+pub(crate) fn run_timed_power_off_with_event<
+    W: Write,
+    C: TvClient,
+    P: RuntimePhaseProvider,
+    L: SystemLifecycleStatusProvider,
+>(
+    writer: &mut W,
+    config: &Config,
+    marker: &ScreenOwnershipMarker,
+    tv_client: &C,
+    event: RuntimeEvent,
+    phase_provider: &mut P,
+    lifecycle_status: &L,
+) -> Result<PolicyOutcome, RunError> {
+    const PREFIX: &str = "LG Buddy Timed Power Off";
+
+    if !config.screen_idle_blank.is_enabled() {
+        writeln!(
+            writer,
+            "{PREFIX}: Screen idle blanking is disabled; skipping power-off."
+        )?;
+        return Ok(PolicyOutcome::new()
+            .with_no_action(DecisionReason::new(DecisionReasonCode::ConfigDisabled)));
+    }
+
+    let mut outcome = PolicyOutcome::new();
+    if !apply_screen_action_eligibility(
+        writer,
+        PREFIX,
+        config,
+        event,
+        phase_provider,
+        lifecycle_status,
+        &mut outcome,
+    )? {
+        return Ok(outcome);
+    }
+
+    if !marker.exists() {
+        writeln!(
+            writer,
+            "{PREFIX}: Screen ownership marker is absent; skipping power-off."
+        )?;
+        outcome.merge(
+            PolicyOutcome::new()
+                .with_no_action(DecisionReason::new(DecisionReasonCode::MarkerMissing)),
+        );
+        return Ok(outcome);
+    }
+
+    let tv = TvDevice::new(tv_client, config.tv_ip);
+    let current_input = match tv.input().current() {
+        Ok(input) => input,
+        Err(err) => {
+            writeln!(
+                writer,
+                "{PREFIX}: Could not query TV input; skipping power-off without a blind fallback. {err}"
+            )?;
+            outcome.merge(
+                PolicyOutcome::new()
+                    .with_no_action(DecisionReason::with_detail(
+                        DecisionReasonCode::TransportFailure,
+                        err.to_string(),
+                    ))
+                    .with_diagnostic(Diagnostic::warning(format!(
+                        "timed power-off input query failed: {err}"
+                    ))),
+            );
+            return Ok(outcome);
+        }
+    };
+
+    if !current_input.is_hdmi(config.input) {
+        let mismatch = PolicyOutcome::new()
+            .with_no_action(DecisionReason::with_detail(
+                DecisionReasonCode::InputMismatch,
+                format!("TV is on {current_input}, not {}", config.input.as_str()),
+            ))
+            .with_state_transition(clear_session_marker(TransitionReasonCode::InputMismatch));
+        apply_screen_state_transitions(marker, &mismatch)?;
+        outcome.merge(mismatch);
+        writeln!(
+            writer,
+            "{PREFIX}: TV is on {current_input} (not {}); ownership was lost, so power-off was skipped and the marker cleared.",
+            config.input.as_str()
+        )?;
+        return Ok(outcome);
+    }
+
+    outcome.merge(
+        PolicyOutcome::new()
+            .with_action(
+                ActionKind::TvTimedIdlePowerOff,
+                DecisionReason::new(DecisionReasonCode::RuntimeEvent),
+            )
+            .with_state_transition(StateTransition::preserve_marker(
+                StateMarker::SessionScreenOwnership,
+                TransitionReason::new(TransitionReasonCode::ActionSelected),
+            )),
+    );
+    writeln!(
+        writer,
+        "{PREFIX}: Ownership, input, and lifecycle checks passed; powering off TV."
+    )?;
+    match tv.power().off() {
+        Ok(()) => writeln!(
+            writer,
+            "{PREFIX}: TV power-off succeeded; preserving the ownership marker for activity restore."
+        )?,
+        Err(err) => {
+            writeln!(
+                writer,
+                "{PREFIX}: TV power-off failed; preserving the ownership marker. {err}"
+            )?;
+            outcome.merge(PolicyOutcome::new().with_diagnostic(Diagnostic::warning(format!(
+                "timed TV power-off failed: {err}"
+            ))));
         }
     }
 
@@ -887,11 +1135,12 @@ fn execute_screen_blank<W: Write, C: TvClient>(
     marker: &ScreenOwnershipMarker,
     tv: &TvDevice<'_, C>,
     outcome: &mut PolicyOutcome,
-) -> Result<(), RunError> {
+) -> Result<bool, RunError> {
     let observation = match tv.screen().blank() {
         Ok(_) => TvEffectObservation::Succeeded,
         Err(err) => TvEffectObservation::Failed(err.to_string()),
     };
+    let blank_succeeded = matches!(observation, TvEffectObservation::Succeeded);
     let decision = decide_screen_off_after_blank_result(observation.clone());
     apply_screen_state_transitions(marker, &decision.outcome)?;
 
@@ -922,7 +1171,7 @@ fn execute_screen_blank<W: Write, C: TvClient>(
         )?;
     }
 
-    Ok(())
+    Ok(blank_succeeded)
 }
 
 fn execute_screen_off_power_off_fallback<W: Write, C: TvClient>(
@@ -1234,10 +1483,11 @@ mod tests {
     use super::{
         decide_screen_action_eligibility, decide_screen_off_after_input, decide_screen_on_start,
         run_screen_off_with_outcome, run_screen_off_with_outcome_for_event,
-        run_screen_on_with_outcome, run_screen_on_with_outcome_for_event,
-        NoopSystemLifecycleStatusProvider, ScreenActionBlockReason, ScreenActionEligibilityInput,
-        ScreenEligibilityNext, ScreenOffInputObservation, ScreenOffNext, ScreenOnDeps,
-        ScreenOnNext, Sleeper, SystemLifecycleStatusProvider,
+        run_screen_off_with_result_for_event, run_screen_on_with_outcome,
+        run_screen_on_with_outcome_for_event, run_timed_power_off_with,
+        run_timed_power_off_with_event, NoopSystemLifecycleStatusProvider, ScreenActionBlockReason,
+        ScreenActionEligibilityInput, ScreenEligibilityNext, ScreenOffInputObservation,
+        ScreenOffNext, ScreenOnDeps, ScreenOnNext, Sleeper, SystemLifecycleStatusProvider,
     };
     use crate::config::{
         Config, HdmiInput, MacAddress, ScreenBackend, ScreenIdleBlankPolicy, ScreenRestorePolicy,
@@ -1460,6 +1710,214 @@ mod tests {
         assert_eq!(outcome.actions.len(), 1);
         assert_eq!(outcome.actions[0].kind, ActionKind::TvScreenBlank);
         assert!(marker.exists());
+    }
+
+    #[test]
+    fn screen_off_result_arms_escalation_only_for_an_actual_blank() {
+        let temp_dir = TestDir::new("screen-off-actual-blank-result");
+        let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
+        let mock = MockBscpylgtv::new("screen-off-actual-blank-result-tv");
+        mock.set_input("HDMI_2");
+        mock.queue_error("turn_screen_off", 1, "blank failed\n");
+        let client = client_for_mock(&mock);
+        let mut phase = FixedRuntimePhaseProvider::not_pending();
+        let lifecycle_status = NoopSystemLifecycleStatusProvider;
+
+        let result = run_screen_off_with_result_for_event(
+            &mut Vec::new(),
+            &sample_config(HdmiInput::Hdmi2),
+            &marker,
+            &client,
+            RuntimeEvent::new(EventSource::DesktopSession, RuntimeEventKind::SessionIdle),
+            &mut phase,
+            &lifecycle_status,
+        )
+        .expect("fallback power-off should complete");
+
+        assert!(!result.blank_succeeded);
+        assert!(marker.exists());
+        assert_call_commands(&mock, &["get_input", "turn_screen_off", "power_off"]);
+    }
+
+    #[test]
+    fn timed_power_off_rechecks_input_and_preserves_marker_after_success() {
+        let temp_dir = TestDir::new("timed-power-off-success");
+        let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
+        marker.create().expect("create ownership marker");
+        let mock = MockBscpylgtv::new("timed-power-off-success-tv");
+        mock.set_input("HDMI_2");
+        let client = client_for_mock(&mock);
+        let mut output = Vec::new();
+
+        let outcome = run_timed_power_off_with(
+            &mut output,
+            &sample_config(HdmiInput::Hdmi2),
+            &marker,
+            &client,
+        )
+        .expect("timed power-off should complete");
+
+        assert!(marker.exists());
+        assert_eq!(outcome.actions.len(), 1);
+        assert_eq!(outcome.actions[0].kind, ActionKind::TvTimedIdlePowerOff);
+        assert_eq!(
+            outcome.state_transitions,
+            vec![StateTransition::preserve_marker(
+                StateMarker::SessionScreenOwnership,
+                TransitionReason::new(TransitionReasonCode::ActionSelected),
+            )]
+        );
+        assert_call_commands(&mock, &["get_input", "power_off"]);
+        assert!(rendered(&output).contains("TV power-off succeeded"));
+    }
+
+    #[test]
+    fn timed_power_off_requires_the_ownership_marker() {
+        let temp_dir = TestDir::new("timed-power-off-marker-missing");
+        let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
+        let mock = MockBscpylgtv::new("timed-power-off-marker-missing-tv");
+        mock.set_input("HDMI_2");
+        let client = client_for_mock(&mock);
+        let mut output = Vec::new();
+
+        let outcome = run_timed_power_off_with(
+            &mut output,
+            &sample_config(HdmiInput::Hdmi2),
+            &marker,
+            &client,
+        )
+        .expect("missing marker should skip safely");
+
+        assert!(mock.calls().is_empty());
+        assert_eq!(
+            outcome.no_actions[0].reason.code,
+            DecisionReasonCode::MarkerMissing
+        );
+        assert!(rendered(&output).contains("ownership marker is absent"));
+    }
+
+    #[test]
+    fn timed_power_off_respects_disabled_idle_blanking() {
+        let temp_dir = TestDir::new("timed-power-off-disabled");
+        let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
+        marker.create().expect("create ownership marker");
+        let mock = MockBscpylgtv::new("timed-power-off-disabled-tv");
+        mock.set_input("HDMI_2");
+        let client = client_for_mock(&mock);
+        let mut config = sample_config(HdmiInput::Hdmi2);
+        config.screen_idle_blank = ScreenIdleBlankPolicy::Disabled;
+        let mut output = Vec::new();
+
+        let outcome = run_timed_power_off_with(&mut output, &config, &marker, &client)
+            .expect("disabled idle blanking should skip safely");
+
+        assert!(mock.calls().is_empty());
+        assert_eq!(
+            outcome.no_actions[0].reason.code,
+            DecisionReasonCode::ConfigDisabled
+        );
+        assert!(rendered(&output).contains("idle blanking is disabled"));
+    }
+
+    #[test]
+    fn timed_power_off_clears_ownership_on_input_mismatch() {
+        let temp_dir = TestDir::new("timed-power-off-input-mismatch");
+        let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
+        marker.create().expect("create ownership marker");
+        let mock = MockBscpylgtv::new("timed-power-off-input-mismatch-tv");
+        mock.set_input("HDMI_4");
+        let client = client_for_mock(&mock);
+        let mut output = Vec::new();
+
+        run_timed_power_off_with(
+            &mut output,
+            &sample_config(HdmiInput::Hdmi2),
+            &marker,
+            &client,
+        )
+        .expect("input mismatch should skip safely");
+
+        assert!(!marker.exists());
+        assert_call_commands(&mock, &["get_input"]);
+        assert!(rendered(&output).contains("ownership was lost"));
+    }
+
+    #[test]
+    fn timed_power_off_does_not_fall_back_when_input_query_fails() {
+        let temp_dir = TestDir::new("timed-power-off-input-failure");
+        let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
+        marker.create().expect("create ownership marker");
+        let mock = MockBscpylgtv::new("timed-power-off-input-failure-tv");
+        mock.queue_error("get_input", 1, "query failed\n");
+        let client = client_for_mock(&mock);
+        let mut output = Vec::new();
+
+        run_timed_power_off_with(
+            &mut output,
+            &sample_config(HdmiInput::Hdmi2),
+            &marker,
+            &client,
+        )
+        .expect("input query failure should skip safely");
+
+        assert!(marker.exists());
+        assert_call_commands(&mock, &["get_input"]);
+        assert!(rendered(&output).contains("without a blind fallback"));
+    }
+
+    #[test]
+    fn timed_power_off_rechecks_lifecycle_eligibility() {
+        let temp_dir = TestDir::new("timed-power-off-lifecycle-pending");
+        let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
+        marker.create().expect("create ownership marker");
+        let mock = MockBscpylgtv::new("timed-power-off-lifecycle-pending-tv");
+        mock.set_input("HDMI_2");
+        let client = client_for_mock(&mock);
+        let mut phase = FixedRuntimePhaseProvider::pending();
+        let lifecycle_status = NoopSystemLifecycleStatusProvider;
+        let mut output = Vec::new();
+
+        run_timed_power_off_with_event(
+            &mut output,
+            &sample_config(HdmiInput::Hdmi2),
+            &marker,
+            &client,
+            RuntimeEvent::new(
+                EventSource::DesktopSession,
+                RuntimeEventKind::SessionTimedPowerOff,
+            ),
+            &mut phase,
+            &lifecycle_status,
+        )
+        .expect("pending lifecycle should skip timed power-off");
+
+        assert!(marker.exists());
+        assert!(mock.calls().is_empty());
+        assert!(rendered(&output).contains("Machine sleep is pending"));
+    }
+
+    #[test]
+    fn timed_power_off_attempt_failure_preserves_marker_without_retrying_here() {
+        let temp_dir = TestDir::new("timed-power-off-failure");
+        let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
+        marker.create().expect("create ownership marker");
+        let mock = MockBscpylgtv::new("timed-power-off-failure-tv");
+        mock.set_input("HDMI_2");
+        mock.queue_error("power_off", 1, "power failed\n");
+        let client = client_for_mock(&mock);
+        let mut output = Vec::new();
+
+        run_timed_power_off_with(
+            &mut output,
+            &sample_config(HdmiInput::Hdmi2),
+            &marker,
+            &client,
+        )
+        .expect("power failure should remain a completed attempt");
+
+        assert!(marker.exists());
+        assert_call_commands(&mock, &["get_input", "power_off"]);
+        assert!(rendered(&output).contains("TV power-off failed"));
     }
 
     #[test]

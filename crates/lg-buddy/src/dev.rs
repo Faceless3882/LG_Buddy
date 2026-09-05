@@ -380,7 +380,7 @@ fn run_webos_power_off_probe<W: Write>(writer: &mut W) -> Result<(), DevError> {
         )
         .map_err(DevError::Authentication)?;
         let power_state = client.power_state().map_err(DevError::PowerState)?;
-        require_active_power_state(&power_state)?;
+        require_power_off_state(&power_state)?;
         client.power_off().map_err(DevError::Control)?;
         Ok(power_state)
     })
@@ -417,8 +417,11 @@ fn run_webos_set_backlight_probe<W: Write>(
     )
 }
 
-fn require_active_power_state(power_state: &WebOsPowerState) -> Result<(), DevError> {
-    if power_state == &WebOsPowerState::Active {
+fn require_power_off_state(power_state: &WebOsPowerState) -> Result<(), DevError> {
+    if matches!(
+        power_state,
+        WebOsPowerState::Active | WebOsPowerState::ScreenOff
+    ) {
         Ok(())
     } else {
         Err(DevError::PowerOffPrecondition {
@@ -681,8 +684,8 @@ fn write_auth_event<W: Write>(
 #[cfg(test)]
 mod tests {
     use super::{
-        require_active_backlight_write_state, require_active_power_state,
-        run_webos_auth_probe_with, run_webos_power_off_probe_with, run_webos_read_probe_with,
+        require_active_backlight_write_state, require_power_off_state, run_webos_auth_probe_with,
+        run_webos_power_off_probe_with, run_webos_read_probe_with,
         run_webos_screen_control_probe_with, run_webos_set_backlight_probe_with,
         run_webos_set_input_probe_with, DevCommand, DevError, DevParseError,
         WebOsControlProbeCommand, WebOsProbeContext, WebOsReadProbeResult,
@@ -999,15 +1002,16 @@ LG Buddy WebOS Control Probe: power_off_from=Active\n"
     }
 
     #[test]
-    fn power_off_probe_requires_active_power_state() {
-        assert!(require_active_power_state(&WebOsPowerState::Active).is_ok());
+    fn power_off_probe_accepts_active_and_screen_off_states() {
+        assert!(require_power_off_state(&WebOsPowerState::Active).is_ok());
+        assert!(require_power_off_state(&WebOsPowerState::ScreenOff).is_ok());
 
-        let error = require_active_power_state(&WebOsPowerState::ScreenOff)
-            .expect_err("screen-off TV should not be powered off by the probe");
+        let error = require_power_off_state(&WebOsPowerState::Suspend)
+            .expect_err("suspended TV should not be powered off by the probe");
         assert!(matches!(
             error,
             DevError::PowerOffPrecondition {
-                actual: WebOsPowerState::ScreenOff
+                actual: WebOsPowerState::Suspend
             }
         ));
     }
