@@ -265,9 +265,7 @@ impl MockSwayidle {
             state_path,
         };
         mock.save_state(json!({
-            "help_mode": "systemd",
             "emissions": [],
-            "invocations": [],
         }));
         mock
     }
@@ -294,34 +292,12 @@ impl MockSwayidle {
         ExecutableScript::new(label, "swayidle", &body)
     }
 
-    pub fn disable_systemd_hooks_in_help(&self) {
-        self.patch_state(json!({ "help_mode": "minimal" }));
-    }
-
     pub fn queue_timeout_emission(&self) {
         self.queue_emission("timeout");
     }
 
     pub fn queue_resume_emission(&self) {
         self.queue_emission("resume");
-    }
-
-    pub fn queue_before_sleep_emission(&self) {
-        self.queue_emission("before-sleep");
-    }
-
-    pub fn queue_after_resume_emission(&self) {
-        self.queue_emission("after-resume");
-    }
-
-    pub fn invocations(&self) -> Vec<MockSwayidleInvocation> {
-        self.load_state()
-            .get("invocations")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .map(MockSwayidleInvocation::from_value)
-            .collect()
     }
 
     fn script_path() -> PathBuf {
@@ -342,16 +318,6 @@ impl MockSwayidle {
             .as_array_mut()
             .expect("emissions array")
             .push(Value::String(emission.to_string()));
-        self.save_state(state);
-    }
-
-    fn patch_state(&self, patch: Value) {
-        let mut state = self.load_state();
-        let state_object = state.as_object_mut().expect("mock state object");
-        let patch_object = patch.as_object().expect("state patch object");
-        for (key, value) in patch_object {
-            state_object.insert(key.clone(), value.clone());
-        }
         self.save_state(state);
     }
 
@@ -1486,55 +1452,6 @@ pub struct MockStateSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
-pub struct MockSwayidleInvocation {
-    pub argv: Vec<String>,
-    pub wait: bool,
-    pub debug: bool,
-    pub config_path: Option<String>,
-    pub seat: Option<String>,
-    pub events: Vec<MockSwayidleEvent>,
-}
-
-impl MockSwayidleInvocation {
-    fn from_value(value: &Value) -> Self {
-        let object = value.as_object().expect("mock swayidle invocation object");
-        Self {
-            argv: object
-                .get("argv")
-                .and_then(Value::as_array)
-                .expect("invocation argv array")
-                .iter()
-                .map(|value| value.as_str().expect("argv string").to_string())
-                .collect(),
-            wait: object
-                .get("wait")
-                .and_then(Value::as_bool)
-                .expect("invocation wait bool"),
-            debug: object
-                .get("debug")
-                .and_then(Value::as_bool)
-                .expect("invocation debug bool"),
-            config_path: object
-                .get("config_path")
-                .and_then(Value::as_str)
-                .map(ToString::to_string),
-            seat: object
-                .get("seat")
-                .and_then(Value::as_str)
-                .map(ToString::to_string),
-            events: object
-                .get("events")
-                .and_then(Value::as_array)
-                .expect("invocation events array")
-                .iter()
-                .map(MockSwayidleEvent::from_value)
-                .collect(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub struct MockNmOnlineInvocation {
     pub argv: Vec<String>,
 }
@@ -1550,94 +1467,6 @@ impl MockNmOnlineInvocation {
                 .iter()
                 .map(|value| value.as_str().expect("argv string").to_string())
                 .collect(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
-pub enum MockSwayidleEvent {
-    Timeout {
-        timeout: u64,
-        command: String,
-        resume: Option<String>,
-    },
-    BeforeSleep {
-        command: String,
-    },
-    AfterResume {
-        command: String,
-    },
-    Lock {
-        command: String,
-    },
-    Unlock {
-        command: String,
-    },
-    Idlehint {
-        timeout: u64,
-    },
-}
-
-impl MockSwayidleEvent {
-    fn from_value(value: &Value) -> Self {
-        let object = value.as_object().expect("mock swayidle event object");
-        let kind = object
-            .get("kind")
-            .and_then(Value::as_str)
-            .expect("event kind string");
-
-        match kind {
-            "timeout" => Self::Timeout {
-                timeout: object
-                    .get("timeout")
-                    .and_then(Value::as_u64)
-                    .expect("timeout value"),
-                command: object
-                    .get("command")
-                    .and_then(Value::as_str)
-                    .expect("timeout command")
-                    .to_string(),
-                resume: object
-                    .get("resume")
-                    .and_then(Value::as_str)
-                    .map(ToString::to_string),
-            },
-            "before-sleep" => Self::BeforeSleep {
-                command: object
-                    .get("command")
-                    .and_then(Value::as_str)
-                    .expect("before-sleep command")
-                    .to_string(),
-            },
-            "after-resume" => Self::AfterResume {
-                command: object
-                    .get("command")
-                    .and_then(Value::as_str)
-                    .expect("after-resume command")
-                    .to_string(),
-            },
-            "lock" => Self::Lock {
-                command: object
-                    .get("command")
-                    .and_then(Value::as_str)
-                    .expect("lock command")
-                    .to_string(),
-            },
-            "unlock" => Self::Unlock {
-                command: object
-                    .get("command")
-                    .and_then(Value::as_str)
-                    .expect("unlock command")
-                    .to_string(),
-            },
-            "idlehint" => Self::Idlehint {
-                timeout: object
-                    .get("timeout")
-                    .and_then(Value::as_u64)
-                    .expect("idlehint timeout"),
-            },
-            other => panic!("unsupported mock swayidle event kind `{other}`"),
         }
     }
 }

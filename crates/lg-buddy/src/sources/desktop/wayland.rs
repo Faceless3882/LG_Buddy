@@ -9,6 +9,10 @@ use wayland_protocols::ext::idle_notify::v1::client::{
     ext_idle_notification_v1, ext_idle_notifier_v1,
 };
 
+use crate::events::EventSource;
+use crate::session::inactivity::InactivityObservation;
+use crate::session::SessionObservation;
+
 const REQUIRED_IDLE_NOTIFIER_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -430,13 +434,20 @@ pub(crate) fn probe_wayland_capabilities_on(
     state.registry_facts.capabilities()
 }
 
-pub(crate) fn run_wayland_activity_monitor<F>(
+pub(crate) fn run_session_source<F>(
     connection: Connection,
-    on_activity: F,
+    mut publish: F,
 ) -> Result<(), WaylandProviderError>
 where
-    F: FnMut(Instant) -> bool + 'static,
+    F: FnMut(SessionObservation) -> bool + 'static,
 {
+    let on_activity = move |observed_at| {
+        publish(SessionObservation::Inactivity {
+            observation: InactivityObservation::DesktopActivityObserved,
+            source: EventSource::DesktopSession,
+            observed_at,
+        })
+    };
     let (mut event_queue, mut state, _) = initialize_provider(connection, on_activity)?;
 
     while state.running {

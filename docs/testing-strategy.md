@@ -79,7 +79,7 @@ This is the place for integration tests and contract tests.
 - runtime state directories and marker files
 - subprocess contracts to external tools
 - backend detection against mocked command/process boundaries
-- GNOME runner behavior against a private session-bus harness
+- GNOME source behavior against a private session-bus harness
 - native Wayland provider capability and registry-churn behavior
 - logind lifecycle, current-session lock state, and NetworkManager gate behavior
   against a private system-bus harness
@@ -236,17 +236,19 @@ are documented in
 
 Primary concern:
 
-- module behavior for parsing and capability logic
+- source-owned connection/process setup, validation, polling, and observation
+  mapping
 
 Secondary concern:
 
-- module interoperability in the runner path
+- cross-source orchestration, inactivity state, and policy dispatch in the
+  runner
 
 Examples:
 
-- GNOME capability probing
 - GNOME signal mapping
-- GNOME monitor and idletime integration over the session-bus seam
+- GNOME monitor setup, sender ownership, and idletime polling over the
+  session-bus seam
 - native Wayland protocol-version and seat discovery
 - native Wayland resumed-notification and registry-removal mapping
 - gamepad activity integration with the LG Buddy inactivity deadline
@@ -255,6 +257,11 @@ Examples:
   restore trigger, while fresh independent activity still restores
 - logind lock monitoring rebinding and reconciling after logind changes its
   unique D-Bus owner
+- swayidle production timeout/resume process arguments
+
+Source-specific tests live with their source modules. Runner tests should use
+normalized observations and focus on multiplexing or policy behavior rather
+than reconstructing provider buses and process protocols.
 
 Native Wayland changes also require manual checks on Plasma/KWin and at least
 one other target compositor. Verify that explicit and automatic `wayland`

@@ -274,6 +274,6 @@ the branch contract and recovery process, see
 | `docs/gamepad-subsystem.md` | Gamepad activity architecture and adapter guidance |
 | `docs/gui-target-architecture.md` | Target declarative application contract and GTK renderer boundary |
 | `docs/runtime-event-handler-map.md` | Top-level system, desktop, and runtime event handler map |
-| `docs/session-backend-model.md` | Session backend semantics and capability model |
+| `docs/session-backend-model.md` | Session source semantics, ownership, and observation contract |
 | `docs/testing-strategy.md` | Test strategy and scope |
 | `docs/webos-testing.md` | Native webOS evidence and mock testing strategy |

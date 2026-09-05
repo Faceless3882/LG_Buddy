@@ -149,15 +149,14 @@ flowchart LR
             SESSIONMODEL["session.rs<br/>shared session model"]
             RUNNER["session::runner<br/>monitor + lifecycle commands"]
             GAMEPAD["session::gamepad<br/>gamepad activity source"]
-            LOCKMON["LogindLockThread<br/>current-session lock observer"]
             BUS["session_bus.rs<br/>generic D-Bus transport"]
 
             subgraph Sources["Source Adapters"]
-                LOGINDADAPTER["sources/linux/logind.rs<br/>lifecycle + lock-state mapping"]
+                LOGINDADAPTER["sources/linux/logind.rs<br/>lifecycle mapping + lock observer"]
                 NMGATE["sources/linux/network_manager.rs<br/>pre-down event source"]
-                GADAPTER["sources/desktop/gnome.rs<br/>GNOME probe + signal mapping"]
-                WADAPTER["sources/desktop/wayland.rs<br/>Wayland registry + activity mapping"]
-                SADAPTER["sources/desktop/swayidle.rs<br/>hook mapping + capability probe"]
+                GADAPTER["sources/desktop/gnome.rs<br/>GNOME bus + observation source"]
+                WADAPTER["sources/desktop/wayland.rs<br/>Wayland registry + observation source"]
+                SADAPTER["sources/desktop/swayidle.rs<br/>delegated process source"]
             end
         end
 
@@ -176,22 +175,22 @@ flowchart LR
     MAIN --> BACKEND
     MAIN --> RUNNER
     RUNNER --> BACKEND
-    RUNNER --> BUS
-    RUNNER -->|"owns"| LOCKMON
     BACKEND --> GADAPTER
     BACKEND --> WADAPTER
     BACKEND --> SADAPTER
+    RUNNER -->|"starts"| GADAPTER
+    RUNNER -->|"starts"| WADAPTER
+    RUNNER -->|"starts"| LOGINDADAPTER
 
-    GNOME --> BUS
-    BUS --> GADAPTER
-    GADAPTER -->|"SessionEvent"| SESSIONMODEL
+    GNOME --> GADAPTER
+    GADAPTER --> BUS
+    GADAPTER -->|"SessionObservation"| RUNNER
     WAYLAND --> WADAPTER
-    WADAPTER -->|"DesktopActivityObserved"| RUNNER
-    LOGIND --> BUS
-    BUS --> LOGINDADAPTER
+    WADAPTER -->|"SessionObservation"| RUNNER
+    LOGIND --> LOGINDADAPTER
+    LOGINDADAPTER --> BUS
     LOGINDADAPTER -->|"lifecycle RuntimeEvent"| EVENTS
-    LOGINDADAPTER -->|"LockedHint state"| LOCKMON
-    LOCKMON -->|"SessionEvent"| RUNNER
+    LOGINDADAPTER -->|"lock SessionObservation"| RUNNER
     NM --> MAIN
     TERMINAL --> MAIN
     MAIN -->|"brightness launcher"| GTK
@@ -212,8 +211,9 @@ flowchart LR
     SCREEN --> PHASE
     NMGATE --> LIFECYCLE
 
+    RUNNER -->|"starts"| SADAPTER
+    SADAPTER --> SWAY
     SWAY -->|"delegated timeout / resume<br/>screen off / screen on CLI"| MAIN
-    SADAPTER -.->|"modeled SessionEvent hooks"| SESSIONMODEL
     INPUT --> GAMEPAD
     GAMEPAD -->|"UserActivity"| RUNNER
     NOTIFICATIONS --> FDO_NOTIFY
@@ -324,7 +324,7 @@ The intended split is:
   - `auto`, `gnome`, native `wayland`, and deprecated `swayidle` compatibility
 - `session.rs`
   - backend-neutral session event model
-  - capability surface for desktop backends
+  - normalized source-observation boundary
   - top-level event consumption is mapped separately in
     [runtime-event-handler-map.md](runtime-event-handler-map.md)
 - `session/inactivity.rs`
@@ -343,8 +343,7 @@ The intended split is:
   - detailed in [gamepad-subsystem.md](gamepad-subsystem.md)
 - `session_bus.rs`
   - generic blocking D-Bus transport seam
-  - session-bus use for the GNOME monitor runtime
-  - system-bus use for logind lifecycle and session lock state
+  - consumed by the GNOME and logind source adapters
 - `session/runner.rs`
   - backend-neutral monitor and lifecycle runners
   - starts the user-session notification surface before screen backend work
@@ -352,36 +351,34 @@ The intended split is:
     screen backend is temporarily unavailable
   - combines backend observations with the inactivity engine
   - dispatches semantic session events into screen and lifecycle policy
-  - runs delegated `swayidle` by invoking the current executable's
-    `screen off` and `screen on` CLI commands
+  - starts source workers and multiplexes their normalized observations
 - `sources/linux/logind.rs`
   - Linux system lifecycle and current-session lock-state adapter
   - maps `org.freedesktop.login1` resume signals into canonical lifecycle
     events
   - reads the `PreparingForSleep` property used by the NetworkManager pre-down
     gate
-  - resolves only the current user's active local graphical session and maps
-    its `LockedHint` changes into canonical lock/unlock events
+  - owns the optional lock observer: system-bus connection, graphical-session
+    resolution, subscriptions, owner rebinding, and `LockedHint` translation
 - `sources/linux/network_manager.rs`
   - NetworkManager `pre-down` dispatcher source
   - emits `NetworkTeardownImminent` with the logind sleep-phase reading
 - `sources/desktop/gnome.rs`
-  - GNOME-specific capability probing plus ScreenSaver signal and IdleMonitor
-    method mapping
+  - owns GNOME session-bus setup, subscriptions, sender validation, Mutter
+    polling, and translation into normalized observations
 - `sources/desktop/wayland.rs`
   - native Wayland capability probing and dynamic registry/seat ownership
   - maps zero-timeout resumed notifications into desktop activity facts
 - `sources/desktop/swayidle.rs`
-  - `swayidle`-specific capability probing and hook-to-event mapping
-  - models the `swayidle` hook surface; production timeout/resume handling
-    currently delegates through the CLI/API command path
+  - owns the production `swayidle` process and its timeout/resume command shape
+  - delegates actions through the CLI/API command path
 
 The session-facing pieces should be read as one subsystem:
 
 - `backend.rs`
   - selects the active session backend
 - `session.rs`
-  - defines the homogenized session contract
+  - defines canonical session events and normalized source observations
 - `session/inactivity.rs`
   - owns session-phase synthesis and the configured inactivity deadline
 - `session/gamepad/`
@@ -389,8 +386,8 @@ The session-facing pieces should be read as one subsystem:
   - owns gamepad device discovery, event-triggered refresh, and reconciliation
   - see [gamepad-subsystem.md](gamepad-subsystem.md) for adapter and lifecycle details
 - `session/runner.rs`
-  - owns the shared native-session runtime, including gamepad activity and the
-    optional logind lock observer independently of the selected desktop provider
+  - owns shared native-session orchestration, including source selection,
+    worker lifetime, multiplexing, and gamepad activity
   - converts provider and auxiliary input into activity observations, resets
     the inactivity deadline, and dispatches source-classified runtime policy
   - treats `screen_idle_blank=disabled` as a passive user-session mode that
@@ -398,13 +395,12 @@ The session-facing pieces should be read as one subsystem:
   - treats delegated `swayidle` as a CLI/API client for timeout/resume actions
   - owns the `lifecycle` event loop for system sleep/wake handling
 - `sources/linux/logind.rs`
-  - adapts Linux system lifecycle signals and an eligible graphical session's
-    `LockedHint` into canonical events
+  - adapts Linux system lifecycle signals and owns observation of an eligible
+    graphical session's `LockedHint`
 - `sources/desktop/gnome.rs`, `sources/desktop/wayland.rs`, and
   `sources/desktop/swayidle.rs`
-  - adapt or model backend-specific surfaces against that shared session
-    contract; the production `swayidle` timeout/resume path enters through
-    CLI/API commands
+  - own their provider-specific connection or process mechanics and expose
+    normalized observations or delegated CLI/API execution to the runner
 
 ## Command Model
 
@@ -828,11 +824,11 @@ The runtime core owns:
 - retries and recovery behavior
 - lifecycle decisions
 
-Desktop backends should only answer questions like:
+Desktop source modules should only answer questions like:
 
-- which backend is active?
-- which session signals are available?
-- how should backend-specific signals map into runtime events?
+- how is the selected provider connected or started?
+- which native signals or activity facts are valid?
+- how should those facts map into normalized observations?
 
 `session.rs` defines the backend-neutral semantic contract:
 
@@ -845,16 +841,15 @@ Desktop backends should only answer questions like:
   - `AfterResume`
   - `Lock`
   - `Unlock`
-- backend capability flags
-- idle-timeout ownership semantics
+- a normalized observation carrying its source and observation time
 
 The detailed session model is documented in `docs/session-backend-model.md`.
 
 `sources/desktop/gnome.rs` is the native GNOME adapter. It currently provides:
 
-- capability probing
-- mapping from GNOME D-Bus monitor lines into `SessionEvent`
-- the GNOME event and idletime sources used by `lg-buddy monitor`
+- the GNOME session-bus connection and subscriptions
+- ScreenSaver sender ownership validation and signal mapping
+- Mutter idletime polling and normalized activity observations
 
 `sources/desktop/wayland.rs` is the native non-GNOME adapter. It owns the
 Wayland connection, registry, every advertised seat, and zero-timeout idle
@@ -863,12 +858,8 @@ the shared inactivity runtime; compositor idle does not directly blank the TV.
 
 `sources/desktop/swayidle.rs` is the delegated-tool adapter. It currently provides:
 
-- capability probing
-- mapping from `swayidle` hooks into `SessionEvent`
-
-Production `swayidle` monitor execution does not dispatch those modeled events
-directly for timeout/resume. It starts `swayidle` with command strings pointing
-back to the current LG Buddy executable:
+- production process invocation with command strings pointing back to the
+  current LG Buddy executable:
 
 - `screen off` for timeout
 - `screen on` for resume
@@ -896,10 +887,8 @@ asymmetric:
   change events, with periodic reconciliation for missed events
 - delegated `swayidle` monitor execution is implemented as CLI/API delegation
   for `timeout` and `resume` parity with the shell monitor
-- `swayidle` systemd-style hooks such as `before-sleep`, `after-resume`,
-  `lock`, and `unlock` are not wired into monitor behavior; system lifecycle is
-  handled by the NetworkManager pre-down gate plus logind lifecycle service,
-  while lock state is optional in the shared native runtime
+- system lifecycle is handled by the NetworkManager pre-down gate plus logind
+  lifecycle service, while lock state is optional in the shared native runtime
 
 `swayidle` remains an explicit and automatic compatibility fallback during the
 1.x migration window, but emits a deprecation notice and is not offered by
