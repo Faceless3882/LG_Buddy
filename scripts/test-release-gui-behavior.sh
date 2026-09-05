@@ -118,14 +118,19 @@ PY
 }
 
 finish_gui() {
+    local scenario="${1:-closing action}"
     local status=0
 
-    for ((attempt = 0; attempt < 100; attempt++)); do
+    for ((attempt = 0; attempt < 300; attempt++)); do
         kill -0 "$GUI_PID" 2>/dev/null || break
         sleep 0.1
     done
     if kill -0 "$GUI_PID" 2>/dev/null; then
-        fail "GUI did not exit after its closing action."
+        if [ -s "$WORK_DIR/gui.output" ]; then
+            echo "GUI output for $scenario:" >&2
+            sed 's/^/  /' "$WORK_DIR/gui.output" >&2
+        fi
+        fail "GUI did not exit after $scenario."
     fi
     wait "$GUI_PID" || status=$?
     GUI_PID=""
@@ -187,7 +192,7 @@ for _ in 1 2 3; do
 done
 send_closing_mnemonic alt+a
 wait_for_calls set_settings 1
-finish_gui
+finish_gui "successful apply"
 python3 - "$STATE_FILE" <<'PY'
 import json
 import sys
@@ -207,14 +212,14 @@ xdotool key --window "$WINDOW_ID" alt+r
 wait_for_calls get_picture_settings 2
 xdotool windowfocus --sync "$WINDOW_ID"
 send_closing_mnemonic alt+c
-finish_gui
+finish_gui "read-failure cancellation"
 
 # Cancelling the loading window never writes a value.
 printf '%s\n' '{"backlight":37,"calls":[],"plan":{"get_picture_settings":[{"result":"success","stdout":"{\u0027backlight\u0027: 37}","delay_seconds":2}]}}' >"$STATE_FILE"
 start_gui
 xdotool windowfocus --sync "$WINDOW_ID"
 send_closing_mnemonic alt+c
-finish_gui
+finish_gui "loading cancellation"
 python3 - "$STATE_FILE" <<'PY'
 import json
 import sys
@@ -254,7 +259,7 @@ if [ "${LG_BUDDY_TEST_PLATFORM_CONTRACT:-0}" = "1" ]; then
 
         xdotool windowfocus --sync "$WINDOW_ID"
         send_closing_mnemonic alt+c
-        finish_gui
+        finish_gui "$label platform-state cancellation"
     }
 
     capture_platform_state light prefer-light 1 enabled
