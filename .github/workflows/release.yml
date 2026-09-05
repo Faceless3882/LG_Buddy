@@ -85,7 +85,7 @@ jobs:
           python-version: "3.x"
 
       - name: Install release prerequisites
-        run: sudo apt-get update && sudo apt-get install -y binutils dbus-x11 libadwaita-1-dev libgtk-4-dev musl-tools strace xdotool xvfb zenity
+        run: sudo apt-get update && sudo apt-get install -y at-spi2-core binutils dbus-x11 libadwaita-1-dev libgtk-4-dev musl-tools python3-pyatspi strace xdotool xvfb zenity
 
       - name: Build headless runtime and GTK GUI
         env:

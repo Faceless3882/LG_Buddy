@@ -36,7 +36,7 @@ jobs:
           sudo env "PATH=$PATH" "CARGO_HOME=$CARGO_HOME" "RUSTUP_HOME=$RUSTUP_HOME" "RUSTUP_TOOLCHAIN=${RUSTUP_TOOLCHAIN:-stable}" "CARGO_TARGET_DIR=$sudo_target_dir" cargo test -p lg-buddy --lib platform_access_token::tests::persist_assigns_requested_owner_when_running_as_root -- --exact
 
       - name: Install GTK test prerequisites
-        run: sudo apt-get update && sudo apt-get install -y dbus-x11 libadwaita-1-dev libglib2.0-bin libgtk-4-dev xdotool xvfb zenity
+        run: sudo apt-get update && sudo apt-get install -y at-spi2-core dbus-x11 libadwaita-1-dev libglib2.0-bin libgtk-4-dev python3-pyatspi xdotool xvfb zenity
 
       - name: Run display-backed GTK test suite
         run: |
@@ -106,7 +106,7 @@ jobs:
           python-version: "3.x"
 
       - name: Install smoke-test prerequisites
-        run: sudo apt-get update && sudo apt-get install -y binutils dbus-x11 libadwaita-1-dev libgtk-4-dev musl-tools strace xdotool xvfb zenity
+        run: sudo apt-get update && sudo apt-get install -y at-spi2-core binutils dbus-x11 libadwaita-1-dev libgtk-4-dev musl-tools python3-pyatspi strace xdotool xvfb zenity
 
       - name: Build headless runtime and GTK GUI
         env:

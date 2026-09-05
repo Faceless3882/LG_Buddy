@@ -16,6 +16,8 @@ Compiling and testing the GTK frontend additionally requires:
 - `pkg-config`
 - a graphical session or virtual display for renderer tests
 - `xdotool` for the executable launch smoke test
+- AT-SPI 2 and its Python bindings (`python3-pyatspi` on Debian/Fedora,
+  `python-atspi` on Arch) for observable GUI behavior tests
 
 Running the interactive installer, exercising the legacy TV fallback, and
 testing release bundles also requires:
@@ -254,8 +256,8 @@ the branch contract and recovery process, see
 | `scripts/release_bundle_manifest.py` | Release-bundle identity manifest creator and validator |
 | `scripts/build-release-bundle.sh` | Release bundle builder |
 | `scripts/test-installed-gui.sh` | Installed GTK launcher and removal smoke test |
-| `scripts/test-release-gui-behavior.sh` | Display-backed installed GUI behavior smoke test |
-| `scripts/test-release-gui-accessibility.py` | External AT-SPI contract probe for the installed GTK GUI |
+| `scripts/test-release-gui-behavior.sh` | Display-backed installed GUI behavior smoke with externally observed presentation-state gates |
+| `scripts/test-release-gui-accessibility.py` | External AT-SPI presentation-state and accessibility contract probe for the installed GTK GUI |
 | `scripts/xwd_mean.py` | Standard-library XWD luminance probe for release theme smoke tests |
 | `scripts/test-release-linkage.sh` | Static runtime and GNU GUI linkage baseline check |
 | `scripts/test-release-bundle.sh` | Release bundle smoke test |
