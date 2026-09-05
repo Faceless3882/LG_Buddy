@@ -19,6 +19,7 @@ GUI_PID=""
 WINDOW_ID=""
 ACCESSIBILITY_BUS_PID=""
 ACCESSIBILITY_REGISTRY_PID=""
+ACCESSIBILITY_PYTHON=""
 
 fail() {
     echo "$1" >&2
@@ -126,6 +127,11 @@ finish_gui() {
         sleep 0.1
     done
     if kill -0 "$GUI_PID" 2>/dev/null; then
+        if xdotool search --onlyvisible --name "^${WINDOW_TITLE}$" >/dev/null 2>&1; then
+            echo "Brightness window remained visible; the closing action was not observed." >&2
+        else
+            echo "Brightness window closed, but the GUI process remained alive." >&2
+        fi
         if [ -s "$WORK_DIR/gui.output" ]; then
             echo "GUI output for $scenario:" >&2
             sed 's/^/  /' "$WORK_DIR/gui.output" >&2
@@ -147,6 +153,17 @@ start_accessibility_bus() {
     local launcher=""
     local registry=""
     local candidate=""
+
+    for candidate in \
+        "$(command -v python3 2>/dev/null || true)" \
+        /usr/bin/python3; do
+        if [ -n "$candidate" ] && [ -x "$candidate" ] && \
+            "$candidate" -c 'import pyatspi' >/dev/null 2>&1; then
+            ACCESSIBILITY_PYTHON="$candidate"
+            break
+        fi
+    done
+    [ -n "$ACCESSIBILITY_PYTHON" ] || fail "Python AT-SPI bindings are required for GUI state verification."
 
     for candidate in \
         "$(command -v at-spi-bus-launcher 2>/dev/null || true)" \
@@ -180,12 +197,18 @@ start_accessibility_bus() {
     sleep 0.2
 }
 
+observe_gui_state() {
+    "$ACCESSIBILITY_PYTHON" "$SCRIPT_DIR/test-release-gui-accessibility.py" \
+        --timeout 30 "$@"
+}
+
 # Read current state, reach the slider through the focus chain, edit it through
 # the keyboard, and apply it through its mnemonic.
 printf '%s\n' '{"backlight":50,"calls":[],"plan":{}}' >"$STATE_FILE"
-start_gui
+start_accessibility_bus
+start_gui enabled
 wait_for_calls get_picture_settings 1
-sleep 0.2
+observe_gui_state --expected-state ready --expected-slider-value 50
 xdotool windowfocus --sync "$WINDOW_ID"
 for _ in 1 2 3; do
     xdotool key --window "$WINDOW_ID" Tab Right
@@ -202,14 +225,16 @@ assert state["backlight"] != 50, state
 assert any(call.get("command") == "set_settings" for call in state["calls"]), state
 PY
 
-# A failed read stays visible and Retry performs a fresh read.
+# A failed read stays visible and Retry performs a fresh read. Observe each
+# rendered presentation before sending the action that depends on it.
 printf '%s\n' '{"backlight":64,"calls":[],"plan":{"get_picture_settings":[{"result":"error","status":1,"stderr":"planned read failure"},{"result":"success","stdout":"{\u0027backlight\u0027: 64}"}]}}' >"$STATE_FILE"
-start_gui
+start_gui enabled
 wait_for_calls get_picture_settings 1
-sleep 0.2
+observe_gui_state --expected-state read-failed
 xdotool windowfocus --sync "$WINDOW_ID"
 xdotool key --window "$WINDOW_ID" alt+r
 wait_for_calls get_picture_settings 2
+observe_gui_state --expected-state ready --expected-slider-value 64
 xdotool windowfocus --sync "$WINDOW_ID"
 send_closing_mnemonic alt+c
 finish_gui "read-failure cancellation"
@@ -233,40 +258,34 @@ PY
 
 if [ "${LG_BUDDY_TEST_PLATFORM_CONTRACT:-0}" = "1" ]; then
     command -v xwd >/dev/null || fail "xwd is required for theme verification."
-    start_accessibility_bus
 
     capture_platform_state() {
         local label="$1"
         local color_scheme="$2"
         local scale="$3"
-        local accessibility="$4"
         local geometry=""
         local screenshot="$WORK_DIR/$label.xwd"
 
         printf '%s\n' '{"backlight":50,"calls":[],"plan":{}}' >"$STATE_FILE"
-        start_gui "$accessibility" "$color_scheme" "$scale"
+        start_gui enabled "$color_scheme" "$scale"
         wait_for_calls get_picture_settings 1
-        sleep 0.3
+        observe_gui_state --expected-state ready --expected-slider-value 50
         geometry="$(xdotool getwindowgeometry --shell "$WINDOW_ID")"
         PLATFORM_WIDTH="$(printf '%s\n' "$geometry" | sed -n 's/^WIDTH=//p')"
         PLATFORM_HEIGHT="$(printf '%s\n' "$geometry" | sed -n 's/^HEIGHT=//p')"
         xwd -silent -id "$WINDOW_ID" -out "$screenshot"
         PLATFORM_MEAN="$(python3 "$SCRIPT_DIR/xwd_mean.py" "$screenshot")"
 
-        if [ "$accessibility" = "enabled" ]; then
-            python3 "$SCRIPT_DIR/test-release-gui-accessibility.py"
-        fi
-
         xdotool windowfocus --sync "$WINDOW_ID"
         send_closing_mnemonic alt+c
         finish_gui "$label platform-state cancellation"
     }
 
-    capture_platform_state light prefer-light 1 enabled
+    capture_platform_state light prefer-light 1
     LIGHT_WIDTH="$PLATFORM_WIDTH"
     LIGHT_HEIGHT="$PLATFORM_HEIGHT"
     LIGHT_MEAN="$PLATFORM_MEAN"
-    capture_platform_state dark prefer-dark 2 disabled
+    capture_platform_state dark prefer-dark 2
     DARK_WIDTH="$PLATFORM_WIDTH"
     DARK_HEIGHT="$PLATFORM_HEIGHT"
     DARK_MEAN="$PLATFORM_MEAN"
