@@ -29,6 +29,7 @@ This is where most tests should live.
 - backend selection rules
 - GNOME signal-to-event mapping
 - native Wayland registry, seat, and resumed-notification mapping
+- logind current-session selection and `LockedHint` mapping
 - gamepad device discovery, device-event filtering, raw event mapping, registry
   behavior, and activity policy
 - TV command output parsing
@@ -80,8 +81,8 @@ This is the place for integration tests and contract tests.
 - backend detection against mocked command/process boundaries
 - GNOME runner behavior against a private session-bus harness
 - native Wayland provider capability and registry-churn behavior
-- logind lifecycle and NetworkManager gate behavior against a private system-bus
-  harness
+- logind lifecycle, current-session lock state, and NetworkManager gate behavior
+  against a private system-bus harness
 - desktop and auxiliary gamepad activity resetting one LG Buddy-owned deadline
 - update-install orchestration ordering against an injected runtime, including
   refusal, decline, concurrent acquisition, candidate preflight, installer,
@@ -146,6 +147,8 @@ It is useful when we want to express scenarios like:
 
 - when the configured HDMI input is active and the user goes idle, LG Buddy blanks the TV and records ownership
 - when the user returns after LG Buddy blanked the TV, LG Buddy restores the screen
+- when the graphical session locks, LG Buddy blanks the TV without waiting for
+  the inactivity timeout
 - when aggressive restore policy is enabled, wake/activity can restore even without a marker
 - when GNOME is available, backend detection resolves to `gnome`
 - when fresh configuration accepts the default `lg_webos` platform, pairing
@@ -248,6 +251,10 @@ Examples:
 - native Wayland resumed-notification and registry-removal mapping
 - gamepad activity integration with the LG Buddy inactivity deadline
 - screen runtime-phase eligibility over the private logind system-bus seam
+- logind lock state entering the shared blanked state without making unlock a
+  restore trigger, while fresh independent activity still restores
+- logind lock monitoring rebinding and reconciling after logind changes its
+  unique D-Bus owner
 
 Native Wayland changes also require manual checks on Plasma/KWin and at least
 one other target compositor. Verify that explicit and automatic `wayland`

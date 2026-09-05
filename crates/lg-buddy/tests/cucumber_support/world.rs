@@ -274,6 +274,23 @@ exit 1\n",
         self.system_logind = Some(logind);
     }
 
+    pub fn configure_system_logind_lock(&mut self, locked: bool) {
+        let logind = MockSystemLogind::new("cucumber-system-logind-lock");
+        logind.reset();
+        logind.set_locked_hint(locked);
+        self.ensure_env()
+            .set("DBUS_SYSTEM_BUS_ADDRESS", logind.address());
+        self.ensure_env().set("XDG_SESSION_ID", "test-session");
+        self.system_logind = Some(logind);
+    }
+
+    pub fn queue_system_logind_lock(&self, locked: bool) {
+        self.system_logind
+            .as_ref()
+            .expect("mock system logind should be configured")
+            .queue_locked_hint_signal(locked);
+    }
+
     pub fn assert_native_access_token(&self, expected: &str) {
         let stored = self
             .native_access_token_store()

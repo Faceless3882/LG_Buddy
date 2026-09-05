@@ -2,6 +2,7 @@ use dbus::arg::{PropMap, Variant as DbusVariant};
 use dbus::blocking::Connection as DbusConnection;
 use dbus::channel::{MatchingReceiver, Sender as DbusSender};
 use dbus::Message as DbusMessage;
+use dbus::Path as DbusPath;
 use dbus_crossroads::{Crossroads, MethodErr};
 use serde_json::{json, Map, Value};
 use std::collections::VecDeque;
@@ -541,6 +542,10 @@ pub struct MockSystemLogind {
 struct MockSystemLogindState {
     preparing_for_sleep: bool,
     prepare_for_sleep_signals: VecDeque<bool>,
+    locked_hint: bool,
+    locked_hint_client_ready: bool,
+    locked_hint_read_count: usize,
+    locked_hint_signals: VecDeque<bool>,
 }
 
 #[allow(dead_code)]
@@ -564,6 +569,10 @@ impl MockSystemLogind {
         self.patch_state(|state| {
             state.preparing_for_sleep = false;
             state.prepare_for_sleep_signals.clear();
+            state.locked_hint = false;
+            state.locked_hint_client_ready = false;
+            state.locked_hint_read_count = 0;
+            state.locked_hint_signals.clear();
         });
     }
 
@@ -573,6 +582,14 @@ impl MockSystemLogind {
 
     pub fn queue_prepare_for_sleep_signal(&self, value: bool) {
         self.patch_state(|state| state.prepare_for_sleep_signals.push_back(value));
+    }
+
+    pub fn set_locked_hint(&self, value: bool) {
+        self.patch_state(|state| state.locked_hint = value);
+    }
+
+    pub fn queue_locked_hint_signal(&self, value: bool) {
+        self.patch_state(|state| state.locked_hint_signals.push_back(value));
     }
 
     fn patch_state<F>(&self, f: F)
@@ -817,10 +834,71 @@ fn spawn_mock_logind_service(
                     Ok((fd,))
                 },
             );
+            builder.method(
+                "GetSession",
+                ("session_id",),
+                ("session",),
+                move |_, _, (session_id,): (String,)| {
+                    if session_id != "test-session" {
+                        return Err(MethodErr::failed("unknown mock logind session"));
+                    }
+                    Ok((
+                        DbusPath::new("/org/freedesktop/login1/session/_test_session")
+                            .expect("mock session object path"),
+                    ))
+                },
+            );
+            builder.method("ListSessions", (), ("sessions",), move |_, _, ()| {
+                let uid = unsafe { libc::geteuid() };
+                Ok((vec![(
+                    "test-session".to_string(),
+                    uid,
+                    "test-user".to_string(),
+                    "seat0".to_string(),
+                    DbusPath::new("/org/freedesktop/login1/session/_test_session")
+                        .expect("mock session object path"),
+                )],))
+            });
+        });
+        let session_state = Arc::clone(&state);
+        let session_iface = crossroads.register("org.freedesktop.login1.Session", move |builder| {
+            builder
+                .property::<(u32, DbusPath<'static>), _>("User")
+                .get(move |_, _| {
+                    Ok((
+                        unsafe { libc::geteuid() },
+                        DbusPath::new("/org/freedesktop/login1/user/_test")
+                            .expect("mock user object path"),
+                    ))
+                });
+            builder
+                .property::<bool, _>("Remote")
+                .get(move |_, _| Ok(false));
+            builder
+                .property::<String, _>("Type")
+                .get(move |_, _| Ok("wayland".to_string()));
+            builder
+                .property::<String, _>("Class")
+                .get(move |_, _| Ok("user".to_string()));
+            builder
+                .property::<bool, _>("Active")
+                .get(move |_, _| Ok(true));
+            let state = Arc::clone(&session_state);
+            builder.property::<bool, _>("LockedHint").get(move |_, _| {
+                let mut state = state.lock().expect("mock logind state lock");
+                state.locked_hint_read_count += 1;
+                state.locked_hint_client_ready = state.locked_hint_read_count >= 2;
+                Ok(state.locked_hint)
+            });
         });
         crossroads.insert(
             "/org/freedesktop/login1",
             &[properties_iface, manager_iface],
+            (),
+        );
+        crossroads.insert(
+            "/org/freedesktop/login1/session/_test_session",
+            &[session_iface],
             (),
         );
 
@@ -850,23 +928,51 @@ fn emit_queued_mock_logind_signal(
     connection: &DbusConnection,
     state: &Arc<Mutex<MockSystemLogindState>>,
 ) {
-    let signal = {
+    let prepare_for_sleep = {
         let mut state = state.lock().expect("mock logind state lock");
         state.prepare_for_sleep_signals.pop_front()
     };
-    let Some(preparing_for_sleep) = signal else {
-        return;
+    if let Some(preparing_for_sleep) = prepare_for_sleep {
+        let message = DbusMessage::new_signal(
+            "/org/freedesktop/login1",
+            "org.freedesktop.login1.Manager",
+            "PrepareForSleep",
+        )
+        .expect("create mock PrepareForSleep signal")
+        .append1(preparing_for_sleep);
+
+        let _ = connection.send(message);
+    }
+
+    let locked_hint = {
+        let mut state = state.lock().expect("mock logind state lock");
+        if state.locked_hint_client_ready {
+            let locked_hint = state.locked_hint_signals.pop_front();
+            if let Some(value) = locked_hint {
+                state.locked_hint = value;
+            }
+            locked_hint
+        } else {
+            None
+        }
     };
+    if let Some(locked_hint) = locked_hint {
+        let mut changed = PropMap::new();
+        changed.insert("LockedHint".to_string(), DbusVariant(Box::new(locked_hint)));
+        let message = DbusMessage::new_signal(
+            "/org/freedesktop/login1/session/_test_session",
+            "org.freedesktop.DBus.Properties",
+            "PropertiesChanged",
+        )
+        .expect("create mock LockedHint PropertiesChanged signal")
+        .append3(
+            "org.freedesktop.login1.Session".to_string(),
+            changed,
+            Vec::<String>::new(),
+        );
 
-    let message = DbusMessage::new_signal(
-        "/org/freedesktop/login1",
-        "org.freedesktop.login1.Manager",
-        "PrepareForSleep",
-    )
-    .expect("create mock PrepareForSleep signal")
-    .append1(preparing_for_sleep);
-
-    let _ = connection.send(message);
+        let _ = connection.send(message);
+    }
 }
 
 #[derive(Debug, Default)]

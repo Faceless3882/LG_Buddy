@@ -239,7 +239,7 @@ the branch contract and recovery process, see
 | `crates/lg-buddy/src/session/inactivity.rs` | Session inactivity deadline and phase synthesis |
 | `crates/lg-buddy/src/session/gamepad/` | Gamepad activity discovery, device-event refresh, adapters, capture, registry, and policy |
 | `crates/lg-buddy/src/session_bus.rs` | Generic D-Bus transport used by session and system event sources |
-| `crates/lg-buddy/src/sources/linux/logind.rs` | Linux logind lifecycle signal and property adapter |
+| `crates/lg-buddy/src/sources/linux/logind.rs` | Linux logind lifecycle and current-session lock-state adapter |
 | `crates/lg-buddy/src/sources/linux/network_manager.rs` | NetworkManager pre-down lifecycle source adapter |
 | `crates/lg-buddy/src/sources/desktop/gnome.rs` | GNOME backend integration |
 | `crates/lg-buddy/src/sources/desktop/wayland.rs` | Native Wayland idle/activity provider |

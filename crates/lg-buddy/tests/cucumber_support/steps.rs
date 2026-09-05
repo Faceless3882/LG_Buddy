@@ -103,6 +103,16 @@ fn mock_system_logind_preparing_for_sleep(world: &mut LgBuddyWorld, value: Strin
     world.configure_system_logind(value == "true");
 }
 
+#[given(regex = r#"mock system logind reports LockedHint=(true|false)"#)]
+fn mock_system_logind_locked_hint(world: &mut LgBuddyWorld, value: String) {
+    world.configure_system_logind_lock(value == "true");
+}
+
+#[given(regex = r#"mock system logind changes LockedHint to (true|false)"#)]
+fn mock_system_logind_changes_locked_hint(world: &mut LgBuddyWorld, value: String) {
+    world.queue_system_logind_lock(value == "true");
+}
+
 #[given(regex = r#"the TV auth key file override is "([^"]+)""#)]
 fn tv_auth_key_file_override(world: &mut LgBuddyWorld, path: String) {
     world.set_auth_key_file_override(&path);
