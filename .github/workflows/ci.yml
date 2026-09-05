@@ -192,10 +192,10 @@ jobs:
         include:
           - name: Fedora 43
             image: fedora:43
-            setup: dnf install -y at-spi2-core binutils curl dbus-x11 findutils glib2 gobject-introspection gsettings-desktop-schemas gtk4 gzip libadwaita python3 python3-pyatspi shadow-utils strace tar util-linux which xdotool xorg-x11-server-Xvfb xorg-x11-xauth xwd zenity
+            setup: dnf install -y at-spi2-core binutils curl dbus-x11 findutils glib2 gobject-introspection gsettings-desktop-schemas gtk4 gzip libadwaita libglvnd-gles python3 python3-pyatspi shadow-utils strace tar util-linux which xdotool xorg-x11-server-Xvfb xorg-x11-xauth xwd zenity
           - name: Arch current
             image: archlinux:latest
-            setup: pacman -Syu --noconfirm at-spi2-core binutils curl dbus glib2 gtk4 gzip libadwaita python python-atspi shadow strace tar util-linux which xdotool xorg-server-xvfb xorg-xauth xorg-xwd zenity
+            setup: pacman -Syu --noconfirm at-spi2-core binutils curl dbus diffutils glib2 gtk4 gzip libadwaita python python-atspi shadow strace tar util-linux which xdotool xorg-server-xvfb xorg-xauth xorg-xwd zenity
     container:
       image: ${{ matrix.image }}
 

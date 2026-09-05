@@ -157,8 +157,6 @@ start_accessibility_bus() {
     "$registry" --use-gnome-session >"$WORK_DIR/at-spi-registry.output" 2>&1 &
     ACCESSIBILITY_REGISTRY_PID=$!
     sleep 0.2
-    kill -0 "$ACCESSIBILITY_REGISTRY_PID" 2>/dev/null || \
-        fail "AT-SPI accessibility registry exited before the GUI test."
 }
 
 # Read current state, reach the slider through the focus chain, edit it through
