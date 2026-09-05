@@ -1154,7 +1154,7 @@ fn marker_state(exists: bool) -> &'static str {
 fn is_session_screen_source(source: EventSource) -> bool {
     matches!(
         source,
-        EventSource::DesktopSession | EventSource::AuxiliaryInput
+        EventSource::DesktopSession | EventSource::AuxiliaryInput | EventSource::LinuxLogind
     )
 }
 
@@ -1436,6 +1436,33 @@ mod tests {
     }
 
     #[test]
+    fn logind_lock_uses_the_existing_input_blank_and_marker_policy() {
+        let temp_dir = TestDir::new("screen-outcome-logind-lock");
+        let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
+        let mock = MockBscpylgtv::new("screen-outcome-logind-lock-tv");
+        mock.set_input("HDMI_2");
+        let client = client_for_mock(&mock);
+        let mut phase = FixedRuntimePhaseProvider::not_pending();
+        let lifecycle_status = NoopSystemLifecycleStatusProvider;
+
+        let mut output = Vec::new();
+        let outcome = run_screen_off_with_outcome_for_event(
+            &mut output,
+            &sample_config(HdmiInput::Hdmi2),
+            &marker,
+            &client,
+            RuntimeEvent::new(EventSource::LinuxLogind, RuntimeEventKind::SessionLocked),
+            &mut phase,
+            &lifecycle_status,
+        )
+        .expect("logind lock should use normal session blank policy");
+
+        assert_eq!(outcome.actions.len(), 1);
+        assert_eq!(outcome.actions[0].kind, ActionKind::TvScreenBlank);
+        assert!(marker.exists());
+    }
+
+    #[test]
     fn screen_off_outcome_records_input_mismatch_no_action_and_marker_clear() {
         let temp_dir = TestDir::new("screen-outcome-off-skip");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
@@ -1589,7 +1616,7 @@ mod tests {
     }
 
     #[test]
-    fn session_screen_off_is_ineligible_while_machine_sleep_is_pending() {
+    fn logind_lock_screen_off_is_ineligible_while_machine_sleep_is_pending() {
         let temp_dir = TestDir::new("screen-phase-off-pending");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
         let mock = MockBscpylgtv::new("screen-phase-off-pending-tv");
@@ -1604,7 +1631,7 @@ mod tests {
             &sample_config(HdmiInput::Hdmi2),
             &marker,
             &client,
-            RuntimeEvent::new(EventSource::DesktopSession, RuntimeEventKind::SessionIdle),
+            RuntimeEvent::new(EventSource::LinuxLogind, RuntimeEventKind::SessionLocked),
             &mut phase,
             &lifecycle_status,
         )

@@ -40,6 +40,7 @@ the shared native-session path.
 | NetworkManager `pre-down` while logind `PreparingForSleep=true` | `lg-buddy nm-pre-down` | `sources::linux::network_manager` -> `lifecycle` | Join the central suspend rail before network teardown; wait for an in-progress logind rail or run the pre-sleep TV decision. |
 | logind `PrepareForSleep(true)` | `lg-buddy lifecycle` | `sources::linux::logind` -> `session::runner` -> `lifecycle` | Enter the central suspend rail under the logind delay inhibitor so systems without a NetworkManager `pre-down` hook still get bounded pre-sleep TV handling. |
 | logind `PrepareForSleep(false)` | `lg-buddy lifecycle` | `sources::linux::logind` -> `session::runner` -> `lifecycle` | Run wake restore policy and clear sleep-cycle coordination state. |
+| graphical logind session `LockedHint=true` | `lg-buddy monitor` | `sources::linux::logind` -> `session::runner` -> `screen` | Enter the normal blanked inactivity state and apply session screen-off policy. |
 | user graphical session start | `lg-buddy monitor` | `session::runner::run_monitor` | Detect the session backend and run the selected monitor path. |
 | manual screen blank | `lg-buddy screen off` | `commands` -> `screen` | Blank or power off the TV if LG Buddy owns the configured input. |
 | manual screen restore | `lg-buddy screen on` | `commands` -> `screen` | Restore the screen when marker and restore-policy rules allow it. |
@@ -71,6 +72,7 @@ lifecycle paths:
 
 ```text
 system lifecycle sources
+session lock state
 desktop idle/activity sources
 auxiliary activity sources
   -> narrow source adapters
@@ -89,6 +91,7 @@ Examples:
 | Source category | Example source | Runtime representation |
 | --- | --- | --- |
 | system lifecycle | `org.freedesktop.login1`, platform-native lifecycle APIs | `MachinePreparingForSleep`, `MachineResumed`, `NetworkTeardownImminent` |
+| session lock state | current graphical logind session `LockedHint` | `SessionLocked`, `SessionUnlocked` from `LinuxLogind` |
 | desktop activity | Mutter, native Wayland idle protocols | activity observations |
 | desktop wake request | GNOME ScreenSaver wake signal, future equivalents | `WakeRequested` |
 | auxiliary activity | Linux gamepad input | `UserActivityObserved` |
@@ -107,8 +110,10 @@ auxiliary activity facts
   -> inactivity observations
   -> reset the InactivityEngine deadline
   -> configured timeout expires
-  -> Idle / Active / WakeRequested / UserActivity
-  -> screen policy
+  -> Idle / Active / WakeRequested / UserActivity ─┐
+                                                    ├-> screen policy
+current-session logind LockedHint=true              │
+  -> immediate Lock / BlankNow ─────────────────────┘
 ```
 
 Current native-runtime inputs:
@@ -120,17 +125,24 @@ Current native-runtime inputs:
 | `org.gnome.ScreenSaver.WakeUpScreen` | `WakeRequested` | `InactivityEngine` |
 | Recent activity reported by `org.gnome.Mutter.IdleMonitor.GetIdletime` | `DesktopActivityObserved` | `InactivityEngine` |
 | Linux gamepad activity | `UserActivityObserved` from `AuxiliaryInput` | Shared native-session runtime -> `InactivityEngine` |
+| Initial or changed logind `LockedHint=true` | `SessionEvent::Lock` from `LinuxLogind` | Shared native-session runtime -> `InactivityEngine` |
+| Changed logind `LockedHint=false` after lock | `SessionEvent::Unlock` from `LinuxLogind` | Clear the observed lock state without requesting screen restore |
 
 The desktop rows are GNOME-specific source surfaces. Gamepad activity is an
 independent auxiliary source owned by the shared native-session runtime. The
 key architectural point is that blank/restore decisions are made after
 normalization, not inside a desktop adapter.
 
+After a lock blank, only independent desktop or gamepad activity newer than the
+lock can produce `RestoreNow`. Stale observations and GNOME provider
+active/wake signals do not make unlock itself a restore trigger.
+
 The resulting decisions are dispatched as:
 
 | Inactivity decision | Dispatched event | Policy target |
 | --- | --- | --- |
 | `BlankNow` | `SessionEvent::Idle` -> `RuntimeEvent` from `DesktopSession` | `screen::run_screen_off_from_env_for_event` |
+| `BlankNow` from session lock | `SessionEvent::Lock` -> `RuntimeEvent::SessionLocked` from `LinuxLogind` | `screen::run_screen_off_from_env_for_event` |
 | `RestoreNow` from provider active | `SessionEvent::Active` -> `RuntimeEvent` from `DesktopSession` | `screen::run_screen_on_from_env_for_event` |
 | `RestoreNow` from wake request | `SessionEvent::WakeRequested` -> `RuntimeEvent` from `DesktopSession` | `screen::run_screen_on_from_env_for_event` |
 | `RestoreNow` from desktop activity | `SessionEvent::UserActivity` -> `RuntimeEvent` from `DesktopSession` | `screen::run_screen_on_from_env_for_event` |
@@ -228,15 +240,25 @@ and resume to direct `screen off` / `screen on` CLI/API commands; richer
 | `UserActivity` | Run `screen on`. |
 | `BeforeSleep` | Run pre-sleep TV power-off policy. |
 | `AfterResume` | Run wake restore policy. |
-| `Lock` | Log as unhandled. |
-| `Unlock` | Log as unhandled. |
+| `Lock` | Run `screen off` through normal session policy. |
+| `Unlock` | Log the transition without a screen action. |
 
-For session-originated `Idle`, `Active`, `WakeRequested`, and `UserActivity`,
-screen policy checks `runtime_phase.rs` before doing TV I/O. If logind reports
+For session-originated `Idle`, `Active`, `WakeRequested`, `UserActivity`, and
+`Lock`, screen policy checks `runtime_phase.rs` before doing TV I/O. If logind reports
 that machine sleep is pending and lifecycle automation is enabled, screen policy
 records a runtime-phase no-action decision and leaves TV/state untouched. If the
 phase read fails, screen policy fails open and proceeds with the ordinary
 screen action.
+
+The lock observer resolves only the current UID's active, local graphical
+logind session. `XDG_SESSION_ID`, when present, is validated; otherwise exactly
+one eligible session must exist. It watches logind bus ownership and re-resolves
+and reconciles the session after logind restarts. Missing, ambiguous, or
+unavailable session state produces a diagnostic without changing inactivity
+behavior or native backend eligibility. A desktop or locker that never updates
+`LockedHint` simply produces no lock events. Unlock never sends a wake, restore,
+or activity event. Fresh independent activity observed while locked remains able
+to restore the screen through the existing marker policy.
 
 ## Lifecycle Default And Migration Stance
 

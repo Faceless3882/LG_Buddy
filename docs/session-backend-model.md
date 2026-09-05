@@ -62,6 +62,11 @@ These are the semantic events the runtime should reason about.
 - `WakeRequested` is optional.
   - Some providers expose an explicit wake request.
   - Others only expose idle/resume transitions.
+- Lock state is an optional cross-cutting Linux source, not a prerequisite of a
+  selected desktop backend. The shared native runtime observes the resolved
+  graphical logind session's `LockedHint` when available. Initial or changed
+  `true` maps to `Lock`; `false` maps to `Unlock` only after a prior locked
+  state. Unlock is informational and never requests screen restore.
 
 ## Capability Model
 
@@ -120,8 +125,8 @@ This is the current mapping for the known backends, with implementation status c
 
 | Backend | Idle | Active | WakeRequested | UserActivity | BeforeSleep | AfterResume | Lock/Unlock | Idle Timeout Source | Current Rust Status |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| GNOME | Yes | Yes | Yes | Yes | No current surface in LG Buddy | No current surface in LG Buddy | No current surface in LG Buddy | `LgBuddyConfigured` | Implemented with LG Buddy-owned timeout policy over ScreenSaver and Mutter observations |
-| Native Wayland | Observed but not authoritative | Resumed notification | No | Yes | No | No | No | `LgBuddyConfigured` | Explicit opt-in using `ext_idle_notifier_v1` version 2 or newer |
+| GNOME | Yes | Yes | Yes | Yes | No current surface in LG Buddy | No current surface in LG Buddy | No desktop-provider surface; optional logind overlay | `LgBuddyConfigured` | Implemented with LG Buddy-owned timeout policy over ScreenSaver and Mutter observations |
+| Native Wayland | Observed but not authoritative | Resumed notification | No | Yes | No | No | No desktop-provider surface; optional logind overlay | `LgBuddyConfigured` | Explicit opt-in using `ext_idle_notifier_v1` version 2 or newer |
 | `swayidle` | Yes | Yes | No | No direct equivalent | Yes | Yes | Yes, when built with systemd support | `LgBuddyConfigured` | Implemented for delegated `timeout -> Idle` and `resume -> Active`; `before-sleep`, `after-resume`, `lock`, and `unlock` are modeled but not executed |
 
 ## Provider-Specific Mapping
@@ -165,6 +170,47 @@ hosts where those reports do not appear on the evdev node.
 GNOME and native Wayland use the shared native-session runtime. The Wayland
 provider owns only its connection, registry, seats, notifications, and activity
 facts; it does not acquire gamepad responsibility.
+
+### Session Lock State
+
+GNOME and native Wayland also start an optional system-bus observer for the
+current graphical logind session. Session selection accepts only an active,
+local `x11` or `wayland` session in a user class and owned by the current UID.
+An explicit `XDG_SESSION_ID` is validated against those rules; without it, LG
+Buddy requires exactly one matching session and refuses ambiguous candidates.
+
+The observer resolves logind's current unique bus owner, subscribes to
+`org.freedesktop.DBus.Properties.PropertiesChanged` from that owner for the
+exact session, and reconciles the initial `LockedHint` before processing changes.
+It watches ownership of `org.freedesktop.login1` and repeats session resolution,
+subscription, and reconciliation when logind restarts.
+A lock enters the existing blanked inactivity state and dispatches
+`SessionLocked` from `LinuxLogind`, so configured-input, marker, sleep-phase,
+and restore policy remain centralized in `screen.rs`. Unlock performs no screen
+action. Independent desktop or gamepad activity observed after the lock can
+restore the picture while the lock screen is still shown. Stale pre-lock
+observations and provider wake/deactivation signals associated with unlocking do
+not restore it; normal inactivity timing resumes from fresh activity.
+
+Known environment support follows whether the desktop or locker maintains
+logind's `LockedHint` for the graphical session:
+
+| Environment | Lock observation |
+| --- | --- |
+| GNOME Shell 40 or newer on Wayland or X11 | Supported |
+| KDE Plasma 5.20 or newer on Wayland or X11 | Supported |
+| niri built with D-Bus support and a valid `XDG_SESSION_ID` | Supported |
+| stock sway with swaylock | Absent by default; `LockedHint` is not maintained |
+| Hyprland with hyprlock | Absent by default; `LockedHint` is not maintained |
+
+This behavior is opportunistic. If logind is unavailable or no eligible session
+can be resolved, LG Buddy logs a diagnostic and continues ordinary idle/activity
+monitoring. If the desktop or locker never updates `LockedHint`, no lock event is
+observed and ordinary monitoring likewise continues unchanged. It does not use
+desktop-name checks, logind lock-request signals, locker hooks, or a Wayland
+session-lock protocol. The logind observer is not a backend eligibility or
+selection requirement. The delegated `swayidle` path does not host the shared
+native observer.
 
 ### Native Wayland
 
@@ -218,6 +264,9 @@ The code split is:
   - GNOME-specific probing and event mapping
 - `crates/lg-buddy/src/sources/desktop/wayland.rs`
   - native Wayland registry, seat, idle-notification, and activity mapping
+- `crates/lg-buddy/src/sources/linux/logind.rs`
+  - system lifecycle mapping plus optional current-session `LockedHint`
+    discovery and observation
 - `crates/lg-buddy/src/sources/desktop/swayidle.rs`
   - `swayidle`-specific probing and event mapping
 

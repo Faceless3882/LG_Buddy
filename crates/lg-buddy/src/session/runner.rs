@@ -43,7 +43,10 @@ use crate::sources::desktop::gnome::{
 };
 use crate::sources::desktop::wayland::run_wayland_activity_monitor;
 use crate::sources::linux::logind::{
-    acquire_sleep_delay_inhibitor, add_logind_signal_match, map_prepare_for_sleep_signal,
+    acquire_sleep_delay_inhibitor, add_locked_hint_signal_match, add_logind_owner_signal_match,
+    add_logind_signal_match, locked_hint, logind_owner_changed, map_locked_hint_change,
+    map_prepare_for_sleep_signal, resolve_current_graphical_session, resolve_logind_owner,
+    LockedHintChange, LockedHintTracker, LogindSession, LogindSessionError,
 };
 use crate::state::{ScreenOwnershipMarker, StateScope};
 use crate::RunError;
@@ -59,6 +62,7 @@ const GAMEPAD_ACTIVITY_RECONCILE_INTERVAL: Duration = Duration::from_secs(300);
 const GAMEPAD_ACTIVITY_SEND_INTERVAL: Duration = Duration::from_millis(500);
 const LOGIND_LIFECYCLE_PROCESS_INTERVAL: Duration = Duration::from_secs(5);
 const LOGIND_LIFECYCLE_TEST_PROCESS_INTERVAL: Duration = Duration::from_millis(50);
+const LOGIND_LOCK_PROCESS_INTERVAL: Duration = Duration::from_millis(100);
 const SESSION_AGENT_BACKEND_RETRY_INTERVAL: Duration = Duration::from_secs(30);
 const GNOME_MONITOR_TEST_TIMEOUT_SECS_ENV: &str = "LG_BUDDY_GNOME_MONITOR_TEST_TIMEOUT_SECS";
 const LIFECYCLE_MONITOR_TEST_TIMEOUT_SECS_ENV: &str =
@@ -208,6 +212,19 @@ impl<E: SessionActionExecutor> SessionEventDispatcher<E> {
                     }
                 }
             }
+            SessionEvent::Lock => {
+                writeln!(
+                    writer,
+                    "LG Buddy Monitor: Session locked; requesting screen blank."
+                )?;
+                let runtime_event = RuntimeEvent::from_session_event(source, event);
+                match self.executor.screen_off(runtime_event) {
+                    Ok(output) => write_command_output(writer, &output)?,
+                    Err(err) => {
+                        writeln!(writer, "LG Buddy Monitor: screen-off action failed. {err}")?
+                    }
+                }
+            }
             SessionEvent::Active | SessionEvent::WakeRequested | SessionEvent::UserActivity => {
                 writeln!(
                     writer,
@@ -251,11 +268,10 @@ impl<E: SessionActionExecutor> SessionEventDispatcher<E> {
                     )?,
                 }
             }
-            SessionEvent::Lock | SessionEvent::Unlock => {
+            SessionEvent::Unlock => {
                 writeln!(
                     writer,
-                    "LG Buddy Monitor: Session event `{}` is not handled yet.",
-                    event.as_str()
+                    "LG Buddy Monitor: Session unlocked; no screen restore requested."
                 )?;
             }
         }
@@ -745,6 +761,28 @@ where
     E: SessionActionExecutor,
     S: FnOnce(mpsc::Sender<RunnerMessage>, Arc<LatestInactivityObservation>) -> JoinHandle<()>,
 {
+    run_native_session_monitor_with_lock_monitor(
+        writer,
+        dispatcher,
+        backend,
+        spawn_monitor,
+        |sender| Some(spawn_logind_lock_thread(sender)),
+    )
+}
+
+fn run_native_session_monitor_with_lock_monitor<W, E, S, L>(
+    writer: &mut W,
+    dispatcher: &mut SessionEventDispatcher<E>,
+    backend: ScreenBackend,
+    spawn_monitor: S,
+    spawn_lock_monitor: L,
+) -> Result<(), SessionRunnerError>
+where
+    W: Write,
+    E: SessionActionExecutor,
+    S: FnOnce(mpsc::Sender<RunnerMessage>, Arc<LatestInactivityObservation>) -> JoinHandle<()>,
+    L: FnOnce(mpsc::Sender<RunnerMessage>) -> Option<LogindLockThread>,
+{
     let blank_after = Duration::from_millis(resolve_idle_timeout_ms());
     let started_at = Instant::now();
     let mut inactivity = if session_screen_ownership_marker_exists(backend)? {
@@ -757,6 +795,7 @@ where
     let latest_inactivity = Arc::new(LatestInactivityObservation::default());
     let monitor_handle = spawn_monitor(sender.clone(), Arc::clone(&latest_inactivity));
     let _gamepad_monitor = spawn_gamepad_activity_thread(sender.clone());
+    let _logind_lock_monitor = spawn_lock_monitor(sender.clone());
     let mut monitor_result = Ok(());
 
     loop {
@@ -809,39 +848,55 @@ where
             }
             RunnerMessage::SessionEvent {
                 event: SessionEvent::Active,
+                source,
                 observed_at,
             } => handle_inactivity_observation(
                 writer,
                 dispatcher,
                 &mut inactivity,
-                EventSource::DesktopSession,
+                source,
                 InactivityObservation::ProviderActive,
                 observed_at,
             )?,
             RunnerMessage::SessionEvent {
                 event: SessionEvent::WakeRequested,
+                source,
                 observed_at,
             } => handle_inactivity_observation(
                 writer,
                 dispatcher,
                 &mut inactivity,
-                EventSource::DesktopSession,
+                source,
                 InactivityObservation::WakeRequested,
                 observed_at,
             )?,
             RunnerMessage::SessionEvent {
                 event: SessionEvent::UserActivity,
+                source,
                 observed_at,
             } => handle_inactivity_observation(
                 writer,
                 dispatcher,
                 &mut inactivity,
-                EventSource::DesktopSession,
+                source,
                 InactivityObservation::UserActivityObserved,
                 observed_at,
             )?,
-            RunnerMessage::SessionEvent { event, .. } => {
-                dispatcher.dispatch_event(writer, event)?;
+            RunnerMessage::SessionEvent {
+                event: SessionEvent::Lock,
+                source,
+                observed_at,
+            } => handle_session_lock(writer, dispatcher, &mut inactivity, source, observed_at)?,
+            RunnerMessage::SessionEvent {
+                event: SessionEvent::Unlock,
+                source,
+                ..
+            } => {
+                inactivity.observe_unlock();
+                dispatcher.dispatch_event_from_source(writer, source, SessionEvent::Unlock)?;
+            }
+            RunnerMessage::SessionEvent { event, source, .. } => {
+                dispatcher.dispatch_event_from_source(writer, source, event)?;
             }
             RunnerMessage::Diagnostic(message) => {
                 writeln!(writer, "LG Buddy Monitor: {message}")?;
@@ -988,6 +1043,124 @@ fn spawn_wayland_monitor_thread(
         });
         let _ = sender.send(RunnerMessage::MonitorExited(result));
     })
+}
+
+fn spawn_logind_lock_thread(sender: mpsc::Sender<RunnerMessage>) -> LogindLockThread {
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread_stop = Arc::clone(&stop);
+    let handle = thread::spawn(move || {
+        let result = new_system_bus_client()
+            .map_err(Into::into)
+            .and_then(|mut bus| run_logind_lock_monitor_process(&mut bus, &sender, &thread_stop));
+        report_logind_lock_monitor_result(&sender, result);
+    });
+
+    LogindLockThread {
+        stop,
+        handle: Some(handle),
+    }
+}
+
+fn report_logind_lock_monitor_result(
+    sender: &mpsc::Sender<RunnerMessage>,
+    result: Result<(), crate::sources::linux::logind::LogindSessionError>,
+) {
+    if let Err(err) = result {
+        let _ = sender.send(RunnerMessage::Diagnostic(format!(
+            "session lock monitoring unavailable: {err}"
+        )));
+    }
+}
+
+fn run_logind_lock_monitor_process(
+    bus: &mut impl SessionBusClient,
+    sender: &mpsc::Sender<RunnerMessage>,
+    stop: &AtomicBool,
+) -> Result<(), LogindSessionError> {
+    let explicit_session_id = std::env::var("XDG_SESSION_ID").ok();
+    let current_uid = current_effective_uid();
+    add_logind_owner_signal_match(bus)?;
+    let (mut session, owner, initial_locked) =
+        bind_logind_lock_target(bus, explicit_session_id.as_deref(), current_uid)?;
+    let mut logind_owner = Some(owner);
+
+    let mut tracker = LockedHintTracker::default();
+    if !send_locked_hint_event(sender, &mut tracker, initial_locked) {
+        return Ok(());
+    }
+
+    while !stop.load(Ordering::SeqCst) {
+        let Some(signal) = bus.process(LOGIND_LOCK_PROCESS_INTERVAL)? else {
+            continue;
+        };
+
+        if let Some(new_owner) = logind_owner_changed(&signal) {
+            if new_owner.is_none() {
+                logind_owner = None;
+                continue;
+            }
+
+            let (new_session, owner, locked) =
+                bind_logind_lock_target(bus, explicit_session_id.as_deref(), current_uid)?;
+            session = new_session;
+            logind_owner = Some(owner);
+            if !send_locked_hint_event(sender, &mut tracker, locked) {
+                return Ok(());
+            }
+            continue;
+        }
+
+        let Some(logind_owner) = logind_owner.as_deref() else {
+            continue;
+        };
+        let Some(change) = map_locked_hint_change(&signal, &session, logind_owner) else {
+            continue;
+        };
+        let locked = match change {
+            LockedHintChange::Changed(locked) => locked,
+            LockedHintChange::Invalidated => locked_hint(bus, &session)?,
+        };
+        if !send_locked_hint_event(sender, &mut tracker, locked) {
+            return Ok(());
+        }
+    }
+
+    Ok(())
+}
+
+fn bind_logind_lock_target(
+    bus: &mut impl SessionBusClient,
+    explicit_session_id: Option<&str>,
+    current_uid: u32,
+) -> Result<(LogindSession, String, bool), LogindSessionError> {
+    let session = resolve_current_graphical_session(bus, explicit_session_id, current_uid)?;
+    let owner = resolve_logind_owner(bus)?;
+    add_locked_hint_signal_match(bus, &session, &owner)?;
+    let locked = locked_hint(bus, &session)?;
+    Ok((session, owner, locked))
+}
+
+fn send_locked_hint_event(
+    sender: &mpsc::Sender<RunnerMessage>,
+    tracker: &mut LockedHintTracker,
+    locked: bool,
+) -> bool {
+    let Some(event) = tracker.observe(locked) else {
+        return true;
+    };
+
+    sender
+        .send(RunnerMessage::SessionEvent {
+            event,
+            source: EventSource::LinuxLogind,
+            observed_at: Instant::now(),
+        })
+        .is_ok()
+}
+
+fn current_effective_uid() -> u32 {
+    // SAFETY: `geteuid` has no preconditions and does not mutate process state.
+    unsafe { libc::geteuid() }
 }
 
 fn spawn_gamepad_activity_thread(
@@ -1245,6 +1418,7 @@ fn run_gnome_monitor_process(
         if sender
             .send(RunnerMessage::SessionEvent {
                 event,
+                source: EventSource::DesktopSession,
                 observed_at: Instant::now(),
             })
             .is_err()
@@ -1257,6 +1431,7 @@ fn run_gnome_monitor_process(
 enum RunnerMessage {
     SessionEvent {
         event: SessionEvent,
+        source: EventSource,
         observed_at: Instant,
     },
     ActivityObservation {
@@ -1273,6 +1448,21 @@ enum RunnerMessage {
 struct GamepadActivityThread {
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
+}
+
+#[derive(Debug)]
+struct LogindLockThread {
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl Drop for LogindLockThread {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
 }
 
 impl Drop for GamepadActivityThread {
@@ -1566,6 +1756,20 @@ fn handle_inactivity_timeout<W: Write, E: SessionActionExecutor>(
     Ok(())
 }
 
+fn handle_session_lock<W: Write, E: SessionActionExecutor>(
+    writer: &mut W,
+    dispatcher: &mut SessionEventDispatcher<E>,
+    inactivity: &mut InactivityEngine,
+    source: EventSource,
+    observed_at: Instant,
+) -> Result<(), SessionRunnerError> {
+    if inactivity.observe_lock(observed_at) == InactivityDecision::BlankNow {
+        dispatcher.dispatch_event_from_source(writer, source, SessionEvent::Lock)?;
+    }
+
+    Ok(())
+}
+
 fn shell_quote(path: &Path) -> String {
     let rendered = path.to_string_lossy();
     let escaped = rendered.replace('\'', "'\"'\"'");
@@ -1601,10 +1805,11 @@ mod tests {
         complete_gamepad_refresh, gamepad_activity_send_due,
         gamepad_device_event_refresh_requested, gamepad_refresh_due, handle_inactivity_observation,
         handle_inactivity_timeout, normalize_idle_timeout_secs, poll_gnome_idle_monitor_once,
-        run_lifecycle_monitor_with_bus, run_native_session_monitor, schedule_gamepad_refresh,
-        shell_quote, GamepadDeviceEventMonitor, GamepadDeviceEventRefresh,
-        GamepadDiagnosticEmitter, LatestInactivityObservation, RunnerMessage,
-        SessionActionExecutor, SessionEventDispatcher, TimedInactivityObservation,
+        report_logind_lock_monitor_result, run_lifecycle_monitor_with_bus,
+        run_logind_lock_monitor_process, run_native_session_monitor_with_lock_monitor,
+        schedule_gamepad_refresh, shell_quote, GamepadDeviceEventMonitor,
+        GamepadDeviceEventRefresh, GamepadDiagnosticEmitter, LatestInactivityObservation,
+        RunnerMessage, SessionActionExecutor, SessionEventDispatcher, TimedInactivityObservation,
         TrustedScreenSaverSignals, GAMEPAD_ACTIVITY_REFRESH_RETRY_INTERVAL,
         GAMEPAD_ACTIVITY_SEND_INTERVAL,
     };
@@ -1620,14 +1825,15 @@ mod tests {
         GNOME_SCREEN_SAVER_INTERFACE, GNOME_SCREEN_SAVER_NAME, GNOME_SCREEN_SAVER_PATH,
     };
     use crate::sources::linux::logind::{
-        LOGIND_MANAGER_INTERFACE, LOGIND_MANAGER_PATH, LOGIND_SERVICE_NAME,
+        LogindSessionError, LOGIND_MANAGER_INTERFACE, LOGIND_MANAGER_PATH, LOGIND_SERVICE_NAME,
+        LOGIND_SESSION_INTERFACE,
     };
     use crate::RunError;
     use std::collections::VecDeque;
     use std::fs;
     use std::io;
     use std::path::{Path, PathBuf};
-    use std::sync::{mpsc, Mutex, OnceLock};
+    use std::sync::{atomic::AtomicBool, mpsc, Mutex, OnceLock};
     use std::thread;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -1712,7 +1918,9 @@ mod tests {
     #[derive(Debug, Default)]
     struct FakeSessionBus {
         method_replies: Vec<Result<BusReply, SessionBusError>>,
+        process_results: VecDeque<Result<Option<BusSignal>, SessionBusError>>,
         method_calls: Vec<(String, String, String, String)>,
+        signal_match_count: usize,
     }
 
     #[derive(Debug)]
@@ -1743,7 +1951,8 @@ mod tests {
 
         fn add_signal_match(&mut self, rule: BusSignalMatch<'_>) -> Result<(), SessionBusError> {
             let _ = rule;
-            unreachable!("signal matches are not used in runner poller tests")
+            self.signal_match_count += 1;
+            Ok(())
         }
 
         fn process(
@@ -1751,7 +1960,9 @@ mod tests {
             timeout: std::time::Duration,
         ) -> Result<Option<BusSignal>, SessionBusError> {
             let _ = timeout;
-            unreachable!("message pumping is not used in runner poller tests")
+            self.process_results
+                .pop_front()
+                .expect("test should provide every expected bus process result")
         }
     }
 
@@ -1813,6 +2024,62 @@ mod tests {
         )
         .with_sender(LOGIND_SERVICE_NAME)
         .with_body(vec![BusValue::Bool(value)])
+    }
+
+    fn logind_owner_changed_signal(old_owner: &str, new_owner: &str) -> BusSignal {
+        BusSignal::new(DBUS_OBJECT_PATH, DBUS_INTERFACE, "NameOwnerChanged")
+            .with_sender(DBUS_SERVICE_NAME)
+            .with_body(vec![
+                BusValue::String(LOGIND_SERVICE_NAME.to_string()),
+                BusValue::String(old_owner.to_string()),
+                BusValue::String(new_owner.to_string()),
+            ])
+    }
+
+    fn locked_hint_changed_signal(session_path: &str, owner: &str, locked: bool) -> BusSignal {
+        BusSignal::new(
+            session_path,
+            "org.freedesktop.DBus.Properties",
+            "PropertiesChanged",
+        )
+        .with_sender(owner)
+        .with_body(vec![
+            BusValue::String(LOGIND_SESSION_INTERFACE.to_string()),
+            BusValue::Dict(vec![(
+                BusValue::String("LockedHint".to_string()),
+                BusValue::Variant(Box::new(BusValue::Bool(locked))),
+            )]),
+            BusValue::Array(Vec::new()),
+        ])
+    }
+
+    fn graphical_session_properties(uid: u32) -> BusReply {
+        let variant = |value| BusValue::Variant(Box::new(value));
+        BusReply::new(vec![BusValue::Dict(vec![
+            (
+                BusValue::String("User".to_string()),
+                variant(BusValue::Struct(vec![
+                    BusValue::U32(uid),
+                    BusValue::ObjectPath(format!("/org/freedesktop/login1/user/_{uid}")),
+                ])),
+            ),
+            (
+                BusValue::String("Remote".to_string()),
+                variant(BusValue::Bool(false)),
+            ),
+            (
+                BusValue::String("Type".to_string()),
+                variant(BusValue::String("wayland".to_string())),
+            ),
+            (
+                BusValue::String("Class".to_string()),
+                variant(BusValue::String("user".to_string())),
+            ),
+            (
+                BusValue::String("Active".to_string()),
+                variant(BusValue::Bool(true)),
+            ),
+        ])])
     }
 
     fn unique_config_path(label: &str) -> PathBuf {
@@ -2067,24 +2334,187 @@ system_sleep_wake_policy={policy}
     }
 
     #[test]
-    fn unhandled_events_are_logged_without_running_actions() {
+    fn logind_lock_blanks_and_unlock_does_not_restore() {
         let executor = FakeActionExecutor::default();
         let mut dispatcher = SessionEventDispatcher::new(executor);
         let mut output = Vec::new();
 
-        for event in [SessionEvent::Lock, SessionEvent::Unlock] {
-            dispatcher
-                .dispatch_event(&mut output, event)
-                .expect("dispatch noop event");
-        }
+        dispatcher
+            .dispatch_event_from_source(&mut output, EventSource::LinuxLogind, SessionEvent::Lock)
+            .expect("dispatch lock event");
+        dispatcher
+            .dispatch_event_from_source(&mut output, EventSource::LinuxLogind, SessionEvent::Unlock)
+            .expect("dispatch unlock event");
 
         let output = String::from_utf8(output).expect("utf8");
-        assert!(output.contains("lock"));
-        assert!(output.contains("unlock"));
-        assert_eq!(dispatcher.executor.screen_off_calls, 0);
+        assert!(output.contains("Session locked"));
+        assert!(output.contains("no screen restore requested"));
+        assert_eq!(dispatcher.executor.screen_off_calls, 1);
         assert_eq!(dispatcher.executor.screen_on_calls, 0);
+        assert_eq!(
+            dispatcher.executor.screen_off_events,
+            vec![RuntimeEvent::new(
+                EventSource::LinuxLogind,
+                RuntimeEventKind::SessionLocked,
+            )]
+        );
         assert_eq!(dispatcher.executor.before_sleep_calls, 0);
         assert_eq!(dispatcher.executor.after_resume_calls, 0);
+    }
+
+    #[test]
+    fn logind_lock_monitor_reconciles_initial_locked_hint() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous_session_id = std::env::var_os("XDG_SESSION_ID");
+        std::env::set_var("XDG_SESSION_ID", "34");
+
+        let session_path = "/org/freedesktop/login1/session/_34";
+        let uid = super::current_effective_uid();
+        let mut bus = FakeSessionBus {
+            method_replies: vec![
+                Ok(BusReply::new(vec![BusValue::ObjectPath(
+                    session_path.to_string(),
+                )])),
+                Ok(graphical_session_properties(uid)),
+                Ok(BusReply::new(vec![BusValue::String(":1.42".to_string())])),
+                Ok(BusReply::new(vec![BusValue::Variant(Box::new(
+                    BusValue::Bool(true),
+                ))])),
+            ],
+            ..FakeSessionBus::default()
+        };
+        let (sender, receiver) = mpsc::channel();
+        let stop = AtomicBool::new(true);
+
+        run_logind_lock_monitor_process(&mut bus, &sender, &stop)
+            .expect("initial LockedHint should be reconciled before the signal loop");
+
+        match receiver.recv().expect("initial lock event") {
+            RunnerMessage::SessionEvent {
+                event,
+                source,
+                observed_at: _,
+            } => {
+                assert_eq!(event, SessionEvent::Lock);
+                assert_eq!(source, EventSource::LinuxLogind);
+            }
+            _ => panic!("expected canonical session lock event"),
+        }
+        assert_eq!(bus.signal_match_count, 2);
+        assert_eq!(
+            bus.method_calls
+                .iter()
+                .map(|call| call.3.as_str())
+                .collect::<Vec<_>>(),
+            vec!["GetSession", "GetAll", "GetNameOwner", "Get"]
+        );
+
+        match previous_session_id {
+            Some(value) => std::env::set_var("XDG_SESSION_ID", value),
+            None => std::env::remove_var("XDG_SESSION_ID"),
+        }
+    }
+
+    #[test]
+    fn logind_lock_monitor_rebinds_after_logind_restarts() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous_session_id = std::env::var_os("XDG_SESSION_ID");
+        std::env::set_var("XDG_SESSION_ID", "34");
+
+        let session_path = "/org/freedesktop/login1/session/_34";
+        let uid = super::current_effective_uid();
+        let bind_replies = |owner: &str, locked: bool| {
+            vec![
+                Ok(BusReply::new(vec![BusValue::ObjectPath(
+                    session_path.to_string(),
+                )])),
+                Ok(graphical_session_properties(uid)),
+                Ok(BusReply::new(vec![BusValue::String(owner.to_string())])),
+                Ok(BusReply::new(vec![BusValue::Variant(Box::new(
+                    BusValue::Bool(locked),
+                ))])),
+            ]
+        };
+        let mut bus = FakeSessionBus {
+            method_replies: bind_replies(":1.42", false)
+                .into_iter()
+                .chain(bind_replies(":1.99", false))
+                .collect(),
+            process_results: VecDeque::from([
+                Ok(Some(logind_owner_changed_signal(":1.42", ""))),
+                Ok(Some(logind_owner_changed_signal("", ":1.99"))),
+                Ok(Some(locked_hint_changed_signal(
+                    session_path,
+                    ":1.99",
+                    true,
+                ))),
+                Err(SessionBusError::Transport("stop test loop".to_string())),
+            ]),
+            ..FakeSessionBus::default()
+        };
+        let (sender, receiver) = mpsc::channel();
+        let stop = AtomicBool::new(false);
+
+        assert_eq!(
+            run_logind_lock_monitor_process(&mut bus, &sender, &stop),
+            Err(LogindSessionError::Bus(SessionBusError::Transport(
+                "stop test loop".to_string()
+            )))
+        );
+
+        match receiver.recv().expect("lock event after logind restart") {
+            RunnerMessage::SessionEvent { event, source, .. } => {
+                assert_eq!(event, SessionEvent::Lock);
+                assert_eq!(source, EventSource::LinuxLogind);
+            }
+            _ => panic!("expected canonical session lock event"),
+        }
+        assert!(receiver.try_recv().is_err());
+        assert_eq!(bus.signal_match_count, 3);
+        assert_eq!(
+            bus.method_calls
+                .iter()
+                .map(|call| call.3.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "GetSession",
+                "GetAll",
+                "GetNameOwner",
+                "Get",
+                "GetSession",
+                "GetAll",
+                "GetNameOwner",
+                "Get",
+            ]
+        );
+
+        match previous_session_id {
+            Some(value) => std::env::set_var("XDG_SESSION_ID", value),
+            None => std::env::remove_var("XDG_SESSION_ID"),
+        }
+    }
+
+    #[test]
+    fn unavailable_logind_lock_monitor_reports_diagnostic_without_exiting_native_monitor() {
+        let (sender, receiver) = mpsc::channel();
+
+        report_logind_lock_monitor_result(
+            &sender,
+            Err(LogindSessionError::NoCurrentGraphicalSession),
+        );
+
+        match receiver.recv().expect("availability diagnostic") {
+            RunnerMessage::Diagnostic(message) => {
+                assert!(message.contains("session lock monitoring unavailable"));
+                assert!(message.contains("no active local graphical logind session"));
+            }
+            _ => panic!("optional logind source must not terminate the native monitor"),
+        }
+        assert!(receiver.try_recv().is_err());
     }
 
     #[test]
@@ -2712,7 +3142,7 @@ system_sleep_wake_policy={policy}
         let mut dispatcher = SessionEventDispatcher::new(executor);
         let mut output = Vec::new();
 
-        let result = run_native_session_monitor(
+        let result = run_native_session_monitor_with_lock_monitor(
             &mut output,
             &mut dispatcher,
             ScreenBackend::Auto,
@@ -2729,6 +3159,7 @@ system_sleep_wake_policy={policy}
                     let _ = sender.send(RunnerMessage::MonitorExited(result));
                 })
             },
+            |_| None,
         );
 
         std::env::remove_var("LG_BUDDY_SESSION_RUNTIME_DIR");
@@ -2746,6 +3177,93 @@ system_sleep_wake_policy={policy}
                 RuntimeEventKind::UserActivityObserved,
             )]
         );
+    }
+
+    #[test]
+    fn lock_blank_ignores_unlock_signals_and_restores_for_fresh_independent_activity() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let runtime_dir = unique_config_path("native-session-lock-runtime");
+        std::env::set_var("LG_BUDDY_SESSION_RUNTIME_DIR", &runtime_dir);
+        std::env::set_var("LG_BUDDY_IDLE_TIMEOUT", "300");
+        std::env::set_var(super::GAMEPAD_ACTIVITY_SOURCE_ENV, "disabled");
+
+        let executor = FakeActionExecutor::default();
+        let mut dispatcher = SessionEventDispatcher::new(executor);
+        let mut output = Vec::new();
+
+        let result = run_native_session_monitor_with_lock_monitor(
+            &mut output,
+            &mut dispatcher,
+            ScreenBackend::Auto,
+            |sender, _latest_inactivity| {
+                thread::spawn(move || {
+                    let locked_at = Instant::now();
+                    for event in [SessionEvent::Lock, SessionEvent::Lock] {
+                        let _ = sender.send(RunnerMessage::SessionEvent {
+                            event,
+                            source: EventSource::LinuxLogind,
+                            observed_at: locked_at,
+                        });
+                    }
+                    let _ = sender.send(RunnerMessage::ActivityObservation {
+                        source: EventSource::DesktopSession,
+                        observation: InactivityObservation::DesktopActivityObserved,
+                        observed_at: locked_at - Duration::from_millis(1),
+                    });
+                    for event in [SessionEvent::WakeRequested, SessionEvent::Active] {
+                        let _ = sender.send(RunnerMessage::SessionEvent {
+                            event,
+                            source: EventSource::DesktopSession,
+                            observed_at: locked_at + Duration::from_millis(1),
+                        });
+                    }
+                    let _ = sender.send(RunnerMessage::SessionEvent {
+                        event: SessionEvent::Unlock,
+                        source: EventSource::LinuxLogind,
+                        observed_at: locked_at + Duration::from_millis(2),
+                    });
+                    let _ = sender.send(RunnerMessage::SessionEvent {
+                        event: SessionEvent::Active,
+                        source: EventSource::DesktopSession,
+                        observed_at: locked_at + Duration::from_millis(2),
+                    });
+                    let _ = sender.send(RunnerMessage::ActivityObservation {
+                        source: EventSource::DesktopSession,
+                        observation: InactivityObservation::DesktopActivityObserved,
+                        observed_at: locked_at + Duration::from_millis(3),
+                    });
+                    let _ = sender.send(RunnerMessage::MonitorExited(Ok(())));
+                })
+            },
+            |_| None,
+        );
+
+        std::env::remove_var("LG_BUDDY_SESSION_RUNTIME_DIR");
+        std::env::remove_var("LG_BUDDY_IDLE_TIMEOUT");
+        std::env::remove_var(super::GAMEPAD_ACTIVITY_SOURCE_ENV);
+
+        result.expect("shared native session runtime should process lock state");
+        assert_eq!(dispatcher.executor.screen_off_calls, 1);
+        assert_eq!(dispatcher.executor.screen_on_calls, 1);
+        assert_eq!(
+            dispatcher.executor.screen_off_events,
+            vec![RuntimeEvent::new(
+                EventSource::LinuxLogind,
+                RuntimeEventKind::SessionLocked,
+            )]
+        );
+        assert_eq!(
+            dispatcher.executor.screen_on_events,
+            vec![RuntimeEvent::new(
+                EventSource::DesktopSession,
+                RuntimeEventKind::UserActivityObserved,
+            )]
+        );
+        let output = String::from_utf8(output).expect("utf8");
+        assert_eq!(output.matches("Session locked").count(), 1);
+        assert!(output.contains("no screen restore requested"));
     }
 
     #[test]

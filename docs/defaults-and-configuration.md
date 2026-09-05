@@ -134,11 +134,14 @@ choice.
 `screen_idle_blank` follows the same policy model:
 
 - automatic session idle blank/restore defaults to enabled
-- users who want update notifications without idle-driven TV control can set
+- in supported environments, a reported session lock also requests the same
+  immediate blank policy; unlock never requests restore
+- users who want update notifications without session-driven TV control can set
   `screen_idle_blank=disabled`
 - the installed user-session service still runs so notification handoff remains
   available
 - the supported values are `enabled` and `disabled`
+- there is no separate session-lock setting
 
 `system_sleep_wake_policy` follows the same model:
 
