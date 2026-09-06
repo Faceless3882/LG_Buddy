@@ -1755,7 +1755,9 @@ mod tests {
     };
     use crate::config::ScreenBackend;
     use crate::events::{EventSource, RuntimeEvent, RuntimeEventKind};
-    use crate::session::inactivity::{InactivityEngine, InactivityObservation};
+    use crate::session::inactivity::{
+        InactivityEngine, InactivityObservation, POST_LOCK_ACTIVITY_GRACE,
+    };
     use crate::session::SessionEvent;
     use crate::session_bus::{
         BusMethodCall, BusReply, BusSignal, BusSignalMatch, BusValue, SessionBusClient,
@@ -2915,9 +2917,14 @@ system_sleep_wake_policy={policy}
                         observed_at: locked_at + Duration::from_millis(2),
                     });
                     let _ = sender.send(RunnerMessage::ActivityObservation {
+                        source: EventSource::AuxiliaryInput,
+                        observation: InactivityObservation::UserActivityObserved,
+                        observed_at: locked_at + Duration::from_millis(3),
+                    });
+                    let _ = sender.send(RunnerMessage::ActivityObservation {
                         source: EventSource::DesktopSession,
                         observation: InactivityObservation::DesktopActivityObserved,
-                        observed_at: locked_at + Duration::from_millis(3),
+                        observed_at: locked_at + POST_LOCK_ACTIVITY_GRACE,
                     });
                     let _ = sender.send(RunnerMessage::MonitorExited(Ok(())));
                 })

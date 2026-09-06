@@ -254,7 +254,8 @@ Examples:
 - gamepad activity integration with the LG Buddy inactivity deadline
 - screen runtime-phase eligibility over the private logind system-bus seam
 - logind lock state entering the shared blanked state without making unlock a
-  restore trigger, while fresh independent activity still restores
+  restore trigger, while observation-time tests cover pre-lock, post-lock grace,
+  boundary, and accepted desktop and auxiliary activity
 - logind lock monitoring rebinding and reconciling after logind changes its
   unique D-Bus owner
 - swayidle production timeout/resume process arguments

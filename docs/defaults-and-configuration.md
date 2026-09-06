@@ -136,6 +136,9 @@ choice.
 - automatic session idle blank/restore defaults to enabled
 - in supported environments, a reported session lock also requests the same
   immediate blank policy; unlock never requests restore
+- a lock-triggered blank ignores desktop and gamepad activity for a fixed one
+  second before accepting activity-driven restore; this is a safety constant,
+  not a user setting
 - users who want update notifications without session-driven TV control can set
   `screen_idle_blank=disabled`
 - the installed user-session service still runs so notification handoff remains

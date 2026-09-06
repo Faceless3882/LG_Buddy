@@ -150,10 +150,14 @@ subscription, and reconciliation when logind restarts.
 A lock enters the existing blanked inactivity state and dispatches
 `SessionLocked` from `LinuxLogind`, so configured-input, marker, sleep-phase,
 and restore policy remain centralized in `screen.rs`. Unlock performs no screen
-action. Independent desktop or gamepad activity observed after the lock can
-restore the picture while the lock screen is still shown. Stale pre-lock
-observations and provider wake/deactivation signals associated with unlocking do
-not restore it; normal inactivity timing resumes from fresh activity.
+action. A lock-triggered blank starts a fixed one-second activity grace period.
+Independent desktop or gamepad activity observed before the lock or inside that
+period is ignored without canceling the pending timed power-off. At the grace
+boundary, the first fresh independent activity can restore the picture while the
+lock screen is still shown. The shared policy compares each sample's monotonic
+observation time with the lock time, so delayed dispatch does not change the
+decision. Provider wake/deactivation signals associated with unlocking do not
+restore it; normal inactivity timing resumes from accepted fresh activity.
 
 Known environment support follows whether the desktop or locker maintains
 logind's `LockedHint` for the graphical session:
