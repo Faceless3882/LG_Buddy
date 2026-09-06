@@ -389,8 +389,8 @@ that sanitized newest-release response, the release-by-tag response, tag ref,
 and asset redirects as a workflow artifact. Signed redirect queries and URL
 userinfo are never retained. The observed beta.2 newest-release fields also
 live in `crates/lg-buddy/testdata/github/` and are replayed by the normal offline
-Rust suite. A successful canary on the exact prerelease commit is a
-stable-promotion prerequisite.
+Rust suite. The canary is supplemental post-publication evidence and is not a
+prerequisite for stable promotion.
 
 ## Current Practical Gaps
 

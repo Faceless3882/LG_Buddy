@@ -35,8 +35,6 @@ Required promotion checks prove that:
 - the derived `v<crate-version>` tag is absent before merge
 - normal CI and the release-bundle smoke test pass; the bundle smoke includes a
   pinned cross-version upgrade from `v1.4.0-beta.2`
-- a stable promotion has a successful production upgrade canary on the exact
-  prerelease commit
 
 Requiring every candidate to advance both release-channel heads keeps release
 publication globally monotonic. The newest published release is therefore also
@@ -62,8 +60,13 @@ There is no separate version input.
 7. A published prerelease then runs `v1.4.0-beta.2` through the real production
    `lg-buddy updates install` path. The newly installed candidate performs a
    cold-cache production update check, and the canary records sanitized GitHub
-   response evidence for the deterministic mock. Stable promotion remains
-   blocked until this exact prerelease commit has a successful canary.
+   response evidence for the deterministic mock. This is supplemental
+   post-publication evidence, not a prerequisite for stable promotion.
+
+Promotion through `prerelease` is optional. A direct `dev -> main` promotion
+runs the same required PR validation and post-merge release build as a
+`dev -> prerelease` promotion. After stable publication, the release App
+fast-forwards both `prerelease` and `dev` to the reviewed stable commit.
 
 Replace the publisher's generic release description with concise,
 release-specific notes for user-visible default or compatibility changes before

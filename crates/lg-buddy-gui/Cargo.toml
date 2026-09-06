@@ -1,6 +1,6 @@
 [package]
 name = "lg-buddy-gui"
-version = "1.5.0-beta.1"
+version = "1.5.0"
 edition = "2021"
 publish = false
 

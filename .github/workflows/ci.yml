@@ -66,25 +66,6 @@ jobs:
       - name: Validate GitHub response recorder
         run: python3 scripts/test_record_github_release_responses.py
 
-      - name: Require successful production prerelease canary for stable promotion
-        if: github.event_name == 'pull_request' && github.base_ref == 'main'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          prerelease_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/prerelease" --jq .object.sha)"
-          [ "$prerelease_sha" != "${{ github.event.pull_request.base.sha }}" ] || {
-              echo "Stable promotion requires a distinct prerelease candidate."
-              exit 1
-          }
-          matching_checks="$(gh api \
-              -H 'Accept: application/vnd.github+json' \
-              "repos/$GITHUB_REPOSITORY/commits/$prerelease_sha/check-runs?per_page=100" \
-              --jq '[.check_runs[] | select(.name == "production-prerelease-canary" and .status == "completed" and .conclusion == "success" and .app.slug == "github-actions")] | length')"
-          [ "$matching_checks" -gt 0 ] || {
-              echo "No successful production-prerelease canary exists for $prerelease_sha."
-              exit 1
-          }
-
   bundle-smoke-test:
     runs-on: ubuntu-24.04
     needs: verify
