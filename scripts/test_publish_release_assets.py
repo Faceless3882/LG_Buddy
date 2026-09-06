@@ -461,7 +461,13 @@ class PublishReleaseAssetsTests(unittest.TestCase):
         self.assertEqual(edits[0][3:], ["--draft=false"])
 
     def test_empty_or_placeholder_notes_block_publication(self) -> None:
-        for notes in ("", " \n\t", PLACEHOLDER_NOTES):
+        for notes in (
+            "",
+            " \n\t",
+            PLACEHOLDER_NOTES,
+            f" \n{PLACEHOLDER_NOTES}\t\n",
+            PLACEHOLDER_NOTES.replace(" ", "\n"),
+        ):
             with self.subTest(notes=notes):
                 self.write_state(
                     exists=True,

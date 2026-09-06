@@ -154,7 +154,7 @@ jobs:
             dist/*.tar.gz
             dist/sha256sums.txt
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 35
 
   stage-release-draft:
     name: stage-release-draft

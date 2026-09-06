@@ -276,7 +276,9 @@ release_notes_are_ready() {
     local state="$1"
     printf '%s' "$state" | jq -e --arg placeholder "$PLACEHOLDER_NOTES" '
         (.body // "") as $body |
-        ($body != $placeholder) and (($body | gsub("\\s"; "") | length) > 0)
+        ($body | gsub("\\s"; "")) as $normalized_body |
+        ($placeholder | gsub("\\s"; "")) as $normalized_placeholder |
+        ($normalized_body != $normalized_placeholder) and ($normalized_body | length > 0)
     ' >/dev/null
 }
 

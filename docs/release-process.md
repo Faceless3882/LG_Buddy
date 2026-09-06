@@ -87,10 +87,10 @@ release run can be rerun safely: an incomplete draft remains private and is
 resumed only when its tag, classification, and existing assets match the merged
 release commit. If publication was attempted before the notes were ready, update
 the draft, rerun the failed jobs, and approve the environment again. The staged
-workflow artifact is retained for 30 days, matching GitHub's maximum wait for an
-environment approval; after that, rerun the whole workflow to rebuild it. A
-published release is accepted only when its expected asset set is complete and
-byte-for-byte identical.
+workflow artifact is retained for 35 days, leaving a margin beyond GitHub's
+30-day maximum wait for an environment approval; after that, rerun the whole
+workflow to rebuild it. A published release is accepted only when its expected
+asset set is complete and byte-for-byte identical.
 
 Repository release immutability must remain enabled. GitHub applies it only when
 a draft is published, so the publisher uploads and verifies every expected asset
