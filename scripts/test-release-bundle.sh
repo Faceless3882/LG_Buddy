@@ -369,6 +369,8 @@ assert_executable "$BUNDLE_GUI"
     exit 1
 }
 bash "$SCRIPT_DIR/test-release-linkage.sh" "$BUNDLE_DIR/lg-buddy" "$BUNDLE_GUI"
+bash "$SCRIPT_DIR/test-installer-gui-dependencies.sh" \
+    "$BUNDLE_DIR/install.sh" "$BUNDLE_DIR/lg-buddy" "$BUNDLE_GUI" apt
 
 PAYLOAD_REFUSAL_ROOT="$WORK_DIR/payload-refusal-root"
 PAYLOAD_REFUSAL_HOME="$WORK_DIR/payload-refusal-home"
@@ -880,12 +882,31 @@ cmp -s "$NATIVE_ACCESS_TOKEN_SNAPSHOT" "$NATIVE_ACCESS_TOKEN_FILE"
 mkdir -p "$(dirname "$USER_DESKTOP_ENTRY")"
 printf 'stale user desktop launcher\n' >"$USER_DESKTOP_ENTRY"
 
+UPGRADE_DEPENDENCIES_INSTALLED="$WORK_DIR/upgrade-dependencies-installed"
+UPGRADE_PACKAGE_LOG="$WORK_DIR/upgrade-package-manager.log"
+UPGRADE_RUNTIME_PROBE="$INSTALLER_STUB_DIR/gui-runtime-probe"
+cat >"$UPGRADE_RUNTIME_PROBE" <<'EOF'
+#!/bin/sh
+[ -e "${LG_BUDDY_UPGRADE_DEPENDENCIES_INSTALLED:?}" ]
+EOF
+cat >"$INSTALLER_STUB_DIR/apt" <<'EOF'
+#!/bin/sh
+set -eu
+printf '%s\n' "$*" >"${LG_BUDDY_UPGRADE_PACKAGE_LOG:?}"
+: >"${LG_BUDDY_UPGRADE_DEPENDENCIES_INSTALLED:?}"
+EOF
+chmod 755 "$UPGRADE_RUNTIME_PROBE" "$INSTALLER_STUB_DIR/apt"
+
 UPGRADE_STATUS=0
 if (
     export PATH="$INSTALLER_STUB_DIR:$PATH"
     export LG_BUDDY_CONFIGURE_MARKER="$CONFIGURE_MARKER"
     export LG_BUDDY_SERVICE_ACTION_LOG="$SERVICE_ACTION_LOG"
     export LG_BUDDY_SKIP_SYSTEMD_ACTIONS="0"
+    export LG_BUDDY_AUTO_INSTALL_DEPS="yes"
+    export LG_BUDDY_GUI_RUNTIME_PROBE="$UPGRADE_RUNTIME_PROBE"
+    export LG_BUDDY_UPGRADE_DEPENDENCIES_INSTALLED="$UPGRADE_DEPENDENCIES_INSTALLED"
+    export LG_BUDDY_UPGRADE_PACKAGE_LOG="$UPGRADE_PACKAGE_LOG"
     cd "$BUNDLE_DIR"
     bash ./install.sh --upgrade >"$UPGRADE_OUTPUT" 2>&1
 ); then
@@ -905,6 +926,7 @@ fi
     exit 1
 }
 grep -F -q 'Upgrade complete!' "$UPGRADE_OUTPUT"
+[ "$(cat "$UPGRADE_PACKAGE_LOG")" = 'install -y libgtk-4-1 libadwaita-1-0' ]
 cat >"$EXPECTED_SERVICE_ACTION_LOG" <<EOF
 systemctl is-system-running
 systemctl --user is-system-running

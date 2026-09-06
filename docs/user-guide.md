@@ -122,10 +122,14 @@ restoring. The user service remains available for update notifications.
 
 When an automatic idle or session-lock action successfully blanks the screen,
 LG Buddy powers the TV off after five more minutes without activity. This grace
-period is a fixed safety default rather than a setting. Any desktop or gamepad
-activity cancels the pending power-off and restores the screen. Before powering
-off, LG Buddy rechecks its ownership marker, the configured input, and machine
-lifecycle state; it skips safely if those checks no longer permit the action.
+period is a fixed safety default rather than a setting. After a session-lock
+blank, desktop and gamepad activity is ignored for one second so incidental
+input while stepping away does not immediately restore the screen. The first
+activity at or after that boundary cancels the pending power-off and restores
+the screen, even while the session remains locked. Idle-triggered blanks retain
+their immediate activity restore behavior. Before powering off, LG Buddy
+rechecks its ownership marker, the configured input, and machine lifecycle
+state; it skips safely if those checks no longer permit the action.
 
 The restore policies are:
 
@@ -290,6 +294,14 @@ in a terminal before downloading the release bundle. It then verifies the
 bundle, reruns preflight from the candidate, invokes `install.sh --upgrade`,
 and verifies the installed release identity. It does not accept channel or
 version arguments, downgrade, migrate legacy installations, or run unattended.
+
+Before a fresh installation or upgrade executes the bundled GUI, the installer
+checks for GTK 4.14 or newer and libadwaita 1.5 or newer. If either is missing,
+apt systems offer `libgtk-4-1` and `libadwaita-1-0`; dnf and pacman systems offer
+`gtk4` and `libadwaita`. Installing them requires a separate explicit
+confirmation. Declining, running noninteractively without that opt-in, using an
+unsupported package manager, or remaining below the required versions aborts
+before LG Buddy installation files are changed and prints a manual command.
 
 `v1.4.0-beta.2` is the first release that contains `updates install`. Older
 installations require one normal manual installation of an updater-capable

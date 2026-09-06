@@ -13,14 +13,15 @@ same-repository `dev` branch and whose base is `main` or `prerelease`.
 
 ## Promotion contract
 
-The promotion PR is the review and approval surface. Required checks gate its
-merge, and merging the PR is the release authorization. The merged target-branch
-commit is the release commit; there is no separate approval label or publish
-action.
+The promotion PR is the code and release-identity review surface. Required checks
+gate its merge, and merging the PR authorizes preparation of a verified release
+draft. The merged target-branch commit is the release commit. Publishing that
+draft is a separate explicit approval after its release notes and assets have
+been reviewed.
 
 The release App is not a substitute for merging. After the merged commit has
 passed the release build and smoke test, the App performs protected tag and
-release writes and keeps the persistent streams aligned. A prerelease merge
+draft-release writes and keeps the persistent streams aligned. A prerelease merge
 advances `dev` to the merged prerelease commit. A stable merge advances both
 `prerelease` and `dev` to the merged stable commit.
 
@@ -49,15 +50,23 @@ There is no separate version input.
 1. Prepare the exact release version in `Cargo.toml` and `Cargo.lock` on `dev`.
 2. Open a PR from `dev` to `prerelease` or `main`.
 3. Wait for `verify`, `bundle-smoke-test`, and `validate-promotion` to pass.
-4. Merge the promotion PR. This is the release authorization.
+4. Merge the promotion PR. This authorizes preparation of the release draft.
 5. The resulting push starts the serialized release workflow, which builds and
    smoke-tests the merged release commit without write credentials, including
    an archive-driven upgrade from the pinned public baseline.
-6. The final job obtains a short-lived token from the dedicated repository-only
-   GitHub App, aligns the remaining release streams, creates or resumes a draft,
-   verifies its complete asset set, and publishes it. Repository release
-   immutability then locks the tag and assets.
-7. A published prerelease then runs `v1.4.0-beta.2` through the real production
+6. The staging job obtains a short-lived token from the dedicated repository-only
+   GitHub App, aligns the remaining release streams, creates or resumes the exact
+   release draft, uploads any missing assets, and verifies the complete asset set.
+7. Fill in the draft's release-specific notes and review its title, classification,
+   tag, and assets. Then approve the waiting `release-publication` environment.
+   The approval does not accept an independent version, tag, commit, artifact, or
+   workflow-run identifier.
+8. The publication job downloads the same workflow artifact again, revalidates the
+   merged refs, tag, checksums, manifest, draft classification, complete remote
+   asset set, and non-placeholder notes, then makes only that draft public. It
+   preserves the reviewed title and notes. Repository release immutability then
+   locks the tag and assets.
+9. A published prerelease then runs `v1.4.0-beta.2` through the real production
    `lg-buddy updates install` path. The newly installed candidate performs a
    cold-cache production update check, and the canary records sanitized GitHub
    response evidence for the deterministic mock. This is supplemental
@@ -65,19 +74,23 @@ There is no separate version input.
 
 Promotion through `prerelease` is optional. A direct `dev -> main` promotion
 runs the same required PR validation and post-merge release build as a
-`dev -> prerelease` promotion. After stable publication, the release App
+`dev -> prerelease` promotion. During stable draft staging, the release App
 fast-forwards both `prerelease` and `dev` to the reviewed stable commit.
 
-Replace the publisher's generic release description with concise,
-release-specific notes for user-visible default or compatibility changes before
-announcing the release.
+Replace the draft's placeholder with concise, release-specific notes before
+approving publication. The workflow does not impose a notes template, but it
+refuses to publish empty, whitespace-only, or unchanged placeholder notes.
 
 Do not push version tags manually. Protected `v*` tags and stream-alignment
 writes permit bypass only to the dedicated release App. A failed post-merge
 release run can be rerun safely: an incomplete draft remains private and is
 resumed only when its tag, classification, and existing assets match the merged
-release commit. A published release is accepted only when its expected asset set
-is complete and byte-for-byte identical.
+release commit. If publication was attempted before the notes were ready, update
+the draft, rerun the failed jobs, and approve the environment again. The staged
+workflow artifact is retained for 35 days, leaving a margin beyond GitHub's
+30-day maximum wait for an environment approval; after that, rerun the whole
+workflow to rebuild it. A published release is accepted only when its expected
+asset set is complete and byte-for-byte identical.
 
 Repository release immutability must remain enabled. GitHub applies it only when
 a draft is published, so the publisher uploads and verifies every expected asset
@@ -100,10 +113,12 @@ The workflow:
    preserved user state plus replaced owned integration files.
 7. Generates and verifies `sha256sums.txt`.
 8. Keeps `main`, `prerelease`, and `dev` aligned for the next promotion.
-9. Stages the exact release assets privately, then publishes them together under
-   the repository's immutable-release policy.
-10. Downloads the published assets and verifies their checksums independently.
-11. For prereleases, exercises production GitHub discovery, acquisition,
+9. Stages and verifies the exact release assets privately.
+10. Waits for release-note review and explicit publication approval.
+11. Revalidates and publishes only the staged draft, preserving its reviewed
+    title and notes.
+12. Downloads the published assets and verifies their checksums independently.
+13. For prereleases, exercises production GitHub discovery, acquisition,
     confirmation, installation, and final identity from the pinned baseline.
 
 `install.sh` is only an installer. It does not build the runtime or GUI.

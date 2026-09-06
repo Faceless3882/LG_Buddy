@@ -268,7 +268,7 @@ Feature: GNOME monitor
     And the session marker is absent
     And the TV screen is visible
 
-  Scenario: GNOME lock-screen activity restores before ScreenSaver reports active
+  Scenario: GNOME lock-screen activity inside the grace period stays blanked
     Given a temporary LG Buddy config using input HDMI_2
     And the idle timeout is 120 seconds
     And LG Buddy session runtime is isolated
@@ -282,11 +282,11 @@ Feature: GNOME monitor
     And GNOME monitor stays open for 0.8 seconds
     When I run the command "monitor"
     Then the command succeeds
-    And stdout contains "Session event `user-activity` requests screen restore."
+    And stdout does not contain "Session event `user-activity` requests screen restore."
     And the TV client received "turn_screen_off" exactly 1 times
-    And the TV client received "turn_screen_on" exactly 1 times
-    And the session marker is absent
-    And the TV screen is visible
+    And the TV client did not receive "turn_screen_on"
+    And the session marker exists
+    And the TV screen is blanked
 
   Scenario: GNOME inactivity skips TV blanking on a different input
     Given a temporary LG Buddy config using input HDMI_2

@@ -179,9 +179,11 @@ dbus-run-session -- xvfb-run -a ./scripts/test-release-bundle.sh \
 The smoke test validates `release-manifest.json` against the archive name and
 bundled runtime and GUI before running installer code. It then installs into a temporary
 root and exercises upgrade refusal, preservation, Python repair, owned-file
-replacement, service ordering, installed identity, mocked GUI read/apply/failure/
-cancel behavior, lifecycle topology, and uninstall cleanup without mutating the
-host installation.
+replacement, service ordering, GTK/libadwaita dependency confirmation and
+refusal, installed identity, mocked GUI read/apply/failure/cancel behavior,
+lifecycle topology, and uninstall cleanup without mutating the host installation.
+The supported Fedora and Arch lanes repeat the dependency flow with their native
+package-manager mappings.
 
 Run the cross-version smoke with explicit previous and candidate archives:
 
@@ -208,16 +210,17 @@ Run the focused manifest contract tests with:
 python3 scripts/test_release_bundle_manifest.py
 ```
 
-Run the mock-backed draft publication and retry contract tests with:
+Run the mock-backed draft staging, reviewed publication, and retry contract tests
+with:
 
 ```bash
 python3 scripts/test_publish_release_assets.py
 ```
 
-Dry-run the GitHub release publish step with:
+Dry-run the GitHub release draft-staging step with:
 
 ```bash
-GH_RELEASE_DRY_RUN=1 ./scripts/publish-release-assets.sh --dist-dir ./dist --tag v0.0.0-dev
+GH_RELEASE_DRY_RUN=1 ./scripts/publish-release-assets.sh stage-draft --dist-dir ./dist --tag v<version>
 ```
 
 Official releases are created only through a reviewed `dev` promotion PR. For
@@ -264,11 +267,11 @@ the branch contract and recovery process, see
 | `scripts/test-cross-version-upgrade.sh` | Pinned previous-to-candidate archive upgrade smoke test |
 | `scripts/test-production-upgrade-canary.sh` | Post-publication production GitHub upgrade canary |
 | `scripts/record_github_release_responses.py` | Sanitized production response recorder for offline mocks |
-| `scripts/publish-release-assets.sh` | GitHub release publish helper |
+| `scripts/publish-release-assets.sh` | Verified GitHub release draft staging and publication helper |
 | `scripts/release_promotion.py` | Promotion version, branch, and tag validator |
 | `.github/workflows/ci.yml` | CI validation workflow |
 | `.github/workflows/promotion-pr.yml` | Read-only promotion PR contract check using the target branch's validator |
-| `.github/workflows/release.yml` | Post-merge promotion build and publication workflow |
+| `.github/workflows/release.yml` | Post-merge build, draft staging, approval, and publication workflow |
 | `bin/LG_Buddy_Common` | Shared shell config helper used by setup scripts |
 | `systemd/` | Installed unit files and tmpfiles config, including the logind lifecycle service |
 | `docs/architecture-overview.md` | Runtime architecture |

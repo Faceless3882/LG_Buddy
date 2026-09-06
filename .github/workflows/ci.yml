@@ -2,7 +2,10 @@ name: CI
 
 on:
   pull_request:
-  push:
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 permissions:
   checks: read
@@ -11,6 +14,7 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
 
     steps:
       - name: Check out repository
@@ -51,7 +55,7 @@ jobs:
 
       - name: Validate shell scripts
         run: |
-          bash -n install.sh uninstall.sh configure.sh bin/LG_Buddy_Common scripts/build-release-bundle.sh scripts/test-gui-launch.sh scripts/test-installed-gui.sh scripts/test-release-bundle.sh scripts/test-release-gui-behavior.sh scripts/test-release-linkage.sh scripts/test-cross-version-upgrade.sh scripts/test-production-upgrade-canary.sh scripts/publish-release-assets.sh
+          bash -n install.sh uninstall.sh configure.sh bin/LG_Buddy_Common scripts/build-release-bundle.sh scripts/test-gui-launch.sh scripts/test-installed-gui.sh scripts/test-installer-gui-dependencies.sh scripts/test-release-bundle.sh scripts/test-release-gui-behavior.sh scripts/test-release-linkage.sh scripts/test-cross-version-upgrade.sh scripts/test-production-upgrade-canary.sh scripts/publish-release-assets.sh
           python3 -m py_compile scripts/test-release-gui-accessibility.py scripts/xwd_mean.py
 
       - name: Validate release promotion contract
@@ -68,6 +72,7 @@ jobs:
 
   bundle-smoke-test:
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     needs: verify
     env:
       SMOKE_VERSION: 1.4.0-beta.2.ci
@@ -153,7 +158,7 @@ jobs:
       - name: Dry-run publish release assets
         env:
           GH_RELEASE_DRY_RUN: "1"
-        run: ./scripts/publish-release-assets.sh --dist-dir dist --tag "v${SMOKE_VERSION}" --commit "${{ github.sha }}"
+        run: ./scripts/publish-release-assets.sh stage-draft --dist-dir dist --tag "v${SMOKE_VERSION}" --commit "${{ github.sha }}"
 
       - name: Upload bundle for supported-distro checks
         uses: actions/upload-artifact@v6
@@ -161,10 +166,12 @@ jobs:
           name: ci-release-bundle
           path: dist/*.tar.gz
           if-no-files-found: error
+          retention-days: 7
 
   bundle-supported-distros:
     needs: bundle-smoke-test
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     env:
       SMOKE_VERSION: 1.4.0-beta.2.ci
     strategy:
@@ -173,9 +180,11 @@ jobs:
         include:
           - name: Fedora 43
             image: fedora:43
+            package_manager: dnf
             setup: dnf install -y at-spi2-core binutils curl dbus-x11 findutils glib2 gobject-introspection gsettings-desktop-schemas gtk4 gzip libadwaita libglvnd-gles python3 python3-pyatspi shadow-utils strace tar util-linux which xdotool xorg-x11-server-Xvfb xorg-x11-xauth xwd zenity
           - name: Arch current
             image: archlinux:latest
+            package_manager: pacman
             setup: pacman -Syu --noconfirm at-spi2-core binutils curl dbus diffutils glib2 gtk4 gzip libadwaita python python-atspi shadow strace tar util-linux which xdotool xorg-server-xvfb xorg-xauth xorg-xwd zenity
     container:
       image: ${{ matrix.image }}
@@ -205,6 +214,11 @@ jobs:
           runuser -u tester -- bash ./scripts/test-release-linkage.sh \
               "$bundle/lg-buddy" \
               "$bundle/docs/lg-buddy-gui-x86_64-unknown-linux-gnu"
+          runuser -u tester -- bash ./scripts/test-installer-gui-dependencies.sh \
+              "$bundle/install.sh" \
+              "$bundle/lg-buddy" \
+              "$bundle/docs/lg-buddy-gui-x86_64-unknown-linux-gnu" \
+              "${{ matrix.package_manager }}"
           runuser -u tester -- dbus-run-session -- xvfb-run -a \
               env ADW_DISABLE_PORTAL=1 GDK_BACKEND=x11 GDK_DEBUG=no-portals LG_BUDDY_TEST_PLATFORM_CONTRACT=1 \
               bash ./scripts/test-installed-gui.sh \

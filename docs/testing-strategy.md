@@ -254,7 +254,8 @@ Examples:
 - gamepad activity integration with the LG Buddy inactivity deadline
 - screen runtime-phase eligibility over the private logind system-bus seam
 - logind lock state entering the shared blanked state without making unlock a
-  restore trigger, while fresh independent activity still restores
+  restore trigger, while observation-time tests cover pre-lock, post-lock grace,
+  boundary, and accepted desktop and auxiliary activity
 - logind lock monitoring rebinding and reconciling after logind changes its
   unique D-Bus owner
 - swayidle production timeout/resume process arguments
@@ -338,6 +339,12 @@ light/dark rendering, and 1x/2x window-geometry coverage. The display-backed
 renderer suite separately asserts the same GTK semantics directly at the widget
 boundary.
 
+The Ubuntu bundle smoke and the Fedora and Arch installation lanes also exercise
+GUI runtime dependency handling. They prove that an unconfirmed install does not
+invoke the package manager or GUI, an accepted install requests the correct
+native package names before GUI identity validation, insufficient versions abort
+before LG Buddy mutation, and already-satisfied hosts perform no package action.
+
 The Rust release-bundle acquisition suite covers exact asset selection, fresh
 release metadata, bounded responses and downloads, GitHub and published digest
 agreement, lightweight and annotated tags, restrictive staging and locking,
@@ -380,6 +387,14 @@ isolated root and home, populates non-default settings and native credentials,
 and upgrades to an explicit candidate archive. It checks initial and candidate
 refusals before network, sudo, or mutation, then verifies preserved user state,
 candidate-owned file replacement, service action order, and final identity.
+
+The mock-backed release publisher suite keeps draft staging and publication as
+separate capabilities. It proves that staging can create and resume a complete
+draft but cannot publish it, while publication cannot create or upload anything.
+Publication requires reviewed non-placeholder notes and an exact remote asset
+match, changes only the draft state, and preserves the reviewed title and notes.
+Checksum, manifest, classification, unexpected-asset, partial-upload, corrupted
+upload, retry, and already-published paths are covered without GitHub access.
 
 After a prerelease is public, `production-prerelease-canary` installs the same
 baseline and drives its real `updates install` command through a PTY against
