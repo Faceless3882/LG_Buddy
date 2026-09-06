@@ -267,7 +267,7 @@ the branch contract and recovery process, see
 | `scripts/publish-release-assets.sh` | GitHub release publish helper |
 | `scripts/release_promotion.py` | Promotion version, branch, and tag validator |
 | `.github/workflows/ci.yml` | CI validation workflow |
-| `.github/workflows/promotion-check.yml` | Trusted promotion PR contract check |
+| `.github/workflows/promotion-pr.yml` | Read-only promotion PR contract check using the target branch's validator |
 | `.github/workflows/release.yml` | Post-merge promotion build and publication workflow |
 | `bin/LG_Buddy_Common` | Shared shell config helper used by setup scripts |
 | `systemd/` | Installed unit files and tmpfiles config, including the logind lifecycle service |
