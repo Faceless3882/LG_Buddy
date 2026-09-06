@@ -294,7 +294,7 @@ print_manual_install_command() {
         apt) echo "  sudo apt install ${MISSING_PKGS[*]}" ;;
         dnf) echo "  sudo dnf install ${MISSING_PKGS[*]}" ;;
         pacman) echo "  sudo pacman -S ${MISSING_PKGS[*]}" ;;
-        *) echo "Install GTK 4.14 or newer and libadwaita 1.5 or newer with your system package manager." ;;
+        *) echo "Install these requirements with your system package manager: ${MISSING_PKGS[*]}" ;;
     esac
 }
 
