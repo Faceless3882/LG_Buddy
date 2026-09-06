@@ -338,6 +338,12 @@ light/dark rendering, and 1x/2x window-geometry coverage. The display-backed
 renderer suite separately asserts the same GTK semantics directly at the widget
 boundary.
 
+The Ubuntu bundle smoke and the Fedora and Arch installation lanes also exercise
+GUI runtime dependency handling. They prove that an unconfirmed install does not
+invoke the package manager or GUI, an accepted install requests the correct
+native package names before GUI identity validation, insufficient versions abort
+before LG Buddy mutation, and already-satisfied hosts perform no package action.
+
 The Rust release-bundle acquisition suite covers exact asset selection, fresh
 release metadata, bounded responses and downloads, GitHub and published digest
 agreement, lightweight and annotated tags, restrictive staging and locking,

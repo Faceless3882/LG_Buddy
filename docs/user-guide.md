@@ -291,6 +291,14 @@ bundle, reruns preflight from the candidate, invokes `install.sh --upgrade`,
 and verifies the installed release identity. It does not accept channel or
 version arguments, downgrade, migrate legacy installations, or run unattended.
 
+Before a fresh installation or upgrade executes the bundled GUI, the installer
+checks for GTK 4.14 or newer and libadwaita 1.5 or newer. If either is missing,
+apt systems offer `libgtk-4-1` and `libadwaita-1-0`; dnf and pacman systems offer
+`gtk4` and `libadwaita`. Installing them requires a separate explicit
+confirmation. Declining, running noninteractively without that opt-in, using an
+unsupported package manager, or remaining below the required versions aborts
+before LG Buddy installation files are changed and prints a manual command.
+
 `v1.4.0-beta.2` is the first release that contains `updates install`. Older
 installations require one normal manual installation of an updater-capable
 release before this assisted path is available.

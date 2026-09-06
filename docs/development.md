@@ -179,9 +179,11 @@ dbus-run-session -- xvfb-run -a ./scripts/test-release-bundle.sh \
 The smoke test validates `release-manifest.json` against the archive name and
 bundled runtime and GUI before running installer code. It then installs into a temporary
 root and exercises upgrade refusal, preservation, Python repair, owned-file
-replacement, service ordering, installed identity, mocked GUI read/apply/failure/
-cancel behavior, lifecycle topology, and uninstall cleanup without mutating the
-host installation.
+replacement, service ordering, GTK/libadwaita dependency confirmation and
+refusal, installed identity, mocked GUI read/apply/failure/cancel behavior,
+lifecycle topology, and uninstall cleanup without mutating the host installation.
+The supported Fedora and Arch lanes repeat the dependency flow with their native
+package-manager mappings.
 
 Run the cross-version smoke with explicit previous and candidate archives:
 
