@@ -883,9 +883,10 @@ asymmetric:
   every enabled monitor backend uses this runtime
 - the same runtime opportunistically observes `LockedHint` on the current
   graphical logind session; lock requests the normal session blank policy,
-  unlock is informational, fresh independent activity can restore while locked,
-  and logind owner changes trigger session rebinding and reconciliation; failure
-  or lack of support does not affect the selected desktop backend
+  unlock is informational, fresh independent activity can restore while locked
+  after the fixed one-second post-lock grace, and logind owner changes trigger
+  session rebinding and reconciliation; failure or lack of support does not
+  affect the selected desktop backend
 - the gamepad source refreshes its device set from Linux device add, remove, and
   change events, with periodic reconciliation for missed events
 - `swayidle` timeout and resume callbacks feed the shared inactivity engine

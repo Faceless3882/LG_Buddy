@@ -16,6 +16,10 @@ pub enum InactivityDecision {
     NoOp,
 }
 
+/// Ignore independent input briefly after a lock-triggered blank so input from
+/// disengaging from the machine cannot immediately undo the blank.
+pub(crate) const POST_LOCK_ACTIVITY_GRACE: Duration = Duration::from_secs(1);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InactivityPhase {
     Unknown,
@@ -37,6 +41,7 @@ pub struct InactivityEngine {
     restore_pending: bool,
     session_locked_since: Option<Instant>,
     lock_activity_floor: Option<Instant>,
+    post_lock_activity_grace_until: Option<Instant>,
     latest_independent_activity_at: Option<Instant>,
 }
 
@@ -84,6 +89,7 @@ impl InactivityEngine {
             restore_pending: false,
             session_locked_since: None,
             lock_activity_floor: None,
+            post_lock_activity_grace_until: None,
             latest_independent_activity_at: None,
         }
     }
@@ -111,6 +117,7 @@ impl InactivityEngine {
             restore_pending: true,
             session_locked_since: None,
             lock_activity_floor: None,
+            post_lock_activity_grace_until: None,
             latest_independent_activity_at: None,
         }
     }
@@ -166,11 +173,12 @@ impl InactivityEngine {
         observation: InactivityObservation,
         observed_at: Instant,
     ) -> InactivityDecision {
-        if matches!(
+        let independent_activity = matches!(
             observation,
             InactivityObservation::DesktopActivityObserved
                 | InactivityObservation::UserActivityObserved
-        ) {
+        );
+        if independent_activity {
             self.latest_independent_activity_at = Some(
                 self.latest_independent_activity_at
                     .map_or(observed_at, |latest| latest.max(observed_at)),
@@ -186,19 +194,27 @@ impl InactivityEngine {
             return InactivityDecision::NoOp;
         }
 
-        if matches!(
+        let inactive = matches!(
             self.phase,
             InactivityPhase::BlankRequested
                 | InactivityPhase::Blanked
                 | InactivityPhase::InactiveWithoutEscalation
                 | InactivityPhase::TimedPowerOffAttempted
-        ) && self.lock_activity_floor.is_some_and(|locked_at| {
-            !matches!(
-                observation,
-                InactivityObservation::DesktopActivityObserved
-                    | InactivityObservation::UserActivityObserved
-            ) || observed_at <= locked_at
-        }) {
+        );
+        if inactive
+            && independent_activity
+            && self
+                .post_lock_activity_grace_until
+                .is_some_and(|grace_until| observed_at < grace_until)
+        {
+            return InactivityDecision::NoOp;
+        }
+
+        if inactive
+            && self
+                .lock_activity_floor
+                .is_some_and(|locked_at| !independent_activity || observed_at <= locked_at)
+        {
             return InactivityDecision::NoOp;
         }
 
@@ -263,15 +279,21 @@ impl InactivityEngine {
     }
 
     pub fn observe_lock(&mut self, observed_at: Instant) -> InactivityDecision {
-        let locked_at = *self.session_locked_since.get_or_insert(observed_at);
-        if self
-            .latest_independent_activity_at
-            .is_some_and(|activity_at| activity_at > locked_at)
-        {
-            self.lock_activity_floor = None;
+        if self.session_locked_since.is_some() {
             return InactivityDecision::NoOp;
         }
-        self.lock_activity_floor = Some(locked_at);
+
+        self.session_locked_since = Some(observed_at);
+        let grace_until = observed_at + POST_LOCK_ACTIVITY_GRACE;
+        if self
+            .latest_independent_activity_at
+            .is_some_and(|activity_at| activity_at >= grace_until)
+        {
+            self.lock_activity_floor = None;
+            self.post_lock_activity_grace_until = None;
+            return InactivityDecision::NoOp;
+        }
+        self.lock_activity_floor = Some(observed_at);
 
         if matches!(
             self.phase,
@@ -283,6 +305,7 @@ impl InactivityEngine {
             return InactivityDecision::NoOp;
         }
 
+        self.post_lock_activity_grace_until = Some(grace_until);
         self.phase = InactivityPhase::BlankRequested;
         self.blank_at = None;
         InactivityDecision::BlankNow
@@ -295,7 +318,9 @@ impl InactivityEngine {
 
 #[cfg(test)]
 mod tests {
-    use super::{InactivityDecision, InactivityEngine, InactivityObservation};
+    use super::{
+        InactivityDecision, InactivityEngine, InactivityObservation, POST_LOCK_ACTIVITY_GRACE,
+    };
     use std::time::{Duration, Instant};
 
     fn test_engine(started_at: Instant) -> InactivityEngine {
@@ -615,7 +640,7 @@ mod tests {
     }
 
     #[test]
-    fn lock_blanks_immediately_once_and_activity_can_restore() {
+    fn lock_blanks_immediately_once_and_activity_at_the_grace_boundary_can_restore() {
         let started_at = Instant::now();
         let mut engine = test_engine(started_at);
         let locked_at = started_at + Duration::from_secs(1);
@@ -626,7 +651,7 @@ mod tests {
         assert_eq!(
             engine.observe_activity(
                 InactivityObservation::DesktopActivityObserved,
-                started_at + Duration::from_secs(2),
+                locked_at + POST_LOCK_ACTIVITY_GRACE,
             ),
             InactivityDecision::RestoreNow
         );
@@ -637,33 +662,87 @@ mod tests {
     }
 
     #[test]
-    fn lock_restore_requires_independent_activity_newer_than_the_lock() {
+    fn lock_grace_suppresses_pre_lock_and_immediate_independent_activity() {
         let started_at = Instant::now();
         let locked_at = started_at + Duration::from_secs(1);
-        let mut engine = test_engine(started_at);
 
-        assert_eq!(engine.observe_lock(locked_at), InactivityDecision::BlankNow);
-        assert_eq!(
-            engine.observe_activity(
-                InactivityObservation::DesktopActivityObserved,
-                started_at + Duration::from_millis(900),
-            ),
-            InactivityDecision::NoOp
-        );
-        assert_eq!(
-            engine.observe_activity(
-                InactivityObservation::DesktopActivityObserved,
-                started_at + Duration::from_secs(2),
-            ),
-            InactivityDecision::RestoreNow
-        );
+        for observation in [
+            InactivityObservation::DesktopActivityObserved,
+            InactivityObservation::UserActivityObserved,
+        ] {
+            let mut engine = test_engine(started_at);
+            assert_eq!(engine.observe_lock(locked_at), InactivityDecision::BlankNow);
+            engine.complete_blank(true, locked_at);
+
+            for observed_at in [
+                locked_at - Duration::from_millis(1),
+                locked_at + Duration::from_millis(1),
+            ] {
+                assert_eq!(
+                    engine.observe_activity(observation, observed_at),
+                    InactivityDecision::NoOp
+                );
+                assert!(engine.timed_power_off_pending());
+            }
+        }
     }
 
     #[test]
-    fn newer_independent_activity_processed_before_lock_keeps_the_screen_active() {
+    fn lock_grace_accepts_independent_activity_at_and_after_the_boundary() {
         let started_at = Instant::now();
         let locked_at = started_at + Duration::from_secs(1);
-        let activity_at = started_at + Duration::from_secs(2);
+
+        for observation in [
+            InactivityObservation::DesktopActivityObserved,
+            InactivityObservation::UserActivityObserved,
+        ] {
+            for observed_at in [
+                locked_at + POST_LOCK_ACTIVITY_GRACE,
+                locked_at + POST_LOCK_ACTIVITY_GRACE + Duration::from_millis(1),
+            ] {
+                let mut engine = test_engine(started_at);
+                assert_eq!(engine.observe_lock(locked_at), InactivityDecision::BlankNow);
+                engine.complete_blank(true, locked_at);
+
+                assert_eq!(
+                    engine.observe_activity(observation, observed_at),
+                    InactivityDecision::RestoreNow
+                );
+                assert!(!engine.timed_power_off_pending());
+            }
+        }
+    }
+
+    #[test]
+    fn activity_inside_the_grace_processed_before_lock_does_not_prevent_blanking() {
+        let started_at = Instant::now();
+        let locked_at = started_at + Duration::from_secs(1);
+
+        for observation in [
+            InactivityObservation::DesktopActivityObserved,
+            InactivityObservation::UserActivityObserved,
+        ] {
+            let mut engine = test_engine(started_at);
+            assert_eq!(
+                engine.observe_activity(
+                    observation,
+                    locked_at + POST_LOCK_ACTIVITY_GRACE - Duration::from_millis(1),
+                ),
+                if observation == InactivityObservation::DesktopActivityObserved {
+                    InactivityDecision::NoOp
+                } else {
+                    InactivityDecision::RestoreNow
+                }
+            );
+            assert_eq!(engine.observe_lock(locked_at), InactivityDecision::BlankNow);
+        }
+    }
+
+    #[test]
+    fn activity_at_the_grace_boundary_processed_before_lock_keeps_the_screen_active() {
+        let started_at = Instant::now();
+        let locked_at = started_at + Duration::from_secs(1);
+        let activity_at = locked_at + POST_LOCK_ACTIVITY_GRACE;
         let mut engine = test_engine(started_at);
 
         assert_eq!(

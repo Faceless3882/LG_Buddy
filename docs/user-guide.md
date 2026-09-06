@@ -122,10 +122,14 @@ restoring. The user service remains available for update notifications.
 
 When an automatic idle or session-lock action successfully blanks the screen,
 LG Buddy powers the TV off after five more minutes without activity. This grace
-period is a fixed safety default rather than a setting. Any desktop or gamepad
-activity cancels the pending power-off and restores the screen. Before powering
-off, LG Buddy rechecks its ownership marker, the configured input, and machine
-lifecycle state; it skips safely if those checks no longer permit the action.
+period is a fixed safety default rather than a setting. After a session-lock
+blank, desktop and gamepad activity is ignored for one second so incidental
+input while stepping away does not immediately restore the screen. The first
+activity at or after that boundary cancels the pending power-off and restores
+the screen, even while the session remains locked. Idle-triggered blanks retain
+their immediate activity restore behavior. Before powering off, LG Buddy
+rechecks its ownership marker, the configured input, and machine lifecycle
+state; it skips safely if those checks no longer permit the action.
 
 The restore policies are:
 

@@ -137,9 +137,11 @@ independent auxiliary source owned by the shared session runtime. The
 key architectural point is that blank/restore decisions are made after
 normalization, not inside a desktop adapter.
 
-After a lock blank, only independent desktop or gamepad activity newer than the
-lock can produce `RestoreNow`. Stale observations and GNOME provider
-active/wake signals do not make unlock itself a restore trigger.
+After a lock-triggered blank, independent desktop or gamepad activity can
+produce `RestoreNow` only when its monotonic observation time is at least one
+second newer than the lock. Earlier samples leave the blank and its timed
+power-off deadline intact. GNOME provider active/wake signals do not make unlock
+itself a restore trigger.
 
 The resulting decisions are dispatched as:
 
@@ -262,9 +264,9 @@ connection, subscriptions, owner rebinding, reconciliation, and translation to
 normalized lock observations. Missing, ambiguous, or unavailable session state
 produces a diagnostic without changing inactivity behavior or native backend
 eligibility. A desktop or locker that never updates `LockedHint` simply produces
-no lock events. Unlock never sends a wake, restore, or activity event. Fresh
-independent activity observed while locked remains able to restore the screen
-through the existing marker policy.
+no lock events. Unlock never sends a wake, restore, or activity event. After the
+fixed one-second post-lock grace, fresh independent activity observed while
+locked remains able to restore the screen through the existing marker policy.
 
 ## Lifecycle Default And Migration Stance
 
