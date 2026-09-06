@@ -5,9 +5,17 @@ set -euo pipefail
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
 
 usage() {
-    echo "Usage: $0 [--dist-dir <dir>] [--tag <release-tag>] [--commit <release-commit>]"
+    echo "Usage: $0 <stage-draft|publish-draft> [--dist-dir <dir>] [--tag <release-tag>] [--commit <release-commit>]"
     exit 1
 }
+
+[ "$#" -gt 0 ] || usage
+MODE="$1"
+shift
+case "$MODE" in
+    stage-draft|publish-draft) ;;
+    *) usage ;;
+esac
 
 DIST_DIR="dist"
 TAG="${GITHUB_REF_NAME:-}"
@@ -64,6 +72,8 @@ CHECKSUM_FILE="$DIST_DIR/sha256sums.txt"
     exit 1
 }
 
+(cd "$DIST_DIR" && sha256sum --strict -c "$(basename "$CHECKSUM_FILE")")
+
 VERSION="${TAG#v}"
 [ -n "$VERSION" ] || {
     echo "Release tag must include a version after v."
@@ -71,7 +81,7 @@ VERSION="${TAG#v}"
 }
 
 TITLE="LG Buddy ${VERSION}"
-NOTES="Prebuilt LG Buddy release bundle for Linux. Extract the archive and run ./install.sh from inside the bundle."
+PLACEHOLDER_NOTES="Release notes pending maintainer review."
 RELEASE_FLAGS=()
 EXPECTED_CHANNEL="stable"
 
@@ -95,7 +105,7 @@ for archive in "${ARCHIVES[@]}"; do
 done
 
 if [ "$DRY_RUN" = "1" ]; then
-    echo "Dry run: would publish tag $TAG"
+    echo "Dry run: would run $MODE for tag $TAG"
     printf 'Archive: %s\n' "${ARCHIVES[@]}"
     echo "Checksum file: $CHECKSUM_FILE"
     echo "Title: $TITLE"
@@ -121,9 +131,11 @@ if [ "${#RELEASE_FLAGS[@]}" -gt 0 ]; then
     EXPECTED_PRERELEASE="true"
 fi
 
+RELEASE_EXISTS="false"
 RELEASE_IS_DRAFT="true"
 if gh release view "$TAG" >/dev/null 2>&1; then
-    RELEASE_STATE="$(gh release view "$TAG" --json isDraft,isPrerelease)"
+    RELEASE_EXISTS="true"
+    RELEASE_STATE="$(gh release view "$TAG" --json isDraft,isPrerelease,body,name)"
     RELEASE_IS_DRAFT="$(printf '%s' "$RELEASE_STATE" | jq -r .isDraft)"
     case "$RELEASE_IS_DRAFT" in
         true|false) ;;
@@ -136,8 +148,21 @@ if gh release view "$TAG" >/dev/null 2>&1; then
         echo "Existing release $TAG has the wrong prerelease classification."
         exit 1
     }
-else
-    gh release create "$TAG" --draft --verify-tag --title "$TITLE" --notes "$NOTES" "${RELEASE_FLAGS[@]}"
+fi
+
+if [ "$MODE" = "publish-draft" ] && [ "$RELEASE_EXISTS" = "false" ]; then
+    echo "Release draft $TAG does not exist. Run stage-draft first."
+    exit 1
+fi
+
+if [ "$MODE" = "stage-draft" ] && [ "$RELEASE_EXISTS" = "false" ]; then
+    gh release create "$TAG" \
+        --draft \
+        --verify-tag \
+        --title "$TITLE" \
+        --notes "$PLACEHOLDER_NOTES" \
+        "${RELEASE_FLAGS[@]}"
+    RELEASE_EXISTS="true"
 fi
 
 EXPECTED_ASSETS=("${ARCHIVES[@]}" "$CHECKSUM_FILE")
@@ -173,8 +198,8 @@ done <<< "$RELEASE_ASSET_NAMES"
 for asset in "${EXPECTED_ASSETS[@]}"; do
     asset_name="$(basename "$asset")"
     if ! grep -F -x -q -- "$asset_name" <<< "$RELEASE_ASSET_NAMES"; then
-        [ "$RELEASE_IS_DRAFT" = "true" ] || {
-            echo "Published release $TAG is missing required asset: $asset_name"
+        [ "$MODE" = "stage-draft" ] && [ "$RELEASE_IS_DRAFT" = "true" ] || {
+            echo "Release $TAG is missing required asset: $asset_name"
             exit 1
         }
         gh release upload "$TAG" "$asset"
@@ -229,30 +254,79 @@ for asset in "${EXPECTED_ASSETS[@]}"; do
     }
 done
 
-if [ "$RELEASE_IS_DRAFT" = "true" ]; then
-    RELEASE_STATE="$(gh release view "$TAG" --json isDraft,isPrerelease)"
-    [ "$(printf '%s' "$RELEASE_STATE" | jq -r .isDraft)" = "true" ] || {
-        echo "Release $TAG was published before asset verification completed."
-        exit 1
-    }
-    [ "$(printf '%s' "$RELEASE_STATE" | jq -r .isPrerelease)" = "$EXPECTED_PRERELEASE" ] || {
-        echo "Release $TAG changed prerelease classification before publication."
-        exit 1
-    }
-
-    gh release edit "$TAG" \
-        --draft=false \
-        --prerelease="$EXPECTED_PRERELEASE" \
-        --title "$TITLE" \
-        --notes "$NOTES"
-
-    RELEASE_STATE="$(gh release view "$TAG" --json isDraft,isPrerelease)"
-    [ "$(printf '%s' "$RELEASE_STATE" | jq -r .isDraft)" = "false" ] || {
-        echo "Release $TAG remained a draft after publication."
-        exit 1
-    }
-    [ "$(printf '%s' "$RELEASE_STATE" | jq -r .isPrerelease)" = "$EXPECTED_PRERELEASE" ] || {
-        echo "Published release $TAG has the wrong prerelease classification."
-        exit 1
-    }
+if [ "$MODE" = "stage-draft" ]; then
+    if [ "$RELEASE_IS_DRAFT" = "true" ]; then
+        RELEASE_STATE="$(gh release view "$TAG" --json isDraft,isPrerelease,body,name)"
+        [ "$(printf '%s' "$RELEASE_STATE" | jq -r .isDraft)" = "true" ] || {
+            echo "Release $TAG was published before draft verification completed."
+            exit 1
+        }
+        [ "$(printf '%s' "$RELEASE_STATE" | jq -r .isPrerelease)" = "$EXPECTED_PRERELEASE" ] || {
+            echo "Release $TAG changed prerelease classification during draft staging."
+            exit 1
+        }
+        echo "Verified release draft $TAG is ready for release-note review and publication approval."
+    else
+        echo "Published release $TAG already has the complete verified asset set."
+    fi
+    exit 0
 fi
+
+release_notes_are_ready() {
+    local state="$1"
+    printf '%s' "$state" | jq -e --arg placeholder "$PLACEHOLDER_NOTES" '
+        (.body // "") as $body |
+        ($body | gsub("\\s"; "")) as $normalized_body |
+        ($placeholder | gsub("\\s"; "")) as $normalized_placeholder |
+        ($normalized_body != $normalized_placeholder) and ($normalized_body | length > 0)
+    ' >/dev/null
+}
+
+release_notes_are_ready "$RELEASE_STATE" || {
+    echo "Release $TAG still has empty or placeholder release notes."
+    exit 1
+}
+
+if [ "$RELEASE_IS_DRAFT" = "false" ]; then
+    echo "Published release $TAG already has the complete verified asset set and reviewed notes."
+    exit 0
+fi
+
+RELEASE_STATE="$(gh release view "$TAG" --json isDraft,isPrerelease,body,name)"
+[ "$(printf '%s' "$RELEASE_STATE" | jq -r .isDraft)" = "true" ] || {
+    echo "Release $TAG was published before final verification completed."
+    exit 1
+}
+[ "$(printf '%s' "$RELEASE_STATE" | jq -r .isPrerelease)" = "$EXPECTED_PRERELEASE" ] || {
+    echo "Release $TAG changed prerelease classification before publication."
+    exit 1
+}
+release_notes_are_ready "$RELEASE_STATE" || {
+    echo "Release $TAG still has empty or placeholder release notes."
+    exit 1
+}
+
+REVIEWED_BODY="$(printf '%s' "$RELEASE_STATE" | jq -c '.body')"
+REVIEWED_NAME="$(printf '%s' "$RELEASE_STATE" | jq -c '.name')"
+
+gh release edit "$TAG" --draft=false
+
+PUBLISHED_STATE="$(gh release view "$TAG" --json isDraft,isPrerelease,body,name)"
+[ "$(printf '%s' "$PUBLISHED_STATE" | jq -r .isDraft)" = "false" ] || {
+    echo "Release $TAG remained a draft after publication."
+    exit 1
+}
+[ "$(printf '%s' "$PUBLISHED_STATE" | jq -r .isPrerelease)" = "$EXPECTED_PRERELEASE" ] || {
+    echo "Published release $TAG has the wrong prerelease classification."
+    exit 1
+}
+[ "$(printf '%s' "$PUBLISHED_STATE" | jq -c '.body')" = "$REVIEWED_BODY" ] || {
+    echo "Published release $TAG did not preserve the reviewed release notes."
+    exit 1
+}
+[ "$(printf '%s' "$PUBLISHED_STATE" | jq -c '.name')" = "$REVIEWED_NAME" ] || {
+    echo "Published release $TAG did not preserve the reviewed title."
+    exit 1
+}
+
+echo "Published verified release $TAG with its reviewed title and notes unchanged."

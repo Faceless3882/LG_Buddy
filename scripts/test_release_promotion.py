@@ -259,7 +259,7 @@ class PromotionTests(unittest.TestCase):
 
         result = self.repository.validate_merged("prerelease", merged, base)
 
-        self.assertTrue(result["publish"])
+        self.assertTrue(result["prepare"])
         self.assertEqual(result["head_sha"], merged)
         self.assertEqual(result["source_sha"], source)
         self.assertEqual(result["tag"], "v1.4.0-beta.1")
@@ -275,7 +275,7 @@ class PromotionTests(unittest.TestCase):
 
         result = self.repository.validate_merged("main", merged, base)
 
-        self.assertTrue(result["publish"])
+        self.assertTrue(result["prepare"])
         self.assertEqual(result["source_sha"], source)
         self.assertEqual(result["tag"], "v1.4.0")
         self.assertEqual(result["channel"], "stable")
@@ -286,7 +286,7 @@ class PromotionTests(unittest.TestCase):
 
         result = self.repository.validate_merged("main", merged, base)
 
-        self.assertTrue(result["publish"])
+        self.assertTrue(result["prepare"])
         self.assertEqual(result["source_sha"], source)
         self.assertEqual(result["tag"], "v1.4.0")
         self.assertEqual(result["channel"], "stable")
@@ -302,7 +302,7 @@ class PromotionTests(unittest.TestCase):
 
         result = self.repository.validate_merged("prerelease", merged, prerelease)
 
-        self.assertFalse(result["publish"])
+        self.assertFalse(result["prepare"])
         self.assertEqual(result["head_sha"], merged)
         self.assertEqual(result["base_sha"], prerelease)
         self.assertEqual(result["channel"], "stable")
@@ -318,7 +318,7 @@ class PromotionTests(unittest.TestCase):
             "prerelease", merged, self.repository.stable_sha
         )
 
-        self.assertFalse(result["publish"])
+        self.assertFalse(result["prepare"])
         self.assertEqual(result["head_sha"], merged)
         self.assertEqual(result["base_sha"], self.repository.stable_sha)
         self.assertEqual(result["channel"], "stable")
