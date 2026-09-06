@@ -43,16 +43,31 @@ class RepositoryFixture:
         )
         return result.stdout.strip()
 
-    def write_version(self, version: str, lock_version: str | None = None) -> None:
+    def write_version(
+        self,
+        version: str,
+        lock_version: str | None = None,
+        gui_version: str | None = None,
+        gui_lock_version: str | None = None,
+    ) -> None:
         manifest = self.path / "crates/lg-buddy/Cargo.toml"
         manifest.parent.mkdir(parents=True, exist_ok=True)
         manifest.write_text(
             f'[package]\nname = "lg-buddy"\nversion = "{version}"\n',
             encoding="utf-8",
         )
+        gui_manifest = self.path / "crates/lg-buddy-gui/Cargo.toml"
+        gui_manifest.parent.mkdir(parents=True, exist_ok=True)
+        gui_manifest.write_text(
+            '[package]\nname = "lg-buddy-gui"\n'
+            f'version = "{gui_version or version}"\n',
+            encoding="utf-8",
+        )
         (self.path / "Cargo.lock").write_text(
             'version = 4\n\n[[package]]\nname = "lg-buddy"\n'
-            f'version = "{lock_version or version}"\n',
+            f'version = "{lock_version or version}"\n\n'
+            '[[package]]\nname = "lg-buddy-gui"\n'
+            f'version = "{gui_lock_version or gui_version or version}"\n',
             encoding="utf-8",
         )
 
@@ -151,6 +166,14 @@ class PromotionTests(unittest.TestCase):
         self.assertEqual(result["tag"], "v1.4.0")
         self.assertEqual(result["channel"], "stable")
 
+    def test_direct_stable_promotion(self) -> None:
+        head = self.repository.candidate("1.4.0")
+
+        result = self.repository.validate("main", head)
+
+        self.assertEqual(result["tag"], "v1.4.0")
+        self.assertEqual(result["channel"], "stable")
+
     def test_channel_mismatch_is_rejected(self) -> None:
         prerelease = self.repository.candidate("1.4.0-beta.1")
         with self.assertRaisesRegex(PromotionError, "main requires a stable version"):
@@ -159,6 +182,16 @@ class PromotionTests(unittest.TestCase):
     def test_lockfile_mismatch_is_rejected(self) -> None:
         head = self.repository.candidate("1.4.0-beta.1", "1.3.0")
         with self.assertRaisesRegex(PromotionError, "does not match Cargo.lock"):
+            self.repository.validate("prerelease", head)
+
+    def test_gui_version_mismatch_is_rejected(self) -> None:
+        self.repository.git("switch", "dev")
+        self.repository.write_version("1.4.0-beta.1", gui_version="1.3.0")
+        self.repository.git("add", ".")
+        self.repository.git("commit", "-m", "mismatch gui")
+        head = self.repository.git("rev-parse", "HEAD")
+
+        with self.assertRaisesRegex(PromotionError, "lg-buddy-gui"):
             self.repository.validate("prerelease", head)
 
     def test_stable_version_must_strictly_advance_main(self) -> None:
@@ -247,6 +280,17 @@ class PromotionTests(unittest.TestCase):
         self.assertEqual(result["tag"], "v1.4.0")
         self.assertEqual(result["channel"], "stable")
 
+    def test_merged_direct_stable_release_is_publishable(self) -> None:
+        self.repository.candidate("1.4.0")
+        base, source, merged = self.repository.merge_promotion("main")
+
+        result = self.repository.validate_merged("main", merged, base)
+
+        self.assertTrue(result["publish"])
+        self.assertEqual(result["source_sha"], source)
+        self.assertEqual(result["tag"], "v1.4.0")
+        self.assertEqual(result["channel"], "stable")
+
     def test_stable_alignment_push_to_prerelease_does_not_publish_again(self) -> None:
         prerelease = self.repository.candidate("1.4.0-beta.1")
         self.repository.git("branch", "-f", "prerelease", prerelease)
@@ -261,6 +305,22 @@ class PromotionTests(unittest.TestCase):
         self.assertFalse(result["publish"])
         self.assertEqual(result["head_sha"], merged)
         self.assertEqual(result["base_sha"], prerelease)
+        self.assertEqual(result["channel"], "stable")
+
+    def test_direct_stable_alignment_push_to_prerelease_does_not_publish_again(
+        self,
+    ) -> None:
+        self.repository.candidate("1.4.0")
+        _, _, merged = self.repository.merge_promotion("main")
+        self.repository.git("branch", "-f", "prerelease", merged)
+
+        result = self.repository.validate_merged(
+            "prerelease", merged, self.repository.stable_sha
+        )
+
+        self.assertFalse(result["publish"])
+        self.assertEqual(result["head_sha"], merged)
+        self.assertEqual(result["base_sha"], self.repository.stable_sha)
         self.assertEqual(result["channel"], "stable")
 
     def test_release_branch_fast_forward_without_a_merge_is_rejected(self) -> None:

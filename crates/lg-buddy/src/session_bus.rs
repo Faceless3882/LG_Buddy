@@ -61,6 +61,10 @@ pub enum BusValue {
     U32(u32),
     U64(u64),
     String(String),
+    ObjectPath(String),
+    Array(Vec<BusValue>),
+    Struct(Vec<BusValue>),
+    Dict(Vec<(BusValue, BusValue)>),
     Variant(Box<BusValue>),
 }
 
@@ -72,6 +76,10 @@ impl BusValue {
             Self::U32(_) => "u32",
             Self::U64(_) => "u64",
             Self::String(_) => "string",
+            Self::ObjectPath(_) => "object path",
+            Self::Array(_) => "array",
+            Self::Struct(_) => "struct",
+            Self::Dict(_) => "dict",
             Self::Variant(_) => "variant",
         }
     }
@@ -165,6 +173,20 @@ impl BusReply {
             }),
             _ => Err(SessionBusError::UnexpectedReplyShape {
                 expected: "single string",
+                actual: "multiple values",
+            }),
+        }
+    }
+
+    pub fn single_object_path(&self) -> Result<&str, SessionBusError> {
+        match self.body.as_slice() {
+            [BusValue::ObjectPath(value)] => Ok(value),
+            [value] => Err(SessionBusError::UnexpectedReplyShape {
+                expected: "single object path",
+                actual: value.kind(),
+            }),
+            _ => Err(SessionBusError::UnexpectedReplyShape {
+                expected: "single object path",
                 actual: "multiple values",
             }),
         }
@@ -567,9 +589,13 @@ fn append_dbus_message_value(
         BusValue::U32(value) => Ok(message.append1(value)),
         BusValue::U64(value) => Ok(message.append1(value)),
         BusValue::String(value) => Ok(message.append1(value)),
-        BusValue::Variant(_) => Err(SessionBusError::UnsupportedMessageBody {
+        unsupported @ (BusValue::ObjectPath(_)
+        | BusValue::Array(_)
+        | BusValue::Struct(_)
+        | BusValue::Dict(_)
+        | BusValue::Variant(_)) => Err(SessionBusError::UnsupportedMessageBody {
             context: "method-call body",
-            kind: "variant",
+            kind: unsupported.kind(),
         }),
     }
 }
@@ -581,11 +607,34 @@ fn bus_value_from_dbus_message_item(item: DbusMessageItem) -> Result<BusValue, S
         DbusMessageItem::UInt32(value) => Ok(BusValue::U32(value)),
         DbusMessageItem::UInt64(value) => Ok(BusValue::U64(value)),
         DbusMessageItem::Str(value) => Ok(BusValue::String(value)),
+        DbusMessageItem::ObjectPath(value) => Ok(BusValue::ObjectPath(value.to_string())),
+        DbusMessageItem::Array(values) => values
+            .into_vec()
+            .into_iter()
+            .map(bus_value_from_dbus_message_item)
+            .collect::<Result<Vec<_>, _>>()
+            .map(BusValue::Array),
+        DbusMessageItem::Struct(values) => values
+            .into_iter()
+            .map(bus_value_from_dbus_message_item)
+            .collect::<Result<Vec<_>, _>>()
+            .map(BusValue::Struct),
+        DbusMessageItem::Dict(values) => values
+            .into_vec()
+            .into_iter()
+            .map(|(key, value)| {
+                Ok((
+                    bus_value_from_dbus_message_item(key)?,
+                    bus_value_from_dbus_message_item(value)?,
+                ))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(BusValue::Dict),
         DbusMessageItem::Variant(value) => {
             bus_value_from_dbus_message_item(*value).map(|value| BusValue::Variant(Box::new(value)))
         }
         other => Err(SessionBusError::UnexpectedReplyShape {
-            expected: "bool/u32/u64/string/fd/variant",
+            expected: "bool/u32/u64/string/object-path/array/struct/dict/fd/variant",
             actual: dbus_message_item_kind(&other),
         }),
     }
@@ -647,10 +696,13 @@ fn dbus_message_item_kind(item: &DbusMessageItem) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_dbus_message_value, get_name_owner, parse_name_owner_changed_signal, BusMethodCall,
-        BusReply, BusSignal, BusSignalMatch, BusValue, NameOwnerChanged, SessionBusClient,
-        SessionBusError, DBUS_INTERFACE, DBUS_OBJECT_PATH, DBUS_SERVICE_NAME,
+        append_dbus_message_value, bus_value_from_dbus_message_item, get_name_owner,
+        parse_name_owner_changed_signal, BusMethodCall, BusReply, BusSignal, BusSignalMatch,
+        BusValue, NameOwnerChanged, SessionBusClient, SessionBusError, DBUS_INTERFACE,
+        DBUS_OBJECT_PATH, DBUS_SERVICE_NAME,
     };
+    use dbus::arg::messageitem::{MessageItem, MessageItemArray, MessageItemDict};
+    use dbus::strings::{Path as DbusPath, Signature as DbusSignature};
     use dbus::Message as DbusMessage;
     use std::collections::{HashMap, HashSet, VecDeque};
     use std::os::fd::AsRawFd;
@@ -855,6 +907,49 @@ mod tests {
                 context: "method-call body",
                 kind: "variant",
             }
+        );
+    }
+
+    #[test]
+    fn nested_logind_reply_shapes_decode_into_transport_values() {
+        let user = MessageItem::Struct(vec![
+            MessageItem::UInt32(1000),
+            MessageItem::ObjectPath(
+                DbusPath::new("/org/freedesktop/login1/user/_1000").expect("object path"),
+            ),
+        ]);
+        let properties = MessageItem::Dict(
+            MessageItemDict::new(
+                vec![(
+                    MessageItem::Str("User".to_string()),
+                    MessageItem::Variant(Box::new(user)),
+                )],
+                DbusSignature::new("s").expect("key signature"),
+                DbusSignature::new("v").expect("value signature"),
+            )
+            .expect("property dictionary"),
+        );
+        let invalidated = MessageItem::Array(
+            MessageItemArray::new(
+                vec![MessageItem::Str("LockedHint".to_string())],
+                DbusSignature::new("as").expect("array signature"),
+            )
+            .expect("invalidated property array"),
+        );
+
+        assert_eq!(
+            bus_value_from_dbus_message_item(properties).expect("decode properties"),
+            BusValue::Dict(vec![(
+                BusValue::String("User".to_string()),
+                BusValue::Variant(Box::new(BusValue::Struct(vec![
+                    BusValue::U32(1000),
+                    BusValue::ObjectPath("/org/freedesktop/login1/user/_1000".to_string()),
+                ]))),
+            )])
+        );
+        assert_eq!(
+            bus_value_from_dbus_message_item(invalidated).expect("decode invalidated array"),
+            BusValue::Array(vec![BusValue::String("LockedHint".to_string())])
         );
     }
 

@@ -9,6 +9,7 @@ Feature: GNOME monitor
     And the TV is on input HDMI_2
     And the executable PATH is isolated
     And gamepad activity is observed after 0 seconds
+    And mock system logind reports LockedHint=true
     And GNOME monitor stays open for 0.1 seconds
     When I run the command "monitor"
     Then the command succeeds
@@ -25,6 +26,71 @@ Feature: GNOME monitor
     Then the command succeeds
     And stdout contains "session notification service unavailable"
     And stdout contains "screen idle backend unavailable"
+
+  Scenario: Locking the graphical session blanks the TV immediately
+    Given a temporary LG Buddy config using input HDMI_2
+    And the idle timeout is 120 seconds
+    And LG Buddy session runtime is isolated
+    And a mock TV client
+    And the TV is on input HDMI_2
+    And the executable PATH is isolated
+    And GNOME Shell is available
+    And GNOME emits no ScreenSaver signals
+    And GNOME idle monitor will report idletimes "1000"
+    And mock system logind reports LockedHint=false
+    And mock system logind changes LockedHint to true
+    And GNOME monitor stays open for 0.6 seconds
+    When I run the command "monitor"
+    Then the command succeeds
+    And stdout contains "Session locked; requesting screen blank."
+    And the TV client received "turn_screen_off" exactly 1 times
+    And the TV client did not receive "turn_screen_on"
+    And the session marker exists
+    And the TV screen is blanked
+
+  Scenario: Unlocking the graphical session does not restore the TV
+    Given a temporary LG Buddy config using input HDMI_2
+    And the idle timeout is 120 seconds
+    And LG Buddy session runtime is isolated
+    And a mock TV client
+    And the TV is on input HDMI_2
+    And the executable PATH is isolated
+    And GNOME Shell is available
+    And GNOME emits no ScreenSaver signals
+    And GNOME idle monitor will report idletimes "1000"
+    And mock system logind reports LockedHint=true
+    And mock system logind changes LockedHint to false
+    And GNOME monitor stays open for 0.6 seconds
+    When I run the command "monitor"
+    Then the command succeeds
+    And stdout contains "Session unlocked; no screen restore requested."
+    And the TV client received "turn_screen_off" exactly 1 times
+    And the TV client did not receive "turn_screen_on"
+    And the session marker exists
+    And the TV screen is blanked
+
+  Scenario: A lock-owned blank uses the same timed power-off policy
+    Given a temporary LG Buddy config using input HDMI_2
+    And the idle timeout is 120 seconds
+    And the timed power-off grace is 0.2 seconds
+    And LG Buddy session runtime is isolated
+    And a mock TV client
+    And the TV is on input HDMI_2
+    And the executable PATH is isolated
+    And GNOME Shell is available
+    And GNOME emits no ScreenSaver signals
+    And GNOME idle monitor will report idletimes "1000"
+    And mock system logind reports LockedHint=false
+    And mock system logind changes LockedHint to true
+    And GNOME monitor stays open for 0.8 seconds
+    When I run the command "monitor"
+    Then the command succeeds
+    And stdout contains "Session locked; requesting screen blank."
+    And stdout contains "Timed power-off deadline reached"
+    And the TV client received "turn_screen_off" exactly 1 times
+    And the TV client received "power_off" exactly 1 times
+    And the session marker exists
+    And the TV is powered off
 
   Scenario: GNOME ScreenSaver idle does not bypass the LG Buddy timeout
     Given a temporary LG Buddy config using input HDMI_2
@@ -104,6 +170,66 @@ Feature: GNOME monitor
     And the session marker exists
     And the TV screen is blanked
 
+  Scenario: LG Buddy powers off an owned blank screen after the fixed grace period
+    Given a temporary LG Buddy config using input HDMI_2
+    And the idle timeout is 1 seconds
+    And the timed power-off grace is 0.2 seconds
+    And LG Buddy session runtime is isolated
+    And a mock TV client
+    And the TV is on input HDMI_2
+    And the executable PATH is isolated
+    And GNOME Shell is available
+    And GNOME emits no ScreenSaver signals
+    And GNOME idle monitor will report idletimes "1000"
+    And GNOME monitor stays open for 1.5 seconds
+    When I run the command "monitor"
+    Then the command succeeds
+    And stdout contains "Timed power-off deadline reached"
+    And the TV client received "turn_screen_off" exactly 1 times
+    And the TV client received "power_off" exactly 1 times
+    And the session marker exists
+    And the TV is powered off
+
+  Scenario: Activity cancels the pending power-off before restoring the screen
+    Given a temporary LG Buddy config using input HDMI_2
+    And the idle timeout is 1 seconds
+    And the timed power-off grace is 0.5 seconds
+    And LG Buddy session runtime is isolated
+    And a mock TV client
+    And the TV is on input HDMI_2
+    And the executable PATH is isolated
+    And GNOME Shell is available
+    And GNOME emits no ScreenSaver signals
+    And GNOME idle monitor will report idletimes "1000, 1000, 1000, 1000"
+    And gamepad activity is observed after 1.2 seconds
+    And GNOME monitor stays open for 1.6 seconds
+    When I run the command "monitor"
+    Then the command succeeds
+    And stdout contains "Activity canceled the pending timed power-off"
+    And the TV client did not receive "power_off"
+    And the TV client received "turn_screen_on" exactly 1 times
+    And the session marker is absent
+
+  Scenario: Restarting with an ownership marker starts a fresh grace period
+    Given a temporary LG Buddy config using input HDMI_2
+    And the idle timeout is 120 seconds
+    And the timed power-off grace is 0.5 seconds
+    And LG Buddy session runtime is isolated
+    And a mock TV client
+    And the TV is on input HDMI_2
+    And the TV screen is blanked
+    And the session marker exists
+    And the executable PATH is isolated
+    And GNOME Shell is available
+    And GNOME emits no ScreenSaver signals
+    And GNOME idle monitor will report idletimes "1000"
+    And GNOME monitor stays open for 0.2 seconds
+    When I run the command "monitor"
+    Then the command succeeds
+    And the TV client did not receive "power_off"
+    And the session marker exists
+    And the TV screen is blanked
+
   Scenario: LG Buddy does not blank repeatedly without intervening activity
     Given a temporary LG Buddy config using input HDMI_2
     And the idle timeout is 1 seconds
@@ -144,15 +270,16 @@ Feature: GNOME monitor
 
   Scenario: GNOME lock-screen activity restores before ScreenSaver reports active
     Given a temporary LG Buddy config using input HDMI_2
-    And the idle timeout is 1 seconds
+    And the idle timeout is 120 seconds
     And LG Buddy session runtime is isolated
     And a mock TV client
     And the TV is on input HDMI_2
     And the executable PATH is isolated
     And GNOME Shell is available
-    And GNOME reports the session idle
-    And GNOME idle monitor will report idletimes "1000, 1000, 1000, 1000, 1000, 1000, 0"
-    And GNOME monitor stays open for 1.8 seconds
+    And GNOME emits no ScreenSaver signals
+    And GNOME idle monitor will report idletimes "1000, 1000, 0"
+    And mock system logind reports LockedHint=true
+    And GNOME monitor stays open for 0.8 seconds
     When I run the command "monitor"
     Then the command succeeds
     And stdout contains "Session event `user-activity` requests screen restore."
@@ -167,7 +294,6 @@ Feature: GNOME monitor
     And LG Buddy session runtime is isolated
     And a mock TV client
     And the TV is on input HDMI_3
-    And the session marker exists
     And the executable PATH is isolated
     And GNOME Shell is available
     And GNOME emits no ScreenSaver signals

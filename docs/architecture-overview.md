@@ -7,13 +7,20 @@ It is not a product roadmap. It is a map of what exists today and how the main p
 For the top-level system, desktop, and service event paths that enter the
 runtime, see [Runtime event handler map](runtime-event-handler-map.md).
 
+For the application-owned presentation contract and GTK renderer boundary,
+including the target beyond the currently delivered slice, see
+[GUI target architecture](gui-target-architecture.md). The architecture below
+describes the current implementation.
+
 ## Repository Shape
 
-The repository now has one runtime implementation and one setup surface:
+The repository has one application/runtime crate, one GUI frontend crate, and
+one setup surface:
 
 - Rust runtime workspace
   - `Cargo.toml`
   - `crates/lg-buddy/`
+  - `crates/lg-buddy-gui/`
 - shell-based setup surface
   - `configure.sh`
   - `install.sh`
@@ -21,7 +28,10 @@ The repository now has one runtime implementation and one setup surface:
   - `bin/LG_Buddy_Common`
   - `systemd/`
 
-The Rust runtime owns operational behavior. The remaining shell layer exists for configuration, installation, and removal.
+The Rust application owns operational behavior and toolkit-neutral presentation
+state. The GUI crate uses a libadwaita application/window shell and GTK widgets
+to render that state. The remaining shell layer exists for configuration,
+installation, and removal.
 
 ## High-Level Runtime Shape
 
@@ -85,23 +95,27 @@ The main runtime consumers are:
 
 - system lifecycle and service integrations, including systemd,
   NetworkManager, and logind
-- desktop environment and session integrations, including GNOME, `swayidle`,
-  and Linux input activity sources
+- desktop environment and session integrations, including GNOME, native
+  Wayland, `swayidle`, and Linux input activity sources
 - TTY users invoking the CLI directly
-- frontend surfaces, currently the zenity brightness dialog, which delegate
-  back through the CLI/API command surface
+- the stable `lg-buddy brightness` launcher, which opens the matching installed
+  GTK executable and uses Zenity only when that executable is absent
+- the `lg-buddy-gui brightness` GTK window, which asynchronously reads and
+  writes OLED brightness and renders application-owned Loading, Ready,
+  Applying, or Failed presentation state
 
 ```mermaid
 flowchart LR
     subgraph Desktop["Desktop Session / External Tools"]
         GNOME["GNOME session bus<br/>ScreenSaver / Mutter signals"]
+        WAYLAND["Wayland compositor<br/>ext_idle_notifier_v1"]
         SWAY["swayidle<br/>idle hooks"]
         INPUT["Linux input devices<br/>gamepads / wheels / device events"]
         FDO_NOTIFY["desktop notification service<br/>org.freedesktop.Notifications"]
     end
 
     subgraph SystemLifecycle["System Lifecycle"]
-        LOGIND["logind system bus<br/>PrepareForSleep"]
+        LOGIND["logind system bus<br/>PrepareForSleep / session LockedHint"]
         NM["NetworkManager dispatcher<br/>pre-down"]
         UPDATE_TIMER["systemd user timer<br/>background update checks"]
     end
@@ -112,6 +126,7 @@ flowchart LR
 
     subgraph Frontend["Frontend"]
         ZENITY["zenity brightness dialog<br/>interactive prompt"]
+        GTK["lg-buddy-gui<br/>libadwaita / GTK brightness window"]
     end
 
     subgraph Rust["Rust Runtime"]
@@ -126,6 +141,8 @@ flowchart LR
         PHASE["runtime_phase.rs<br/>machine sleep phase provider"]
         CONFIG["config.rs<br/>config.env parsing"]
         STATE["state.rs<br/>runtime markers"]
+        BRIGHTNESS["brightness.rs<br/>brightness application flow"]
+        PRESENTATION["presentation/brightness.rs<br/>Loading / Ready / Applying / Failed declarations"]
 
         subgraph SessionSubsystem["Session Integration Subsystem"]
             BACKEND["backend.rs<br/>backend selection"]
@@ -135,11 +152,11 @@ flowchart LR
             BUS["session_bus.rs<br/>generic D-Bus transport"]
 
             subgraph Sources["Source Adapters"]
-                LOGINDADAPTER["sources/linux/logind.rs<br/>logind lifecycle mapping"]
+                LOGINDADAPTER["sources/linux/logind.rs<br/>lifecycle mapping + lock observer"]
                 NMGATE["sources/linux/network_manager.rs<br/>pre-down event source"]
-                GADAPTER["sources/desktop/gnome.rs<br/>GNOME probe + signal mapping"]
-                WADAPTER["sources/desktop/wayland.rs<br/>Wayland registry + activity mapping"]
-                SADAPTER["sources/desktop/swayidle.rs<br/>hook mapping + capability probe"]
+                GADAPTER["sources/desktop/gnome.rs<br/>GNOME bus + observation source"]
+                WADAPTER["sources/desktop/wayland.rs<br/>Wayland registry + observation source"]
+                SADAPTER["sources/desktop/swayidle.rs<br/>process fact source"]
             end
         end
 
@@ -158,21 +175,30 @@ flowchart LR
     MAIN --> BACKEND
     MAIN --> RUNNER
     RUNNER --> BACKEND
-    RUNNER --> BUS
     BACKEND --> GADAPTER
     BACKEND --> WADAPTER
     BACKEND --> SADAPTER
+    RUNNER -->|"starts"| GADAPTER
+    RUNNER -->|"starts"| WADAPTER
+    RUNNER -->|"starts"| LOGINDADAPTER
 
-    GNOME --> BUS
-    BUS --> GADAPTER
-    GADAPTER -->|"SessionEvent"| SESSIONMODEL
-    WADAPTER -->|"DesktopActivityObserved"| RUNNER
-    LOGIND --> BUS
-    BUS --> LOGINDADAPTER
-    LOGINDADAPTER -->|"RuntimeEvent"| EVENTS
+    GNOME --> GADAPTER
+    GADAPTER --> BUS
+    GADAPTER -->|"SessionObservation"| RUNNER
+    WAYLAND --> WADAPTER
+    WADAPTER -->|"SessionObservation"| RUNNER
+    LOGIND --> LOGINDADAPTER
+    LOGINDADAPTER --> BUS
+    LOGINDADAPTER -->|"lifecycle RuntimeEvent"| EVENTS
+    LOGINDADAPTER -->|"lock SessionObservation"| RUNNER
     NM --> MAIN
     TERMINAL --> MAIN
+    MAIN -->|"brightness launcher"| GTK
+    MAIN -.->|"GUI absent"| ZENITY
     ZENITY --> MAIN
+    GTK -->|"Propose / Apply / Retry / Cancel intents"| BRIGHTNESS
+    BRIGHTNESS --> PRESENTATION
+    PRESENTATION --> GTK
     MAIN --> COMMANDS
     COMMANDS --> EVENTS
     COMMANDS --> NMGATE
@@ -185,8 +211,10 @@ flowchart LR
     SCREEN --> PHASE
     NMGATE --> LIFECYCLE
 
-    SWAY -->|"delegated timeout / resume<br/>screen off / screen on CLI"| MAIN
-    SADAPTER -.->|"modeled SessionEvent hooks"| SESSIONMODEL
+    RUNNER -->|"starts"| SADAPTER
+    SADAPTER --> SWAY
+    SWAY -->|"timeout / resume facts"| SADAPTER
+    SADAPTER -->|"SessionObservation"| RUNNER
     INPUT --> GAMEPAD
     GAMEPAD -->|"UserActivity"| RUNNER
     NOTIFICATIONS --> FDO_NOTIFY
@@ -195,10 +223,13 @@ flowchart LR
     RUNNER --> SESSIONNOTIFY
     SESSIONMODEL --> RUNNER
 
-    RUNNER -->|"Idle / Active / WakeRequested /<br/>UserActivity"| SCREEN
+    RUNNER -->|"Idle / Active / WakeRequested /<br/>UserActivity / Lock / TimedPowerOff"| SCREEN
     RUNNER -->|"AfterResume"| LIFECYCLE
     COMMANDS --> CONFIG
     COMMANDS --> STATE
+    BRIGHTNESS --> CONFIG
+    BRIGHTNESS --> NOTIFICATIONS
+    BRIGHTNESS --> TV
     SCREEN --> STATE
     LIFECYCLE --> STATE
     SCREEN --> TV
@@ -221,6 +252,13 @@ The intended split is:
   - CLI/API command entrypoints
   - config, state, and dependency loading for command execution
   - command output handoff
+- `brightness.rs`
+  - toolkit-neutral brightness read/write application flow
+  - typed brightness dependencies and production TV/config/notification adapters
+  - opaque operation identities, single-write enforcement, and stale-completion rejection
+- `presentation/brightness.rs`
+  - toolkit-neutral Loading, Ready, Applying, and Failed declarations
+  - semantic Propose, Apply, Retry, and Cancel intents
 - `events.rs`
   - canonical runtime event envelope and source classification
 - `policy.rs`
@@ -287,13 +325,15 @@ The intended split is:
   - `auto`, `gnome`, native `wayland`, and deprecated `swayidle` compatibility
 - `session.rs`
   - backend-neutral session event model
-  - capability surface for desktop backends
+  - normalized source-observation boundary
   - top-level event consumption is mapped separately in
     [runtime-event-handler-map.md](runtime-event-handler-map.md)
 - `session/inactivity.rs`
-  - owns the configured inactivity deadline
+  - owns the configured inactivity deadline and fixed five-minute post-blank
+    power-off deadline
   - resets the deadline from normalized activity observations and blanks when
     it expires
+  - arms power-off only after confirmed blank success and cancels it on activity
   - keeps blank and restore decisions edge-triggered instead of poll-triggered
 - `session/gamepad/`
   - discovers readable Linux gamepad-like input devices
@@ -306,8 +346,7 @@ The intended split is:
   - detailed in [gamepad-subsystem.md](gamepad-subsystem.md)
 - `session_bus.rs`
   - generic blocking D-Bus transport seam
-  - session-bus use for the GNOME monitor runtime
-  - system-bus use for the logind lifecycle runtime
+  - consumed by the GNOME and logind source adapters
 - `session/runner.rs`
   - backend-neutral monitor and lifecycle runners
   - starts the user-session notification surface before screen backend work
@@ -315,34 +354,34 @@ The intended split is:
     screen backend is temporarily unavailable
   - combines backend observations with the inactivity engine
   - dispatches semantic session events into screen and lifecycle policy
-  - runs delegated `swayidle` by invoking the current executable's
-    `screen off` and `screen on` CLI commands
+  - starts source workers and multiplexes their normalized observations
 - `sources/linux/logind.rs`
-  - Linux system lifecycle adapter
+  - Linux system lifecycle and current-session lock-state adapter
   - maps `org.freedesktop.login1` resume signals into canonical lifecycle
     events
   - reads the `PreparingForSleep` property used by the NetworkManager pre-down
     gate
+  - owns the optional lock observer: system-bus connection, graphical-session
+    resolution, subscriptions, owner rebinding, and `LockedHint` translation
 - `sources/linux/network_manager.rs`
   - NetworkManager `pre-down` dispatcher source
   - emits `NetworkTeardownImminent` with the logind sleep-phase reading
 - `sources/desktop/gnome.rs`
-  - GNOME-specific capability probing plus ScreenSaver signal and IdleMonitor
-    method mapping
+  - owns GNOME session-bus setup, subscriptions, sender validation, Mutter
+    polling, and translation into normalized observations
 - `sources/desktop/wayland.rs`
   - native Wayland capability probing and dynamic registry/seat ownership
   - maps zero-timeout resumed notifications into desktop activity facts
 - `sources/desktop/swayidle.rs`
-  - `swayidle`-specific capability probing and hook-to-event mapping
-  - models the `swayidle` hook surface; production timeout/resume handling
-    currently delegates through the CLI/API command path
+  - owns the production `swayidle` process and translates timeout/resume
+    callbacks into idle/activity facts
 
 The session-facing pieces should be read as one subsystem:
 
 - `backend.rs`
   - selects the active session backend
 - `session.rs`
-  - defines the homogenized session contract
+  - defines canonical session events and normalized source observations
 - `session/inactivity.rs`
   - owns session-phase synthesis and the configured inactivity deadline
 - `session/gamepad/`
@@ -350,21 +389,21 @@ The session-facing pieces should be read as one subsystem:
   - owns gamepad device discovery, event-triggered refresh, and reconciliation
   - see [gamepad-subsystem.md](gamepad-subsystem.md) for adapter and lifecycle details
 - `session/runner.rs`
-  - owns the shared native-session runtime, including the gamepad source
-    lifecycle independently of the selected desktop provider
+  - owns shared session orchestration, including source selection,
+    worker lifetime, multiplexing, and gamepad activity
   - converts provider and auxiliary input into activity observations, resets
     the inactivity deadline, and dispatches source-classified runtime policy
   - treats `screen_idle_blank=disabled` as a passive user-session mode that
     preserves update notification handoff without TV idle blank/restore actions
-  - treats delegated `swayidle` as a CLI/API client for timeout/resume actions
+  - consumes `swayidle` timeout/resume facts through the same inactivity policy
   - owns the `lifecycle` event loop for system sleep/wake handling
 - `sources/linux/logind.rs`
-  - adapts Linux system lifecycle signals into canonical lifecycle events
+  - adapts Linux system lifecycle signals and owns observation of an eligible
+    graphical session's `LockedHint`
 - `sources/desktop/gnome.rs`, `sources/desktop/wayland.rs`, and
   `sources/desktop/swayidle.rs`
-  - adapt or model backend-specific surfaces against that shared session
-    contract; the production `swayidle` timeout/resume path enters through
-    CLI/API commands
+  - own their provider-specific connection or process mechanics and expose
+    normalized observations to the runner
 
 ## Command Model
 
@@ -430,10 +469,19 @@ owns an operational cache under the user cache directory for GitHub ETag,
 latest release metadata, and last-notified release state used by the observable
 update notification policy; that cache is not user configuration and is not
 part of the settings API.
-The `brightness get` and `brightness set` commands use the TV picture
+The `brightness` command locates `lg-buddy-gui` beside the running CLI and
+launches its `brightness` entrypoint. Only an absent GUI executable selects the
+temporary Zenity compatibility flow; an invalid installation or failed GUI
+process is returned directly without a second prompt. The `brightness get` and
+`brightness set` commands never enter that launcher and use the TV picture
 abstraction in `tv.rs` for typed OLED brightness validation and live TV
-read/write operations. The interactive brightness dialog delegates its TV
-operations back through those CLI commands.
+read/write operations. The interactive Zenity brightness dialog delegates its
+TV operations back through those direct CLI commands. The GTK brightness window
+uses the same typed picture capabilities through the core brightness
+application flow. Workers keep blocking TV operations off the GTK main loop;
+the application permits one write at a time, and opaque operation identity
+prevents late results from replacing newer or closed presentation state.
+Successful GTK writes retain the existing brightness success notification.
 The `volume` family uses the TV audio abstraction for typed volume and mute
 operations. Setting or stepping volume explicitly unmutes after the volume
 operation; mute toggle reads the current state before writing its inverse.
@@ -485,9 +533,13 @@ mutation targets, and special files in owned config state are refused.
 After a bundle has been verified, its candidate binary can run the second
 preflight. That pass rechecks the installed state, proves it is executing the
 candidate from the supplied bundle root, and checks the candidate manifest,
-installer, runtime, desktop entry, and systemd assets before any privileged
-mutation. Candidate inputs must be owner-usable and not writable by another
-user. The external ancestor chain must remain root- or user-owned and cannot be
+installer, runtime, GUI executable, desktop entry, and systemd assets before
+any privileged mutation. The first GUI upgrade permits the installed GUI to be
+absent; once present, it must satisfy the same safe executable-replacement
+policy as the runtime. Candidate inputs must be owner-usable and not writable
+by another user. The installer also runs both candidates' non-graphical version
+paths and requires exact release identity agreement before mutation. The
+external ancestor chain must remain root- or user-owned and cannot be
 shared-writable unless sticky-directory semantics protect its trusted child.
 Configuration and pairing scripts are deliberately excluded because the
 non-interactive upgrade mode preserves existing configuration and credentials
@@ -527,6 +579,15 @@ Flow:
 7. If another input is active:
    - clear the marker
    - do nothing to the TV
+
+After a successful automatic blank, the inactivity engine starts a fixed
+five-minute grace period. Activity cancels it before restore. At expiry,
+`screen.rs` rechecks that automatic blanking is enabled, the session marker is
+present, the configured input is still active, and machine lifecycle allows a
+session action. It then attempts `power_off` once and preserves the marker for
+later activity restore. Input mismatch clears ownership; input-query failure
+skips without a blind power-off fallback. A monitor restart with an existing
+marker starts a fresh grace period.
 
 ### `screen on`
 
@@ -775,11 +836,11 @@ The runtime core owns:
 - retries and recovery behavior
 - lifecycle decisions
 
-Desktop backends should only answer questions like:
+Desktop source modules should only answer questions like:
 
-- which backend is active?
-- which session signals are available?
-- how should backend-specific signals map into runtime events?
+- how is the selected provider connected or started?
+- which native signals or activity facts are valid?
+- how should those facts map into normalized observations?
 
 `session.rs` defines the backend-neutral semantic contract:
 
@@ -792,38 +853,24 @@ Desktop backends should only answer questions like:
   - `AfterResume`
   - `Lock`
   - `Unlock`
-- backend capability flags
-- idle-timeout ownership semantics
+- a normalized observation carrying its source and observation time
 
 The detailed session model is documented in `docs/session-backend-model.md`.
 
 `sources/desktop/gnome.rs` is the native GNOME adapter. It currently provides:
 
-- capability probing
-- mapping from GNOME D-Bus monitor lines into `SessionEvent`
-- the GNOME event and idletime sources used by `lg-buddy monitor`
+- the GNOME session-bus connection and subscriptions
+- ScreenSaver sender ownership validation and signal mapping
+- Mutter idletime polling and normalized activity observations
 
 `sources/desktop/wayland.rs` is the native non-GNOME adapter. It owns the
 Wayland connection, registry, every advertised seat, and zero-timeout idle
 notifications. Resumed notifications become desktop activity observations in
 the shared inactivity runtime; compositor idle does not directly blank the TV.
 
-`sources/desktop/swayidle.rs` is the delegated-tool adapter. It currently provides:
-
-- capability probing
-- mapping from `swayidle` hooks into `SessionEvent`
-
-Production `swayidle` monitor execution does not dispatch those modeled events
-directly for timeout/resume. It starts `swayidle` with command strings pointing
-back to the current LG Buddy executable:
-
-- `screen off` for timeout
-- `screen on` for resume
-
-That means `swayidle` acts as a CLI/API client of LG Buddy. It is delegated, but
-not a separate quirks path for screen policy: the invoked commands load config
-and state normally, construct canonical CLI/API runtime events, and enter
-`screen.rs` through the same command surface as manual invocations.
+`sources/desktop/swayidle.rs` is the compatibility process adapter. Its timeout
+callback publishes `Idle`; its resume callback publishes independent desktop
+activity. The adapter does not invoke TV-facing commands or own screen policy.
 
 The session subsystem is intentionally asymmetric where the providers are
 asymmetric:
@@ -831,17 +878,19 @@ asymmetric:
 - the current GNOME provider treats ScreenSaver active/wake and recent Mutter
   input as activity that resets LG Buddy's inactivity deadline; ScreenSaver
   idle is not a blanking authority
-- the shared native-session runtime consumes gamepad activity directly from
+- the shared session runtime consumes gamepad activity directly from
   Linux input devices as `AuxiliaryInput`, independently of desktop providers;
-  GNOME and native Wayland use this runtime
+  every enabled monitor backend uses this runtime
+- the same runtime opportunistically observes `LockedHint` on the current
+  graphical logind session; lock requests the normal session blank policy,
+  unlock is informational, fresh independent activity can restore while locked,
+  and logind owner changes trigger session rebinding and reconciliation; failure
+  or lack of support does not affect the selected desktop backend
 - the gamepad source refreshes its device set from Linux device add, remove, and
   change events, with periodic reconciliation for missed events
-- delegated `swayidle` monitor execution is implemented as CLI/API delegation
-  for `timeout` and `resume` parity with the shell monitor
-- `swayidle` systemd-style hooks such as `before-sleep`, `after-resume`,
-  `lock`, and `unlock` are not wired into monitor behavior; system lifecycle is
-  handled by the NetworkManager pre-down gate plus logind lifecycle service
-  instead
+- `swayidle` timeout and resume callbacks feed the shared inactivity engine
+- system lifecycle is handled by the NetworkManager pre-down gate plus logind
+  lifecycle service, while lock state is optional in the shared session runtime
 
 `swayidle` remains an explicit and automatic compatibility fallback during the
 1.x migration window, but emits a deprecation notice and is not offered by
@@ -861,6 +910,8 @@ Important environment overrides:
   - force backend selection
 - `LG_BUDDY_BSCPYLGTV_COMMAND`
   - override TV command path
+- `LG_BUDDY_GUI`
+  - override the matching `lg-buddy-gui` path for relocation and tests
 - `LG_BUDDY_SYSTEM_RUNTIME_DIR`
   - override system state directory
 - `LG_BUDDY_SESSION_RUNTIME_DIR`
@@ -923,7 +974,6 @@ The shell layer still owns:
 
 What is still not implemented:
 
-- `swayidle` `before-sleep`, `after-resume`, `lock`, and `unlock` handling
 - additional desktop backends
 - an immutable-distribution install layout that avoids conventional `/usr`
   writes

@@ -2,6 +2,7 @@ mod dev;
 
 pub mod auth;
 pub mod backend;
+pub mod brightness;
 pub mod commands;
 pub mod config;
 pub mod events;
@@ -9,6 +10,7 @@ pub mod lifecycle;
 pub mod notifications;
 pub mod platform_access_token;
 pub mod policy;
+pub mod presentation;
 pub mod release_bundle;
 pub mod runtime_phase;
 pub mod screen;

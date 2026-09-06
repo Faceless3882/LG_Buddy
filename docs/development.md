@@ -9,6 +9,16 @@ Compiling the Rust runtime requires:
 - a Rust toolchain with `cargo`
 - a working C toolchain
 
+Compiling and testing the GTK frontend additionally requires:
+
+- GTK 4.10 or newer development files
+- libadwaita 1 development files
+- `pkg-config`
+- a graphical session or virtual display for renderer tests
+- `xdotool` for the executable launch smoke test
+- AT-SPI 2 and its Python bindings (`python3-pyatspi` on Debian/Fedora,
+  `python-atspi` on Arch) for observable GUI behavior tests
+
 Running the interactive installer, exercising the legacy TV fallback, and
 testing release bundles also requires:
 
@@ -44,6 +54,27 @@ Build the runtime from source with:
 cargo build --release -p lg-buddy
 ```
 
+Build the GTK frontend from source with:
+
+```bash
+cargo build --release -p lg-buddy-gui
+```
+
+Run its current brightness window with:
+
+```bash
+cargo run -p lg-buddy-gui -- brightness
+```
+
+After building both workspace binaries, the stable launcher can be exercised
+with `cargo run -p lg-buddy -- brightness`; it resolves `lg-buddy-gui` beside
+the running CLI executable. `LG_BUDDY_GUI` overrides that companion path for
+relocation and subprocess tests. Only a missing path selects the temporary
+Zenity compatibility flow.
+
+The local installer accepts the GUI and runtime as separate build artifacts.
+Official release bundles ship and verify both.
+
 Official release builds inject version identity into the binary:
 
 ```bash
@@ -62,12 +93,14 @@ The resulting binary will be at:
 
 ## Install a Locally Built Binary
 
-`install.sh` is installer-only. It does not build the runtime.
+`install.sh` is installer-only. It does not build the runtime or GUI.
 
-To install a binary you built yourself:
+To install binaries you built yourself:
 
 ```bash
-./install.sh --runtime-binary ./target/release/lg-buddy
+./install.sh \
+  --runtime-binary ./target/release/lg-buddy \
+  --gui-binary ./target/release/lg-buddy-gui
 ```
 
 To install from a release bundle instead, extract the archive and run:
@@ -83,8 +116,12 @@ Useful checks during development:
 ```bash
 cargo test -p lg-buddy --lib
 cargo test -p lg-buddy --test cucumber
-cargo clippy -p lg-buddy --all-targets --all-features -- -D warnings
-bash -n install.sh uninstall.sh configure.sh bin/LG_Buddy_Common scripts/build-release-bundle.sh scripts/test-release-bundle.sh scripts/test-cross-version-upgrade.sh scripts/test-production-upgrade-canary.sh scripts/publish-release-assets.sh
+dbus-run-session -- xvfb-run -a bash ./scripts/test-gui-launch.sh ./target/debug/lg-buddy-gui
+dbus-run-session -- xvfb-run -a bash ./scripts/test-gui-launch.sh ./target/debug/lg-buddy
+dbus-run-session -- xvfb-run -a bash ./scripts/test-installed-gui.sh ./target/debug/lg-buddy ./target/debug/lg-buddy-gui
+dbus-run-session -- xvfb-run -a env ADW_DISABLE_PORTAL=1 GDK_BACKEND=x11 GDK_DEBUG=no-portals NO_AT_BRIDGE=1 cargo test -p lg-buddy-gui -- --test-threads=1
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+bash -n install.sh uninstall.sh configure.sh bin/LG_Buddy_Common scripts/build-release-bundle.sh scripts/test-gui-launch.sh scripts/test-installed-gui.sh scripts/test-release-bundle.sh scripts/test-cross-version-upgrade.sh scripts/test-production-upgrade-canary.sh scripts/publish-release-assets.sh
 python3 scripts/test_release_promotion.py
 python3 scripts/test_record_github_release_responses.py
 ```
@@ -114,28 +151,37 @@ Build a release bundle locally with:
 ```bash
 LG_BUDDY_RELEASE_VERSION=0.0.0-dev \
 LG_BUDDY_BUILD_COMMIT="$(git rev-parse HEAD)" \
-cargo build --release -p lg-buddy --target x86_64-unknown-linux-gnu
-./scripts/build-release-bundle.sh --target x86_64-unknown-linux-gnu --version 0.0.0-dev
+cargo build --locked --release -p lg-buddy --target x86_64-unknown-linux-musl
+LG_BUDDY_RELEASE_VERSION=0.0.0-dev \
+LG_BUDDY_BUILD_COMMIT="$(git rev-parse HEAD)" \
+cargo build --locked --release -p lg-buddy-gui --target x86_64-unknown-linux-gnu
+./scripts/build-release-bundle.sh \
+  --target x86_64-unknown-linux-musl \
+  --gui-target x86_64-unknown-linux-gnu \
+  --version 0.0.0-dev
 ```
 
 The builder requires a full release commit and expects the matching release
-binary to exist under:
+artifacts to exist under:
 
 ```text
 ./target/<target>/release/lg-buddy
+./target/<gui-target>/release/lg-buddy-gui
 ```
 
 Smoke test a generated release bundle with:
 
 ```bash
-./scripts/test-release-bundle.sh --archive ./dist/lg-buddy-0.0.0-dev-x86_64-unknown-linux-gnu.tar.gz
+dbus-run-session -- xvfb-run -a ./scripts/test-release-bundle.sh \
+  --archive ./dist/lg-buddy-0.0.0-dev-x86_64-unknown-linux-musl.tar.gz
 ```
 
 The smoke test validates `release-manifest.json` against the archive name and
-bundled binary before running installer code. It then installs into a temporary
+bundled runtime and GUI before running installer code. It then installs into a temporary
 root and exercises upgrade refusal, preservation, Python repair, owned-file
-replacement, service ordering, installed identity, lifecycle topology, and
-uninstall cleanup without mutating the host installation.
+replacement, service ordering, installed identity, mocked GUI read/apply/failure/
+cancel behavior, lifecycle topology, and uninstall cleanup without mutating the
+host installation.
 
 Run the cross-version smoke with explicit previous and candidate archives:
 
@@ -184,8 +230,10 @@ the branch contract and recovery process, see
 | --- | --- |
 | `crates/lg-buddy/src/lib.rs` | CLI parsing and command dispatch |
 | `crates/lg-buddy/src/commands.rs` | Runtime command entrypoints and dependency assembly |
+| `crates/lg-buddy/src/brightness.rs` | Toolkit-neutral brightness read/write flow and production adapters |
 | `crates/lg-buddy/src/events.rs` | Canonical runtime event vocabulary |
 | `crates/lg-buddy/src/policy.rs` | Policy outcome, action, no-action, diagnostic, and state-transition types |
+| `crates/lg-buddy/src/presentation/` | Toolkit-neutral GUI presentation declarations owned by the application |
 | `crates/lg-buddy/src/screen.rs` | Session screen blank/restore policy |
 | `crates/lg-buddy/src/lifecycle.rs` | Startup, shutdown, system sleep, and system resume policy |
 | `crates/lg-buddy/src/runtime_phase.rs` | Runtime sleep-phase provider abstraction |
@@ -193,7 +241,7 @@ the branch contract and recovery process, see
 | `crates/lg-buddy/src/session/inactivity.rs` | Session inactivity deadline and phase synthesis |
 | `crates/lg-buddy/src/session/gamepad/` | Gamepad activity discovery, device-event refresh, adapters, capture, registry, and policy |
 | `crates/lg-buddy/src/session_bus.rs` | Generic D-Bus transport used by session and system event sources |
-| `crates/lg-buddy/src/sources/linux/logind.rs` | Linux logind lifecycle signal and property adapter |
+| `crates/lg-buddy/src/sources/linux/logind.rs` | Linux logind lifecycle and current-session lock-state adapter |
 | `crates/lg-buddy/src/sources/linux/network_manager.rs` | NetworkManager pre-down lifecycle source adapter |
 | `crates/lg-buddy/src/sources/desktop/gnome.rs` | GNOME backend integration |
 | `crates/lg-buddy/src/sources/desktop/wayland.rs` | Native Wayland idle/activity provider |
@@ -201,11 +249,17 @@ the branch contract and recovery process, see
 | `crates/lg-buddy/src/tv.rs` | TV transport boundary and facade |
 | `crates/lg-buddy/src/web_os/` | Native webOS client, profile-bound TV adapter, domain operations, and test support |
 | `crates/lg-buddy/src/wol.rs` | Native Wake-on-LAN support |
+| `crates/lg-buddy-gui/` | GTK 4/libadwaita executable, application lifecycle, and thin presentation renderer |
 | `configure.sh` | Interactive configuration tool |
-| `install.sh` | Installer for an existing binary |
+| `install.sh` | Installer for existing runtime and GUI binaries |
 | `uninstall.sh` | Uninstaller |
 | `scripts/release_bundle_manifest.py` | Release-bundle identity manifest creator and validator |
 | `scripts/build-release-bundle.sh` | Release bundle builder |
+| `scripts/test-installed-gui.sh` | Installed GTK launcher and removal smoke test |
+| `scripts/test-release-gui-behavior.sh` | Display-backed installed GUI behavior smoke with externally observed presentation-state gates |
+| `scripts/test-release-gui-accessibility.py` | External AT-SPI presentation-state and accessibility contract probe for the installed GTK GUI |
+| `scripts/xwd_mean.py` | Standard-library XWD luminance probe for release theme smoke tests |
+| `scripts/test-release-linkage.sh` | Static runtime and GNU GUI linkage baseline check |
 | `scripts/test-release-bundle.sh` | Release bundle smoke test |
 | `scripts/test-cross-version-upgrade.sh` | Pinned previous-to-candidate archive upgrade smoke test |
 | `scripts/test-production-upgrade-canary.sh` | Post-publication production GitHub upgrade canary |
@@ -213,14 +267,15 @@ the branch contract and recovery process, see
 | `scripts/publish-release-assets.sh` | GitHub release publish helper |
 | `scripts/release_promotion.py` | Promotion version, branch, and tag validator |
 | `.github/workflows/ci.yml` | CI validation workflow |
-| `.github/workflows/promotion-check.yml` | Trusted promotion PR contract check |
+| `.github/workflows/promotion-pr.yml` | Read-only promotion PR contract check using the target branch's validator |
 | `.github/workflows/release.yml` | Post-merge promotion build and publication workflow |
 | `bin/LG_Buddy_Common` | Shared shell config helper used by setup scripts |
 | `systemd/` | Installed unit files and tmpfiles config, including the logind lifecycle service |
 | `docs/architecture-overview.md` | Runtime architecture |
 | `docs/defaults-and-configuration.md` | Product defaults and persistent configuration guidance |
 | `docs/gamepad-subsystem.md` | Gamepad activity architecture and adapter guidance |
+| `docs/gui-target-architecture.md` | Target declarative application contract and GTK renderer boundary |
 | `docs/runtime-event-handler-map.md` | Top-level system, desktop, and runtime event handler map |
-| `docs/session-backend-model.md` | Session backend semantics and capability model |
+| `docs/session-backend-model.md` | Session source semantics, ownership, and observation contract |
 | `docs/testing-strategy.md` | Test strategy and scope |
 | `docs/webos-testing.md` | Native webOS evidence and mock testing strategy |

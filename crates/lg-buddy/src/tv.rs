@@ -1387,7 +1387,7 @@ mod tests {
     use std::path::Path;
     use std::rc::Rc;
     use std::time::Duration;
-    use support::{ExecutableScript, MockBscpylgtv, TestConfigFile};
+    use support::{find_command_in_path, MockBscpylgtv, TestConfigFile};
 
     #[test]
     fn oled_brightness_accepts_boundary_values() {
@@ -1752,13 +1752,12 @@ mod tests {
 
     #[test]
     fn command_timeout_stops_slow_helper() {
-        let script = ExecutableScript::new(
-            "tv-command-timeout",
-            "slow-bscpylgtvcommand",
-            "#!/bin/sh\nsleep 5\n",
-        );
-        let client = BscpylgtvCommandClient::new(ip("10.0.0.8"), script.path())
-            .with_command_timeout(Duration::from_millis(100));
+        let client = BscpylgtvCommandClient::with_args(
+            ip("10.0.0.8"),
+            find_command_in_path("sh").expect("shell executable"),
+            ["-c", "exec sleep 5", "mock-bscpylgtvcommand"],
+        )
+        .with_command_timeout(Duration::from_millis(100));
 
         let err = client
             .current_input()
@@ -1920,11 +1919,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn user_scoped_launcher_sets_identity_environment_when_uid_already_matches() {
-        let script = ExecutableScript::new(
-            "tv-user-scoped-launcher-env",
-            "print-env",
-            "#!/bin/sh\nprintf 'USER=%s\\n' \"$USER\"\nprintf 'LOGNAME=%s\\n' \"$LOGNAME\"\nprintf 'HOME=%s\\n' \"$HOME\"\nid -u\n",
-        );
         let current_uid = current_euid();
         let current_gid = unsafe { libc::getegid() };
         let identity = SystemUser::new(
@@ -1933,8 +1927,14 @@ mod tests {
             current_gid,
             "/tmp/lg-buddy-owner-home",
         );
-        let invocation =
-            BscpylgtvInvocation::new(script.path(), Vec::<String>::new(), Some(identity));
+        let invocation = BscpylgtvInvocation::new(
+            find_command_in_path("sh").expect("shell executable"),
+            vec![
+                "-c".to_string(),
+                "printf 'USER=%s\\n' \"$USER\"; printf 'LOGNAME=%s\\n' \"$LOGNAME\"; printf 'HOME=%s\\n' \"$HOME\"; id -u".to_string(),
+            ],
+            Some(identity),
+        );
 
         let result = UserScopedBscpylgtvCommandLauncher
             .run(&invocation)
@@ -1956,11 +1956,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn user_scoped_launcher_rejects_cross_user_request_without_root() {
-        let script = ExecutableScript::new(
-            "tv-user-scoped-launcher-denied",
-            "should-not-run",
-            "#!/bin/sh\nprintf 'unexpected\\n'\n",
-        );
         let current_uid = current_euid();
         let current_gid = unsafe { libc::getegid() };
         let identity = SystemUser::new(
@@ -1969,8 +1964,11 @@ mod tests {
             current_gid,
             "/tmp/other-user-home",
         );
-        let invocation =
-            BscpylgtvInvocation::new(script.path(), Vec::<String>::new(), Some(identity));
+        let invocation = BscpylgtvInvocation::new(
+            "/path/that/must/not/run",
+            Vec::<String>::new(),
+            Some(identity),
+        );
         let err = UserScopedBscpylgtvCommandLauncher
             .run(&invocation)
             .expect_err("non-root cross-user launch should fail before exec");
@@ -1996,13 +1994,14 @@ mod tests {
         };
         let identity =
             lookup_system_user_from_passwd(&sudo_user).expect("resolve sudo user from /etc/passwd");
-        let script = ExecutableScript::new(
-            "tv-user-scoped-launcher-root-drop",
-            "print-identity",
-            "#!/bin/sh\nprintf 'USER=%s\\n' \"$USER\"\nprintf 'LOGNAME=%s\\n' \"$LOGNAME\"\nprintf 'HOME=%s\\n' \"$HOME\"\nprintf 'UID=%s\\n' \"$(id -u)\"\nprintf 'GID=%s\\n' \"$(id -g)\"\nprintf 'GROUPS=%s\\n' \"$(id -G)\"\n",
+        let invocation = BscpylgtvInvocation::new(
+            find_command_in_path("sh").expect("shell executable"),
+            vec![
+                "-c".to_string(),
+                "printf 'USER=%s\\n' \"$USER\"; printf 'LOGNAME=%s\\n' \"$LOGNAME\"; printf 'HOME=%s\\n' \"$HOME\"; printf 'UID=%s\\n' \"$(id -u)\"; printf 'GID=%s\\n' \"$(id -g)\"; printf 'GROUPS=%s\\n' \"$(id -G)\"".to_string(),
+            ],
+            Some(identity.clone()),
         );
-        let invocation =
-            BscpylgtvInvocation::new(script.path(), Vec::<String>::new(), Some(identity.clone()));
 
         let result = UserScopedBscpylgtvCommandLauncher
             .run(&invocation)

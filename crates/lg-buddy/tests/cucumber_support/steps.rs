@@ -26,6 +26,14 @@ fn idle_timeout_seconds(world: &mut LgBuddyWorld, seconds: u64) {
     world.set_idle_timeout_secs(seconds);
 }
 
+#[given(regex = r#"the timed power-off grace is ([0-9]+(?:\.[0-9]+)?) seconds"#)]
+fn timed_power_off_grace_seconds(world: &mut LgBuddyWorld, seconds: String) {
+    let seconds = seconds
+        .parse::<f64>()
+        .unwrap_or_else(|err| panic!("invalid timed power-off grace `{seconds}`: {err}"));
+    world.set_timed_power_off_grace_secs(seconds);
+}
+
 #[given("the current config is remembered")]
 fn current_config_is_remembered(world: &mut LgBuddyWorld) {
     world.remember_config_contents();
@@ -103,6 +111,16 @@ fn mock_system_logind_preparing_for_sleep(world: &mut LgBuddyWorld, value: Strin
     world.configure_system_logind(value == "true");
 }
 
+#[given(regex = r#"mock system logind reports LockedHint=(true|false)"#)]
+fn mock_system_logind_locked_hint(world: &mut LgBuddyWorld, value: String) {
+    world.configure_system_logind_lock(value == "true");
+}
+
+#[given(regex = r#"mock system logind changes LockedHint to (true|false)"#)]
+fn mock_system_logind_changes_locked_hint(world: &mut LgBuddyWorld, value: String) {
+    world.queue_system_logind_lock(value == "true");
+}
+
 #[given(regex = r#"the TV auth key file override is "([^"]+)""#)]
 fn tv_auth_key_file_override(world: &mut LgBuddyWorld, path: String) {
     world.set_auth_key_file_override(&path);
@@ -153,6 +171,21 @@ fn brightness_dialog_returns(world: &mut LgBuddyWorld, value: u8) {
     world.install_brightness_ui_stub(Some(value));
 }
 
+#[given("the GTK brightness GUI is unavailable")]
+fn gtk_brightness_gui_is_unavailable(world: &mut LgBuddyWorld) {
+    world.make_brightness_gui_unavailable();
+}
+
+#[given("a working GTK brightness GUI")]
+fn working_gtk_brightness_gui(world: &mut LgBuddyWorld) {
+    world.install_brightness_gui_stub(0);
+}
+
+#[given(regex = r#"the GTK brightness GUI exits with status (\d+)"#)]
+fn failing_gtk_brightness_gui(world: &mut LgBuddyWorld, status: i32) {
+    world.install_brightness_gui_stub(status);
+}
+
 #[given("the brightness dialog is cancelled")]
 fn brightness_dialog_is_cancelled(world: &mut LgBuddyWorld) {
     world.install_brightness_ui_stub(None);
@@ -161,6 +194,21 @@ fn brightness_dialog_is_cancelled(world: &mut LgBuddyWorld) {
 #[given("the brightness error dialog is available")]
 fn brightness_error_dialog_is_available(world: &mut LgBuddyWorld) {
     world.install_brightness_ui_stub(None);
+}
+
+#[then(regex = r#"the GTK brightness GUI received "([^"]+)""#)]
+fn gtk_brightness_gui_received(world: &mut LgBuddyWorld, arguments: String) {
+    world.assert_brightness_gui_received(&arguments);
+}
+
+#[then("the GTK brightness GUI was not launched")]
+fn gtk_brightness_gui_not_launched(world: &mut LgBuddyWorld) {
+    world.assert_brightness_gui_not_launched();
+}
+
+#[then("the brightness compatibility dialog was not opened")]
+fn brightness_compatibility_dialog_not_opened(world: &mut LgBuddyWorld) {
+    world.assert_brightness_ui_not_opened();
 }
 
 #[given("the TV screen is blanked")]
@@ -287,6 +335,14 @@ fn swayidle_will_emit_timeout(world: &mut LgBuddyWorld) {
 #[given("swayidle will emit a resume event")]
 fn swayidle_will_emit_resume(world: &mut LgBuddyWorld) {
     world.swayidle_emits_resume();
+}
+
+#[given(regex = r#"swayidle stays open for ([0-9]+(?:\.[0-9]+)?) seconds"#)]
+fn swayidle_stays_open_for_seconds(world: &mut LgBuddyWorld, seconds: String) {
+    let seconds = seconds
+        .parse::<f64>()
+        .unwrap_or_else(|err| panic!("invalid swayidle linger `{seconds}`: {err}"));
+    world.swayidle_stays_open_for_secs(seconds);
 }
 
 #[given("the next input restore attempt powers the TV back on")]

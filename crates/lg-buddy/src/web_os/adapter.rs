@@ -125,7 +125,7 @@ impl WebOsTvClient {
         Ok(())
     }
 
-    fn power_off_active_session(&self) -> Result<(), TvError> {
+    fn power_off_controllable_session(&self) -> Result<(), TvError> {
         let operation = TvOperation::PowerOff;
         let mut session = self.lock_session(operation)?;
         self.ensure_session(operation, &mut session)?;
@@ -145,12 +145,15 @@ impl WebOsTvClient {
             }
         };
 
-        if power_state != WebOsPowerState::Active {
+        if !matches!(
+            power_state,
+            WebOsPowerState::Active | WebOsPowerState::ScreenOff
+        ) {
             return Err(TvError::new(
                 operation,
                 TvErrorKind::Rejected,
                 format!(
-                    "native webOS power-off requires power state `Active`, but the TV reported `{power_state}`"
+                    "native webOS power-off requires power state `Active` or `Screen Off`, but the TV reported `{power_state}`"
                 ),
             ));
         }
@@ -357,7 +360,7 @@ impl TvClient for WebOsTvClient {
     }
 
     fn power_off(&self) -> Result<(), TvError> {
-        self.power_off_active_session()
+        self.power_off_controllable_session()
     }
 
     fn blank_screen(&self) -> Result<(), TvError> {
@@ -951,7 +954,7 @@ mod tests {
     }
 
     #[test]
-    fn power_off_requires_active_state_and_keeps_rejected_session_usable() {
+    fn power_off_accepts_screen_off_state() {
         let server = WebOsTestServer::screen_off(
             WebOsTestVersion::WebOs24Version92261,
             WebOsTestInput::Hdmi3,
@@ -959,13 +962,23 @@ mod tests {
         let token_fixture = TestAccessTokenStore::new();
         let client = client_for_server(&server, &token_fixture);
 
-        let error = client
-            .power_off()
-            .expect_err("screen-off state fails native power-off guard");
-        assert_eq!(error.kind(), TvErrorKind::Rejected);
+        assert_eq!(
+            client
+                .current_input()
+                .expect("hardware-characterized foreground input remains readable"),
+            CurrentInput::Hdmi(HdmiInput::Hdmi3)
+        );
+        assert_eq!(
+            client
+                .oled_brightness()
+                .expect("hardware-characterized backlight remains readable")
+                .as_percent(),
+            100
+        );
         client
-            .unblank_screen()
-            .expect("guard rejection keeps session usable");
+            .power_off()
+            .expect("hardware-characterized screen-off power-off should succeed");
+        assert_eq!(server.snapshot().power_state, WebOsPowerState::PowerOff);
         assert_eq!(server.snapshot().connection_count, 1);
         server.finish();
     }

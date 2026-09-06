@@ -11,23 +11,36 @@ NONINTERACTIVE="${LG_BUDDY_NONINTERACTIVE:-0}"
 SKIP_SYSTEMD_ACTIONS="${LG_BUDDY_SKIP_SYSTEMD_ACTIONS:-0}"
 SKIP_PIP_INSTALL="${LG_BUDDY_SKIP_PIP_INSTALL:-0}"
 DEFAULT_RUNTIME_BINARY="$SCRIPT_DIR/lg-buddy"
+GUI_TARGET="x86_64-unknown-linux-gnu"
+DEFAULT_GUI_BINARY="$SCRIPT_DIR/docs/lg-buddy-gui-$GUI_TARGET"
+APP_ICON_NAME="io.github.staphylococcus.LGBuddy.svg"
+DEFAULT_APP_ICON="$SCRIPT_DIR/data/icons/hicolor/scalable/apps/$APP_ICON_NAME"
+if [ ! -f "$DEFAULT_APP_ICON" ]; then
+    DEFAULT_APP_ICON="$SCRIPT_DIR/docs/$APP_ICON_NAME"
+fi
 RUNTIME_BINARY="$DEFAULT_RUNTIME_BINARY"
+GUI_BINARY="$DEFAULT_GUI_BINARY"
+APP_ICON="$DEFAULT_APP_ICON"
 RUNTIME_BINARY_OVERRIDDEN=0
+GUI_BINARY_OVERRIDDEN=0
 UPGRADE_MODE=0
 MUTATION_STARTED=0
 UPGRADE_COMPLETED=0
+GUI_BINARY_STAGED_TMP=""
 
 usage() {
     cat <<EOF
-Usage: $0 [--upgrade] [--runtime-binary /path/to/lg-buddy]
+Usage: $0 [--upgrade] [--runtime-binary /path/to/lg-buddy] [--gui-binary /path/to/lg-buddy-gui]
 
-Install LG Buddy from an existing runtime binary.
+Install LG Buddy from existing runtime and GUI binaries.
 
 Options:
   --upgrade         Upgrade an existing compatible release-bundle installation
 
 Defaults:
   --runtime-binary defaults to ./lg-buddy next to install.sh
+  --gui-binary defaults to ./docs/lg-buddy-gui-x86_64-unknown-linux-gnu
+               in an official release bundle
 EOF
     exit 1
 }
@@ -38,6 +51,12 @@ while [ "$#" -gt 0 ]; do
             RUNTIME_BINARY="${2:-}"
             [ -n "$RUNTIME_BINARY" ] || usage
             RUNTIME_BINARY_OVERRIDDEN=1
+            shift 2
+            ;;
+        --gui-binary)
+            GUI_BINARY="${2:-}"
+            [ -n "$GUI_BINARY" ] || usage
+            GUI_BINARY_OVERRIDDEN=1
             shift 2
             ;;
         --upgrade)
@@ -54,8 +73,8 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-if [ "$UPGRADE_MODE" -eq 1 ] && [ "$RUNTIME_BINARY_OVERRIDDEN" -eq 1 ]; then
-    echo "Error: --upgrade uses the verified lg-buddy binary from this release bundle."
+if [ "$UPGRADE_MODE" -eq 1 ] && { [ "$RUNTIME_BINARY_OVERRIDDEN" -eq 1 ] || [ "$GUI_BINARY_OVERRIDDEN" -eq 1 ]; }; then
+    echo "Error: --upgrade uses the verified lg-buddy and lg-buddy-gui binaries from this release bundle."
     exit 1
 fi
 
@@ -113,6 +132,7 @@ run_privileged() {
 
 SYSTEM_BIN_DIR="$(prefix_path "/usr/bin")"
 RUNTIME_INSTALL_PATH="${SYSTEM_BIN_DIR}/lg-buddy"
+GUI_INSTALL_PATH="${SYSTEM_BIN_DIR}/lg-buddy-gui"
 VENV_DIR="${SYSTEM_BIN_DIR}/LG_Buddy_PIP"
 SYSTEM_LIB_DIR="$(prefix_path "/usr/lib/lg-buddy")"
 CONFIG_POINTER_PATH="${SYSTEM_LIB_DIR}/config-path"
@@ -133,7 +153,19 @@ NM_PRE_DOWN_DIR="$(prefix_path "/etc/NetworkManager/dispatcher.d/pre-down.d")"
 NM_SLEEP_HOOK_PATH="${NM_PRE_DOWN_DIR}/LG_Buddy_sleep"
 NM_LIFECYCLE_HOOK_PATH="${NM_PRE_DOWN_DIR}/LG_Buddy_lifecycle"
 APPLICATIONS_DIR="$(prefix_path "/usr/share/applications")"
-DESKTOP_ENTRY_PATH="${APPLICATIONS_DIR}/LG_Buddy_Brightness.desktop"
+DESKTOP_ENTRY_NAME="io.github.staphylococcus.LGBuddy.desktop"
+DESKTOP_ENTRY_PATH="${APPLICATIONS_DIR}/${DESKTOP_ENTRY_NAME}"
+LEGACY_DESKTOP_ENTRY_PATH="${APPLICATIONS_DIR}/LG_Buddy_Brightness.desktop"
+DESKTOP_ENTRY_SOURCE="${SCRIPT_DIR}/${DESKTOP_ENTRY_NAME}"
+if [ ! -f "$DESKTOP_ENTRY_SOURCE" ]; then
+    # Release archives retain this internal name for compatibility with
+    # updaters shipped before the application-ID filename was adopted.
+    DESKTOP_ENTRY_SOURCE="${SCRIPT_DIR}/LG_Buddy_Brightness.desktop"
+fi
+APP_ICON_DIR="$(prefix_path "/usr/share/icons/hicolor/scalable/apps")"
+APP_ICON_PATH="${APP_ICON_DIR}/${APP_ICON_NAME}"
+USER_DESKTOP_ENTRY_PATH="${HOME}/Desktop/${DESKTOP_ENTRY_NAME}"
+LEGACY_USER_DESKTOP_ENTRY_PATH="${HOME}/Desktop/LG_Buddy_Brightness.desktop"
 USER_SYSTEMD_DIR="${HOME}/.config/systemd/user"
 USER_SCREEN_SERVICE_PATH="${USER_SYSTEMD_DIR}/LG_Buddy_screen.service"
 USER_SCREEN_OVERRIDE_DIR="${USER_SYSTEMD_DIR}/LG_Buddy_screen.service.d"
@@ -239,6 +271,78 @@ resolve_runtime_binary() {
     echo "Using lg-buddy runtime binary: $RUNTIME_BINARY"
 }
 
+resolve_gui_binary() {
+    if [ -L "$GUI_BINARY" ]; then
+        echo "LG Buddy GUI binary must be a regular file, not a symbolic link: $GUI_BINARY"
+        exit 1
+    fi
+
+    if [ ! -f "$GUI_BINARY" ]; then
+        echo "LG Buddy GUI binary not found at: $GUI_BINARY"
+        echo "Build lg-buddy-gui separately first, or use an official release bundle."
+        exit 1
+    fi
+
+    if [ ! -r "$GUI_BINARY" ]; then
+        echo "LG Buddy GUI binary is not readable: $GUI_BINARY"
+        exit 1
+    fi
+
+    if find "$GUI_BINARY" -prune -perm /022 | grep -q .; then
+        echo "LG Buddy GUI binary is writable by its group or by other users: $GUI_BINARY"
+        echo "Remove unsafe write permissions before installing."
+        exit 1
+    fi
+
+    if [ ! -x "$GUI_BINARY" ]; then
+        if [ "$GUI_BINARY_OVERRIDDEN" -eq 1 ]; then
+            echo "LG Buddy GUI binary is not executable: $GUI_BINARY"
+            echo "Provide a regular executable lg-buddy-gui binary."
+            exit 1
+        fi
+        GUI_BINARY_STAGED_TMP="$(mktemp)"
+        install -m 700 "$GUI_BINARY" "$GUI_BINARY_STAGED_TMP"
+        GUI_BINARY="$GUI_BINARY_STAGED_TMP"
+    fi
+
+    if [ "$GUI_BINARY" -ef "$RUNTIME_BINARY" ]; then
+        echo "LG Buddy GUI binary resolves to the lg-buddy runtime binary: $GUI_BINARY"
+        exit 1
+    fi
+
+    echo "Using lg-buddy GUI binary: $GUI_BINARY"
+}
+
+resolve_app_icon() {
+    if [ -L "$APP_ICON" ] || [ ! -f "$APP_ICON" ]; then
+        echo "LG Buddy application icon is missing or is not a regular file: $APP_ICON"
+        exit 1
+    fi
+
+    if [ ! -r "$APP_ICON" ]; then
+        echo "LG Buddy application icon is not readable: $APP_ICON"
+        exit 1
+    fi
+
+    echo "Using LG Buddy application icon: $APP_ICON"
+}
+
+validate_candidate_binary_identity() {
+    if ! CANDIDATE_VERSION_OUTPUT="$("$RUNTIME_BINARY" --version)"; then
+        echo "LG Buddy runtime binary could not report its version identity: $RUNTIME_BINARY"
+        exit 1
+    fi
+    if ! GUI_VERSION_OUTPUT="$("$GUI_BINARY" --version)"; then
+        echo "LG Buddy GUI binary could not report its version identity: $GUI_BINARY"
+        echo "Ensure GTK 4.14 or newer and libadwaita 1.5 or newer are installed."
+        exit 1
+    fi
+    if [ "$GUI_VERSION_OUTPUT" != "$CANDIDATE_VERSION_OUTPUT" ]; then
+        echo "LG Buddy GUI candidate identity does not match the runtime candidate."
+        exit 1
+    fi
+}
+
 install_missing_prerequisites() {
     if [ ${#MISSING_PKGS[@]} -eq 0 ]; then
         echo "All prerequisites satisfied."
@@ -329,8 +433,6 @@ load_upgrade_configuration() {
     SYSTEM_SLEEP_WAKE_POLICY="$(LG_BUDDY_CONFIG="$CONFIG_FILE" "$RUNTIME_BINARY" settings get system.sleep_wake_policy)"
     UPDATE_AUTO_CHECK="$(LG_BUDDY_CONFIG="$CONFIG_FILE" "$RUNTIME_BINARY" settings get updates.auto_check)"
     UPDATE_CHANNEL="$(LG_BUDDY_CONFIG="$CONFIG_FILE" "$RUNTIME_BINARY" settings get updates.channel)"
-    CANDIDATE_VERSION_OUTPUT="$("$RUNTIME_BINARY" --version)"
-
     echo "Using existing configuration file at $CONFIG_FILE"
     echo "Preserving update channel: $UPDATE_CHANNEL"
 }
@@ -361,6 +463,10 @@ cleanup() {
         rm -f "$NM_HOOK_TMP"
     fi
 
+    if [ -n "$GUI_BINARY_STAGED_TMP" ]; then
+        rm -f "$GUI_BINARY_STAGED_TMP"
+    fi
+
     if [ "$status" -ne 0 ] && [ "$UPGRADE_MODE" -eq 1 ] && [ "$MUTATION_STARTED" -eq 1 ] && [ "$UPGRADE_COMPLETED" -eq 0 ]; then
         echo "LG Buddy upgrade did not complete after installation changes began." >&2
         echo "The installation may be partial; rerun this verified bundle with --upgrade after correcting the reported failure." >&2
@@ -379,6 +485,9 @@ if [ "$UPGRADE_MODE" -eq 1 ]; then
     echo ""
     echo "Running candidate upgrade preflight..."
     "$RUNTIME_BINARY" upgrade-preflight "$SCRIPT_DIR"
+    resolve_gui_binary
+    resolve_app_icon
+    validate_candidate_binary_identity
     load_upgrade_configuration
 
     if [ "$TV_PLATFORM" = "lg_webos" ]; then
@@ -391,16 +500,19 @@ if [ "$UPGRADE_MODE" -eq 1 ]; then
         require_python_repair_prerequisites
     fi
 else
+    resolve_gui_binary
+    resolve_app_icon
+    validate_candidate_binary_identity
     check_fresh_install_prerequisites
 
 # CONFIGURE FRESH INSTALLATION
 echo ""
 echo "Running configuration script..."
-# Make sure configure.sh is executable
-if [ ! -x "$SCRIPT_DIR/configure.sh" ]; then
-    chmod +x "$SCRIPT_DIR/configure.sh"
+if [ ! -r "$SCRIPT_DIR/configure.sh" ]; then
+    echo "Configuration script is not readable: $SCRIPT_DIR/configure.sh"
+    exit 1
 fi
-LG_BUDDY_RUNTIME_BINARY="$RUNTIME_BINARY" "$SCRIPT_DIR/configure.sh"
+LG_BUDDY_RUNTIME_BINARY="$RUNTIME_BINARY" bash "$SCRIPT_DIR/configure.sh"
 CONFIG_FILE="$(bash "$SCRIPT_DIR/bin/LG_Buddy_Common" --user-config-path)"
 SCREEN_IDLE_BLANK="$(sed -n 's/^screen_idle_blank=//p' "$CONFIG_FILE" | tail -n1)"
 case "$SCREEN_IDLE_BLANK" in
@@ -514,6 +626,7 @@ fi
 MUTATION_STARTED=1
 echo "Installing Rust runtime and support files..."
 run_privileged install -m 755 "$RUNTIME_BINARY" "$RUNTIME_INSTALL_PATH"
+run_privileged install -m 755 "$GUI_BINARY" "$GUI_INSTALL_PATH"
 if [ "$UPGRADE_MODE" -eq 0 ]; then
     run_privileged rm -f "${SYSTEM_BIN_DIR}/LG_Buddy_Startup"
     run_privileged rm -f "${SYSTEM_BIN_DIR}/LG_Buddy_Shutdown"
@@ -532,11 +645,16 @@ if [ "$UPGRADE_MODE" -eq 0 ]; then
 fi
 echo "Installing brightness control desktop entry..."
 run_privileged install -d "$APPLICATIONS_DIR"
-run_privileged install -m 644 "$SCRIPT_DIR/LG_Buddy_Brightness.desktop" "$DESKTOP_ENTRY_PATH"
+run_privileged install -m 644 "$DESKTOP_ENTRY_SOURCE" "$DESKTOP_ENTRY_PATH"
+run_privileged rm -f "$LEGACY_DESKTOP_ENTRY_PATH"
+run_privileged install -d "$APP_ICON_DIR"
+run_privileged install -m 644 "$APP_ICON" "$APP_ICON_PATH"
 if [ "$UPGRADE_MODE" -eq 0 ]; then
-    cp "$SCRIPT_DIR/LG_Buddy_Brightness.desktop" ~/Desktop/ 2>/dev/null || true
-elif [ -f "$HOME/Desktop/LG_Buddy_Brightness.desktop" ]; then
-    cp "$SCRIPT_DIR/LG_Buddy_Brightness.desktop" "$HOME/Desktop/LG_Buddy_Brightness.desktop"
+    cp "$DESKTOP_ENTRY_SOURCE" "$USER_DESKTOP_ENTRY_PATH" 2>/dev/null || true
+    rm -f "$LEGACY_USER_DESKTOP_ENTRY_PATH"
+elif [ -f "$USER_DESKTOP_ENTRY_PATH" ] || [ -f "$LEGACY_USER_DESKTOP_ENTRY_PATH" ]; then
+    cp "$DESKTOP_ENTRY_SOURCE" "$USER_DESKTOP_ENTRY_PATH"
+    rm -f "$LEGACY_USER_DESKTOP_ENTRY_PATH"
 fi
 echo "Done."
 
@@ -621,6 +739,15 @@ if [ "$SYSTEM_SLEEP_WAKE_POLICY" = "enabled" ]; then
     echo "System sleep/wake TV control enabled via LG_Buddy_lifecycle.service and NetworkManager pre-down gate."
 else
     echo "System sleep/wake TV control disabled by config. Lifecycle integration is installed and will no-op until re-enabled."
+fi
+
+INSTALLED_GUI_VERSION_OUTPUT="$("$GUI_INSTALL_PATH" --version)"
+if ! cmp -s "$GUI_BINARY" "$GUI_INSTALL_PATH" || [ "$INSTALLED_GUI_VERSION_OUTPUT" != "$CANDIDATE_VERSION_OUTPUT" ]; then
+    echo "Installed GUI identity does not match the verified candidate." >&2
+    if [ "$UPGRADE_MODE" -eq 1 ]; then
+        echo "Rerun this verified bundle with --upgrade to repair the partial installation." >&2
+    fi
+    exit 1
 fi
 
 if [ "$UPGRADE_MODE" -eq 1 ]; then

@@ -2,6 +2,7 @@ use dbus::arg::{PropMap, Variant as DbusVariant};
 use dbus::blocking::Connection as DbusConnection;
 use dbus::channel::{MatchingReceiver, Sender as DbusSender};
 use dbus::Message as DbusMessage;
+use dbus::Path as DbusPath;
 use dbus_crossroads::{Crossroads, MethodErr};
 use serde_json::{json, Map, Value};
 use std::collections::VecDeque;
@@ -264,9 +265,8 @@ impl MockSwayidle {
             state_path,
         };
         mock.save_state(json!({
-            "help_mode": "systemd",
             "emissions": [],
-            "invocations": [],
+            "linger_seconds": 0.0,
         }));
         mock
     }
@@ -293,10 +293,6 @@ impl MockSwayidle {
         ExecutableScript::new(label, "swayidle", &body)
     }
 
-    pub fn disable_systemd_hooks_in_help(&self) {
-        self.patch_state(json!({ "help_mode": "minimal" }));
-    }
-
     pub fn queue_timeout_emission(&self) {
         self.queue_emission("timeout");
     }
@@ -305,22 +301,13 @@ impl MockSwayidle {
         self.queue_emission("resume");
     }
 
-    pub fn queue_before_sleep_emission(&self) {
-        self.queue_emission("before-sleep");
-    }
-
-    pub fn queue_after_resume_emission(&self) {
-        self.queue_emission("after-resume");
-    }
-
-    pub fn invocations(&self) -> Vec<MockSwayidleInvocation> {
-        self.load_state()
-            .get("invocations")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .map(MockSwayidleInvocation::from_value)
-            .collect()
+    pub fn set_linger_seconds(&self, seconds: f64) {
+        let mut state = self.load_state();
+        state
+            .as_object_mut()
+            .expect("mock swayidle state object")
+            .insert("linger_seconds".to_string(), json!(seconds));
+        self.save_state(state);
     }
 
     fn script_path() -> PathBuf {
@@ -341,16 +328,6 @@ impl MockSwayidle {
             .as_array_mut()
             .expect("emissions array")
             .push(Value::String(emission.to_string()));
-        self.save_state(state);
-    }
-
-    fn patch_state(&self, patch: Value) {
-        let mut state = self.load_state();
-        let state_object = state.as_object_mut().expect("mock state object");
-        let patch_object = patch.as_object().expect("state patch object");
-        for (key, value) in patch_object {
-            state_object.insert(key.clone(), value.clone());
-        }
         self.save_state(state);
     }
 
@@ -541,6 +518,10 @@ pub struct MockSystemLogind {
 struct MockSystemLogindState {
     preparing_for_sleep: bool,
     prepare_for_sleep_signals: VecDeque<bool>,
+    locked_hint: bool,
+    locked_hint_client_ready: bool,
+    locked_hint_read_count: usize,
+    locked_hint_signals: VecDeque<bool>,
 }
 
 #[allow(dead_code)]
@@ -564,6 +545,10 @@ impl MockSystemLogind {
         self.patch_state(|state| {
             state.preparing_for_sleep = false;
             state.prepare_for_sleep_signals.clear();
+            state.locked_hint = false;
+            state.locked_hint_client_ready = false;
+            state.locked_hint_read_count = 0;
+            state.locked_hint_signals.clear();
         });
     }
 
@@ -573,6 +558,14 @@ impl MockSystemLogind {
 
     pub fn queue_prepare_for_sleep_signal(&self, value: bool) {
         self.patch_state(|state| state.prepare_for_sleep_signals.push_back(value));
+    }
+
+    pub fn set_locked_hint(&self, value: bool) {
+        self.patch_state(|state| state.locked_hint = value);
+    }
+
+    pub fn queue_locked_hint_signal(&self, value: bool) {
+        self.patch_state(|state| state.locked_hint_signals.push_back(value));
     }
 
     fn patch_state<F>(&self, f: F)
@@ -817,10 +810,71 @@ fn spawn_mock_logind_service(
                     Ok((fd,))
                 },
             );
+            builder.method(
+                "GetSession",
+                ("session_id",),
+                ("session",),
+                move |_, _, (session_id,): (String,)| {
+                    if session_id != "test-session" {
+                        return Err(MethodErr::failed("unknown mock logind session"));
+                    }
+                    Ok((
+                        DbusPath::new("/org/freedesktop/login1/session/_test_session")
+                            .expect("mock session object path"),
+                    ))
+                },
+            );
+            builder.method("ListSessions", (), ("sessions",), move |_, _, ()| {
+                let uid = unsafe { libc::geteuid() };
+                Ok((vec![(
+                    "test-session".to_string(),
+                    uid,
+                    "test-user".to_string(),
+                    "seat0".to_string(),
+                    DbusPath::new("/org/freedesktop/login1/session/_test_session")
+                        .expect("mock session object path"),
+                )],))
+            });
+        });
+        let session_state = Arc::clone(&state);
+        let session_iface = crossroads.register("org.freedesktop.login1.Session", move |builder| {
+            builder
+                .property::<(u32, DbusPath<'static>), _>("User")
+                .get(move |_, _| {
+                    Ok((
+                        unsafe { libc::geteuid() },
+                        DbusPath::new("/org/freedesktop/login1/user/_test")
+                            .expect("mock user object path"),
+                    ))
+                });
+            builder
+                .property::<bool, _>("Remote")
+                .get(move |_, _| Ok(false));
+            builder
+                .property::<String, _>("Type")
+                .get(move |_, _| Ok("wayland".to_string()));
+            builder
+                .property::<String, _>("Class")
+                .get(move |_, _| Ok("user".to_string()));
+            builder
+                .property::<bool, _>("Active")
+                .get(move |_, _| Ok(true));
+            let state = Arc::clone(&session_state);
+            builder.property::<bool, _>("LockedHint").get(move |_, _| {
+                let mut state = state.lock().expect("mock logind state lock");
+                state.locked_hint_read_count += 1;
+                state.locked_hint_client_ready = state.locked_hint_read_count >= 2;
+                Ok(state.locked_hint)
+            });
         });
         crossroads.insert(
             "/org/freedesktop/login1",
             &[properties_iface, manager_iface],
+            (),
+        );
+        crossroads.insert(
+            "/org/freedesktop/login1/session/_test_session",
+            &[session_iface],
             (),
         );
 
@@ -850,23 +904,51 @@ fn emit_queued_mock_logind_signal(
     connection: &DbusConnection,
     state: &Arc<Mutex<MockSystemLogindState>>,
 ) {
-    let signal = {
+    let prepare_for_sleep = {
         let mut state = state.lock().expect("mock logind state lock");
         state.prepare_for_sleep_signals.pop_front()
     };
-    let Some(preparing_for_sleep) = signal else {
-        return;
+    if let Some(preparing_for_sleep) = prepare_for_sleep {
+        let message = DbusMessage::new_signal(
+            "/org/freedesktop/login1",
+            "org.freedesktop.login1.Manager",
+            "PrepareForSleep",
+        )
+        .expect("create mock PrepareForSleep signal")
+        .append1(preparing_for_sleep);
+
+        let _ = connection.send(message);
+    }
+
+    let locked_hint = {
+        let mut state = state.lock().expect("mock logind state lock");
+        if state.locked_hint_client_ready {
+            let locked_hint = state.locked_hint_signals.pop_front();
+            if let Some(value) = locked_hint {
+                state.locked_hint = value;
+            }
+            locked_hint
+        } else {
+            None
+        }
     };
+    if let Some(locked_hint) = locked_hint {
+        let mut changed = PropMap::new();
+        changed.insert("LockedHint".to_string(), DbusVariant(Box::new(locked_hint)));
+        let message = DbusMessage::new_signal(
+            "/org/freedesktop/login1/session/_test_session",
+            "org.freedesktop.DBus.Properties",
+            "PropertiesChanged",
+        )
+        .expect("create mock LockedHint PropertiesChanged signal")
+        .append3(
+            "org.freedesktop.login1.Session".to_string(),
+            changed,
+            Vec::<String>::new(),
+        );
 
-    let message = DbusMessage::new_signal(
-        "/org/freedesktop/login1",
-        "org.freedesktop.login1.Manager",
-        "PrepareForSleep",
-    )
-    .expect("create mock PrepareForSleep signal")
-    .append1(preparing_for_sleep);
-
-    let _ = connection.send(message);
+        let _ = connection.send(message);
+    }
 }
 
 #[derive(Debug, Default)]
@@ -1380,55 +1462,6 @@ pub struct MockStateSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
-pub struct MockSwayidleInvocation {
-    pub argv: Vec<String>,
-    pub wait: bool,
-    pub debug: bool,
-    pub config_path: Option<String>,
-    pub seat: Option<String>,
-    pub events: Vec<MockSwayidleEvent>,
-}
-
-impl MockSwayidleInvocation {
-    fn from_value(value: &Value) -> Self {
-        let object = value.as_object().expect("mock swayidle invocation object");
-        Self {
-            argv: object
-                .get("argv")
-                .and_then(Value::as_array)
-                .expect("invocation argv array")
-                .iter()
-                .map(|value| value.as_str().expect("argv string").to_string())
-                .collect(),
-            wait: object
-                .get("wait")
-                .and_then(Value::as_bool)
-                .expect("invocation wait bool"),
-            debug: object
-                .get("debug")
-                .and_then(Value::as_bool)
-                .expect("invocation debug bool"),
-            config_path: object
-                .get("config_path")
-                .and_then(Value::as_str)
-                .map(ToString::to_string),
-            seat: object
-                .get("seat")
-                .and_then(Value::as_str)
-                .map(ToString::to_string),
-            events: object
-                .get("events")
-                .and_then(Value::as_array)
-                .expect("invocation events array")
-                .iter()
-                .map(MockSwayidleEvent::from_value)
-                .collect(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub struct MockNmOnlineInvocation {
     pub argv: Vec<String>,
 }
@@ -1444,94 +1477,6 @@ impl MockNmOnlineInvocation {
                 .iter()
                 .map(|value| value.as_str().expect("argv string").to_string())
                 .collect(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
-pub enum MockSwayidleEvent {
-    Timeout {
-        timeout: u64,
-        command: String,
-        resume: Option<String>,
-    },
-    BeforeSleep {
-        command: String,
-    },
-    AfterResume {
-        command: String,
-    },
-    Lock {
-        command: String,
-    },
-    Unlock {
-        command: String,
-    },
-    Idlehint {
-        timeout: u64,
-    },
-}
-
-impl MockSwayidleEvent {
-    fn from_value(value: &Value) -> Self {
-        let object = value.as_object().expect("mock swayidle event object");
-        let kind = object
-            .get("kind")
-            .and_then(Value::as_str)
-            .expect("event kind string");
-
-        match kind {
-            "timeout" => Self::Timeout {
-                timeout: object
-                    .get("timeout")
-                    .and_then(Value::as_u64)
-                    .expect("timeout value"),
-                command: object
-                    .get("command")
-                    .and_then(Value::as_str)
-                    .expect("timeout command")
-                    .to_string(),
-                resume: object
-                    .get("resume")
-                    .and_then(Value::as_str)
-                    .map(ToString::to_string),
-            },
-            "before-sleep" => Self::BeforeSleep {
-                command: object
-                    .get("command")
-                    .and_then(Value::as_str)
-                    .expect("before-sleep command")
-                    .to_string(),
-            },
-            "after-resume" => Self::AfterResume {
-                command: object
-                    .get("command")
-                    .and_then(Value::as_str)
-                    .expect("after-resume command")
-                    .to_string(),
-            },
-            "lock" => Self::Lock {
-                command: object
-                    .get("command")
-                    .and_then(Value::as_str)
-                    .expect("lock command")
-                    .to_string(),
-            },
-            "unlock" => Self::Unlock {
-                command: object
-                    .get("command")
-                    .and_then(Value::as_str)
-                    .expect("unlock command")
-                    .to_string(),
-            },
-            "idlehint" => Self::Idlehint {
-                timeout: object
-                    .get("timeout")
-                    .and_then(Value::as_u64)
-                    .expect("idlehint timeout"),
-            },
-            other => panic!("unsupported mock swayidle event kind `{other}`"),
         }
     }
 }
@@ -1580,7 +1525,7 @@ pub fn prime_isolated_path_dependencies() {
     let _ = dbus_daemon_path();
 }
 
-fn python3_path() -> PathBuf {
+pub fn python3_path() -> PathBuf {
     static PYTHON3_PATH: OnceLock<PathBuf> = OnceLock::new();
 
     PYTHON3_PATH
@@ -1605,7 +1550,7 @@ fn dbus_daemon_path() -> PathBuf {
         .clone()
 }
 
-fn find_command_in_path(command: &str) -> Option<PathBuf> {
+pub fn find_command_in_path(command: &str) -> Option<PathBuf> {
     if command.contains(std::path::MAIN_SEPARATOR) {
         let path = PathBuf::from(command);
         return path.is_file().then_some(path);

@@ -39,8 +39,10 @@ syntax.
   is pending.
 - `screen off` blanks the TV output while remembering that LG Buddy blanked it.
 - `screen on` restores the output according to the configured restore policy.
-- `brightness` opens the desktop brightness dialog. `brightness get` and
-  `brightness set <0-100>` read or change OLED brightness directly.
+- `brightness` opens the GTK brightness window. If the GUI executable is absent
+  from a transitional installation, LG Buddy uses the retained Zenity dialog.
+  `brightness get` and `brightness set <0-100>` remain headless and read or
+  change OLED brightness directly.
 - `volume` prints the current level, `mute` when muted, or `unknown` when the TV
   does not expose a numeric level. `volume <0-100>`, `volume up`, and `volume
   down` change the volume and unmute the TV. `volume mute [on|off]` toggles or
@@ -118,6 +120,13 @@ lg-buddy settings set screen.restore_policy conservative
 Set `screen.idle_blank` to `disabled` to stop idle-driven TV blanking and
 restoring. The user service remains available for update notifications.
 
+When an automatic idle or session-lock action successfully blanks the screen,
+LG Buddy powers the TV off after five more minutes without activity. This grace
+period is a fixed safety default rather than a setting. Any desktop or gamepad
+activity cancels the pending power-off and restores the screen. Before powering
+off, LG Buddy rechecks its ownership marker, the configured input, and machine
+lifecycle state; it skips safely if those checks no longer permit the action.
+
 The restore policies are:
 
 - `conservative`: restore only when LG Buddy previously blanked or powered off
@@ -173,7 +182,10 @@ continue to run without being rewritten.
 ### Gamepad Activity
 
 With the `gnome` and `wayland` backends, supported controller activity resets
-the same idle timer as desktop activity. No additional setting is required.
+the same idle timer as desktop activity. On the deprecated `swayidle` backend,
+controller activity can restore an already blanked screen and cancel its
+pending timed power-off, but it does not reset swayidle's initial timeout. No
+additional setting is required.
 
 If controller activity is ignored, verify that the user running
 `LG_Buddy_screen.service` can read the controller's Linux input devices. Normal
@@ -303,7 +315,7 @@ Disabling automatic checks does not disable manual `updates check` or
 
 These documents cover details intentionally omitted from this user guide:
 
-- [Session backend model](session-backend-model.md): backend capabilities,
+- [Session backend model](session-backend-model.md): source observations,
   event semantics, protocol requirements, and idle-timeout ownership.
 - [Gamepad activity subsystem](gamepad-subsystem.md): device discovery,
   permissions, adapters, and hardware testing.

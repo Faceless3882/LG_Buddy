@@ -1,311 +1,212 @@
-use std::process::Command;
+use std::fmt;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, BufRead, BufReader};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, ExitStatus};
+use std::thread;
+use std::time::{Duration, Instant};
 
-use crate::backend::{BackendProbe, SystemBackendProbe};
-use crate::config::ScreenBackend;
-use crate::session::{
-    IdleTimeoutSource, SessionBackend, SessionBackendCapabilities, SessionBackendError,
-    SessionEvent,
-};
+use crate::events::EventSource;
+use crate::session::inactivity::InactivityObservation;
+use crate::session::{SessionEvent, SessionObservation};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SwayidleHook {
-    Timeout,
-    Resume,
-    BeforeSleep,
-    AfterResume,
-    Lock,
-    Unlock,
+const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+#[derive(Debug)]
+pub(crate) enum SwayidleSourceError {
+    Io(io::Error),
+    Exited(ExitStatus),
 }
 
-impl SwayidleHook {
-    pub fn as_str(self) -> &'static str {
+impl fmt::Display for SwayidleSourceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Timeout => "timeout",
-            Self::Resume => "resume",
-            Self::BeforeSleep => "before-sleep",
-            Self::AfterResume => "after-resume",
-            Self::Lock => "lock",
-            Self::Unlock => "unlock",
-        }
-    }
-
-    pub fn session_event(self) -> SessionEvent {
-        match self {
-            Self::Timeout => SessionEvent::Idle,
-            Self::Resume => SessionEvent::Active,
-            Self::BeforeSleep => SessionEvent::BeforeSleep,
-            Self::AfterResume => SessionEvent::AfterResume,
-            Self::Lock => SessionEvent::Lock,
-            Self::Unlock => SessionEvent::Unlock,
+            Self::Io(err) => write!(f, "{err}"),
+            Self::Exited(status) => write!(f, "swayidle exited with status {status}"),
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SwayidleBackendStatus {
-    pub command_available: bool,
-    pub systemd_hooks_available: bool,
-}
+impl std::error::Error for SwayidleSourceError {}
 
-impl SwayidleBackendStatus {
-    pub fn can_start(&self) -> bool {
-        self.command_available
-    }
+pub(crate) fn run(
+    idle_timeout_secs: u64,
+    event_path: &Path,
+    mut on_observation: impl FnMut(SessionObservation) -> bool,
+) -> Result<(), SwayidleSourceError> {
+    let event_file = create_event_file(event_path).map_err(SwayidleSourceError::Io)?;
+    let _event_file_guard = EventFileGuard(event_path.to_path_buf());
+    let mut reader = BufReader::new(event_file);
+    let child = Command::new("swayidle")
+        .args(command_args(idle_timeout_secs, event_path))
+        .spawn()
+        .map_err(SwayidleSourceError::Io)?;
+    let mut child = ChildGuard(child);
 
-    pub fn supports_hook(&self, hook: SwayidleHook) -> bool {
-        match hook {
-            SwayidleHook::Timeout | SwayidleHook::Resume => self.command_available,
-            SwayidleHook::BeforeSleep
-            | SwayidleHook::AfterResume
-            | SwayidleHook::Lock
-            | SwayidleHook::Unlock => self.command_available && self.systemd_hooks_available,
+    loop {
+        if !drain_events(&mut reader, &mut on_observation).map_err(SwayidleSourceError::Io)? {
+            let _ = child.0.kill();
+            let _ = child.0.wait();
+            return Ok(());
         }
+
+        if let Some(status) = child.0.try_wait().map_err(SwayidleSourceError::Io)? {
+            let _ =
+                drain_events(&mut reader, &mut on_observation).map_err(SwayidleSourceError::Io)?;
+            return if status.success() {
+                Ok(())
+            } else {
+                Err(SwayidleSourceError::Exited(status))
+            };
+        }
+
+        thread::sleep(EVENT_POLL_INTERVAL);
     }
 }
 
-pub trait SwayidleProbe {
-    fn swayidle_available(&self) -> bool;
-    fn systemd_hooks_available(&self) -> bool;
+struct EventFileGuard(PathBuf);
+
+impl Drop for EventFileGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
 }
 
-#[derive(Debug, Default, Clone, Copy)]
-pub struct SystemSwayidleProbe;
+struct ChildGuard(Child);
 
-impl SwayidleProbe for SystemSwayidleProbe {
-    fn swayidle_available(&self) -> bool {
-        let probe = SystemBackendProbe::default();
-        probe.has_command("swayidle")
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn create_event_file(path: &Path) -> io::Result<File> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err),
     }
 
-    fn systemd_hooks_available(&self) -> bool {
-        let output = Command::new("swayidle").arg("-h").output();
-        let Ok(output) = output else {
-            return false;
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    options.open(path)
+}
+
+fn drain_events<R: BufRead>(
+    reader: &mut R,
+    on_observation: &mut impl FnMut(SessionObservation) -> bool,
+) -> io::Result<bool> {
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line)? == 0 {
+            return Ok(true);
+        }
+
+        let observed_at = Instant::now();
+        let observation = match line.trim() {
+            "idle" => SessionObservation::Event {
+                event: SessionEvent::Idle,
+                source: EventSource::DesktopSession,
+                observed_at,
+            },
+            "active" => SessionObservation::Inactivity {
+                observation: InactivityObservation::DesktopActivityObserved,
+                source: EventSource::DesktopSession,
+                observed_at,
+            },
+            _ => continue,
         };
-
-        let rendered = String::from_utf8_lossy(&output.stdout).into_owned()
-            + &String::from_utf8_lossy(&output.stderr);
-        swayidle_help_output_supports_systemd_hooks(&rendered)
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct SwayidleBackend<P = SystemSwayidleProbe> {
-    probe: P,
-}
-
-impl Default for SwayidleBackend<SystemSwayidleProbe> {
-    fn default() -> Self {
-        Self::new(SystemSwayidleProbe)
-    }
-}
-
-impl<P> SwayidleBackend<P> {
-    pub fn new(probe: P) -> Self {
-        Self { probe }
-    }
-}
-
-impl<P: SwayidleProbe> SwayidleBackend<P> {
-    pub fn status(&self) -> SwayidleBackendStatus {
-        SwayidleBackendStatus {
-            command_available: self.probe.swayidle_available(),
-            systemd_hooks_available: self.probe.systemd_hooks_available(),
+        if !on_observation(observation) {
+            return Ok(false);
         }
     }
 }
 
-impl<P: SwayidleProbe> SessionBackend for SwayidleBackend<P> {
-    fn backend(&self) -> ScreenBackend {
-        ScreenBackend::Swayidle
-    }
-
-    fn capabilities(&self) -> Result<SessionBackendCapabilities, SessionBackendError> {
-        let status = self.status();
-        if !status.can_start() {
-            return Err(SessionBackendError::Unavailable {
-                backend: ScreenBackend::Swayidle,
-                reason: "swayidle is required",
-            });
-        }
-
-        Ok(SessionBackendCapabilities {
-            idle_timeout_source: IdleTimeoutSource::LgBuddyConfigured,
-            wake_requested: false,
-            before_sleep: status.systemd_hooks_available,
-            after_resume: status.systemd_hooks_available,
-            lock_unlock: status.systemd_hooks_available,
-            early_user_activity: false,
-        })
-    }
-}
-
-fn swayidle_help_output_supports_systemd_hooks(output: &str) -> bool {
-    [
-        SwayidleHook::BeforeSleep,
-        SwayidleHook::AfterResume,
-        SwayidleHook::Lock,
-        SwayidleHook::Unlock,
+fn command_args(idle_timeout_secs: u64, event_path: &Path) -> Vec<String> {
+    let path = shell_quote(event_path);
+    vec![
+        "-w".to_string(),
+        "timeout".to_string(),
+        idle_timeout_secs.to_string(),
+        format!("printf '%s\\n' idle >> {path}"),
+        "resume".to_string(),
+        format!("printf '%s\\n' active >> {path}"),
     ]
-    .iter()
-    .all(|hook| output.contains(hook.as_str()))
+}
+
+fn shell_quote(path: &Path) -> String {
+    let rendered = path.to_string_lossy();
+    let escaped = rendered.replace('\'', "'\"'\"'");
+    format!("'{escaped}'")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        swayidle_help_output_supports_systemd_hooks, SwayidleBackend, SwayidleBackendStatus,
-        SwayidleHook, SwayidleProbe,
-    };
-    use crate::config::ScreenBackend;
-    use crate::session::{
-        IdleTimeoutSource, SessionBackend, SessionBackendCapabilities, SessionBackendError,
-        SessionEvent,
-    };
-
-    #[derive(Debug, Clone, Copy)]
-    struct FakeProbe {
-        swayidle_available: bool,
-        systemd_hooks_available: bool,
-    }
-
-    impl SwayidleProbe for FakeProbe {
-        fn swayidle_available(&self) -> bool {
-            self.swayidle_available
-        }
-
-        fn systemd_hooks_available(&self) -> bool {
-            self.systemd_hooks_available
-        }
-    }
+    use super::{command_args, drain_events, shell_quote};
+    use crate::events::EventSource;
+    use crate::session::inactivity::InactivityObservation;
+    use crate::session::{SessionEvent, SessionObservation};
+    use std::io::Cursor;
+    use std::path::Path;
 
     #[test]
-    fn timeout_hook_maps_to_idle_event() {
-        assert_eq!(SwayidleHook::Timeout.session_event(), SessionEvent::Idle);
-    }
-
-    #[test]
-    fn resume_hook_maps_to_active_event() {
-        assert_eq!(SwayidleHook::Resume.session_event(), SessionEvent::Active);
-    }
-
-    #[test]
-    fn systemd_hooks_map_to_session_events() {
+    fn production_invocation_emits_idle_and_active_facts() {
         assert_eq!(
-            SwayidleHook::BeforeSleep.session_event(),
-            SessionEvent::BeforeSleep
+            command_args(300, Path::new("/run/user/1000/LG Buddy/events")),
+            vec![
+                "-w",
+                "timeout",
+                "300",
+                "printf '%s\\n' idle >> '/run/user/1000/LG Buddy/events'",
+                "resume",
+                "printf '%s\\n' active >> '/run/user/1000/LG Buddy/events'",
+            ]
         );
+    }
+
+    #[test]
+    fn shell_quote_escapes_posix_paths() {
+        assert_eq!(shell_quote(Path::new("/tmp/lg buddy")), "'/tmp/lg buddy'");
         assert_eq!(
-            SwayidleHook::AfterResume.session_event(),
-            SessionEvent::AfterResume
+            shell_quote(Path::new("/tmp/that'one")),
+            "'/tmp/that'\"'\"'one'"
         );
-        assert_eq!(SwayidleHook::Lock.session_event(), SessionEvent::Lock);
-        assert_eq!(SwayidleHook::Unlock.session_event(), SessionEvent::Unlock);
     }
 
     #[test]
-    fn help_output_detects_systemd_hooks() {
-        let help = "\
-timeout <timeout> <timeout command> [resume <resume command>]\n\
-before-sleep <command>\n\
-after-resume <command>\n\
-lock <command>\n\
-unlock <command>\n";
+    fn resume_is_independent_desktop_activity() {
+        let mut input = Cursor::new(b"idle\nactive\n");
+        let mut observations = Vec::new();
 
-        assert!(swayidle_help_output_supports_systemd_hooks(help));
-    }
+        assert!(drain_events(&mut input, &mut |observation| {
+            observations.push(observation);
+            true
+        })
+        .expect("read swayidle observations"));
 
-    #[test]
-    fn help_output_rejects_partial_systemd_hook_surface() {
-        let help = "\
-timeout <timeout> <timeout command> [resume <resume command>]\n\
-before-sleep <command>\n";
-
-        assert!(!swayidle_help_output_supports_systemd_hooks(help));
-    }
-
-    #[test]
-    fn swayidle_backend_reports_minimal_capabilities_without_systemd_hooks() {
-        let backend = SwayidleBackend::new(FakeProbe {
-            swayidle_available: true,
-            systemd_hooks_available: false,
-        });
-
-        assert_eq!(backend.backend(), ScreenBackend::Swayidle);
-        assert_eq!(
-            backend.capabilities().expect("backend should be available"),
-            SessionBackendCapabilities {
-                idle_timeout_source: IdleTimeoutSource::LgBuddyConfigured,
-                wake_requested: false,
-                before_sleep: false,
-                after_resume: false,
-                lock_unlock: false,
-                early_user_activity: false,
+        assert!(matches!(
+            observations[0],
+            SessionObservation::Event {
+                event: SessionEvent::Idle,
+                source: EventSource::DesktopSession,
+                ..
             }
-        );
-    }
-
-    #[test]
-    fn swayidle_backend_reports_extended_capabilities_with_systemd_hooks() {
-        let backend = SwayidleBackend::new(FakeProbe {
-            swayidle_available: true,
-            systemd_hooks_available: true,
-        });
-
-        assert_eq!(
-            backend.capabilities().expect("backend should be available"),
-            SessionBackendCapabilities {
-                idle_timeout_source: IdleTimeoutSource::LgBuddyConfigured,
-                wake_requested: false,
-                before_sleep: true,
-                after_resume: true,
-                lock_unlock: true,
-                early_user_activity: false,
+        ));
+        assert!(matches!(
+            observations[1],
+            SessionObservation::Inactivity {
+                observation: InactivityObservation::DesktopActivityObserved,
+                source: EventSource::DesktopSession,
+                ..
             }
-        );
-    }
-
-    #[test]
-    fn swayidle_backend_requires_command() {
-        let backend = SwayidleBackend::new(FakeProbe {
-            swayidle_available: false,
-            systemd_hooks_available: true,
-        });
-
-        assert_eq!(
-            backend.capabilities(),
-            Err(SessionBackendError::Unavailable {
-                backend: ScreenBackend::Swayidle,
-                reason: "swayidle is required",
-            })
-        );
-    }
-
-    #[test]
-    fn status_supports_timeout_and_resume_without_systemd_hooks() {
-        let status = SwayidleBackendStatus {
-            command_available: true,
-            systemd_hooks_available: false,
-        };
-
-        assert!(status.supports_hook(SwayidleHook::Timeout));
-        assert!(status.supports_hook(SwayidleHook::Resume));
-        assert!(!status.supports_hook(SwayidleHook::BeforeSleep));
-        assert!(!status.supports_hook(SwayidleHook::Unlock));
-    }
-
-    #[test]
-    fn status_supports_all_hooks_with_systemd_support() {
-        let status = SwayidleBackendStatus {
-            command_available: true,
-            systemd_hooks_available: true,
-        };
-
-        assert!(status.supports_hook(SwayidleHook::Timeout));
-        assert!(status.supports_hook(SwayidleHook::Resume));
-        assert!(status.supports_hook(SwayidleHook::BeforeSleep));
-        assert!(status.supports_hook(SwayidleHook::AfterResume));
-        assert!(status.supports_hook(SwayidleHook::Lock));
-        assert!(status.supports_hook(SwayidleHook::Unlock));
+        ));
     }
 }

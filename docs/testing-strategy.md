@@ -29,6 +29,7 @@ This is where most tests should live.
 - backend selection rules
 - GNOME signal-to-event mapping
 - native Wayland registry, seat, and resumed-notification mapping
+- logind current-session selection and `LockedHint` mapping
 - gamepad device discovery, device-event filtering, raw event mapping, registry
   behavior, and activity policy
 - TV command output parsing
@@ -78,10 +79,10 @@ This is the place for integration tests and contract tests.
 - runtime state directories and marker files
 - subprocess contracts to external tools
 - backend detection against mocked command/process boundaries
-- GNOME runner behavior against a private session-bus harness
+- GNOME source behavior against a private session-bus harness
 - native Wayland provider capability and registry-churn behavior
-- logind lifecycle and NetworkManager gate behavior against a private system-bus
-  harness
+- logind lifecycle, current-session lock state, and NetworkManager gate behavior
+  against a private system-bus harness
 - desktop and auxiliary gamepad activity resetting one LG Buddy-owned deadline
 - update-install orchestration ordering against an injected runtime, including
   refusal, decline, concurrent acquisition, candidate preflight, installer,
@@ -146,6 +147,8 @@ It is useful when we want to express scenarios like:
 
 - when the configured HDMI input is active and the user goes idle, LG Buddy blanks the TV and records ownership
 - when the user returns after LG Buddy blanked the TV, LG Buddy restores the screen
+- when the graphical session locks, LG Buddy blanks the TV without waiting for
+  the inactivity timeout
 - when aggressive restore policy is enabled, wake/activity can restore even without a marker
 - when GNOME is available, backend detection resolves to `gnome`
 - when fresh configuration accepts the default `lg_webos` platform, pairing
@@ -171,6 +174,11 @@ So cucumber sits on top of the first two layers:
 - it expresses user-visible outcomes in readable form
 
 ## Applying The Strategy To This Repo
+
+The GTK frontend applies these same layers without moving application
+behavior into GUI tests. Its presentation contract, renderer boundary, and
+test split are defined in
+[GUI target architecture](gui-target-architecture.md).
 
 ### Rust runtime core
 
@@ -228,21 +236,32 @@ are documented in
 
 Primary concern:
 
-- module behavior for parsing and capability logic
+- source-owned connection/process setup, validation, polling, and observation
+  mapping
 
 Secondary concern:
 
-- module interoperability in the runner path
+- cross-source orchestration, inactivity state, and policy dispatch in the
+  runner
 
 Examples:
 
-- GNOME capability probing
 - GNOME signal mapping
-- GNOME monitor and idletime integration over the session-bus seam
+- GNOME monitor setup, sender ownership, and idletime polling over the
+  session-bus seam
 - native Wayland protocol-version and seat discovery
 - native Wayland resumed-notification and registry-removal mapping
 - gamepad activity integration with the LG Buddy inactivity deadline
 - screen runtime-phase eligibility over the private logind system-bus seam
+- logind lock state entering the shared blanked state without making unlock a
+  restore trigger, while fresh independent activity still restores
+- logind lock monitoring rebinding and reconciling after logind changes its
+  unique D-Bus owner
+- swayidle production timeout/resume process arguments
+
+Source-specific tests live with their source modules. Runner tests should use
+normalized observations and focus on multiplexing or policy behavior rather
+than reconstructing provider buses and process protocols.
 
 Native Wayland changes also require manual checks on Plasma/KWin and at least
 one other target compositor. Verify that explicit and automatic `wayland`
@@ -309,9 +328,15 @@ verifies the installed runtime against the candidate bytes and identity.
 
 The focused release-manifest suite covers deterministic serialization, schema
 and critical-field handling, duplicate and missing fields, canonical identity
-formats, archive layout, and binary version/channel/commit mismatches. The
-bundle smoke test then exercises the same validator against the generated and
-installed release binary.
+formats, archive layout, and runtime/GUI target and identity mismatches. The
+bundle smoke test exercises the same validator against both generated and
+installed executables, verifies their static/dynamic linkage split, and drives
+the installed GTK window through mocked read, apply, failure/retry, and cancel
+paths under Xvfb. Fedora and Arch lanes repeat installed launch checks with
+keyboard-only behavior, external AT-SPI role/name/value checks, visibly distinct
+light/dark rendering, and 1x/2x window-geometry coverage. The display-backed
+renderer suite separately asserts the same GTK semantics directly at the widget
+boundary.
 
 The Rust release-bundle acquisition suite covers exact asset selection, fresh
 release metadata, bounded responses and downloads, GitHub and published digest
@@ -364,8 +389,8 @@ that sanitized newest-release response, the release-by-tag response, tag ref,
 and asset redirects as a workflow artifact. Signed redirect queries and URL
 userinfo are never retained. The observed beta.2 newest-release fields also
 live in `crates/lg-buddy/testdata/github/` and are replayed by the normal offline
-Rust suite. A successful canary on the exact prerelease commit is a
-stable-promotion prerequisite.
+Rust suite. The canary is supplemental post-publication evidence and is not a
+prerequisite for stable promotion.
 
 ## Current Practical Gaps
 

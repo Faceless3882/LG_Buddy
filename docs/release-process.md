@@ -35,8 +35,6 @@ Required promotion checks prove that:
 - the derived `v<crate-version>` tag is absent before merge
 - normal CI and the release-bundle smoke test pass; the bundle smoke includes a
   pinned cross-version upgrade from `v1.4.0-beta.2`
-- a stable promotion has a successful production upgrade canary on the exact
-  prerelease commit
 
 Requiring every candidate to advance both release-channel heads keeps release
 publication globally monotonic. The newest published release is therefore also
@@ -62,8 +60,13 @@ There is no separate version input.
 7. A published prerelease then runs `v1.4.0-beta.2` through the real production
    `lg-buddy updates install` path. The newly installed candidate performs a
    cold-cache production update check, and the canary records sanitized GitHub
-   response evidence for the deterministic mock. Stable promotion remains
-   blocked until this exact prerelease commit has a successful canary.
+   response evidence for the deterministic mock. This is supplemental
+   post-publication evidence, not a prerequisite for stable promotion.
+
+Promotion through `prerelease` is optional. A direct `dev -> main` promotion
+runs the same required PR validation and post-merge release build as a
+`dev -> prerelease` promotion. After stable publication, the release App
+fast-forwards both `prerelease` and `dev` to the reviewed stable commit.
 
 Replace the publisher's generic release description with concise,
 release-specific notes for user-visible default or compatibility changes before
@@ -103,28 +106,42 @@ The workflow:
 11. For prereleases, exercises production GitHub discovery, acquisition,
     confirmation, installation, and final identity from the pinned baseline.
 
-`install.sh` is only an installer. It does not build the runtime.
+`install.sh` is only an installer. It does not build the runtime or GUI.
 
 ## Release bundle identity
 
 Every release archive contains `release-manifest.json` at the bundle root. The
 schema-versioned JSON records the exact release tag, semantic version, release
-channel, Rust target triple, and full lowercase commit SHA. Version, tag, and
+channel, headless Rust target triple, GTK GUI target triple, and full lowercase commit SHA. Version, tag, and
 channel must agree: stable SemVer maps to `stable`, prerelease SemVer maps to
 `prerelease`, and the tag is exactly `v<version>`.
 
-Schema 1 marks all five identity fields as critical. Validators reject an
+Schema 1 keeps the original five identity fields critical and adds
+`gui_target` as a required extension for GUI-bearing bundles. Keeping it
+non-critical lets the public v1.4 updater read the new manifest. Validators reject an
 unsupported schema, duplicate JSON fields, missing identity fields, and unknown
 critical fields. Unknown non-critical fields may be ignored for compatible
 schema evolution. Official manifests use a deterministic field order and JSON
 rendering.
 
-The bundle builder derives version, channel, and commit from `lg-buddy
---version`; it cannot package a binary whose identity disagrees with its tag.
+The bundle builder derives version, channel, and commit from both executables;
+it cannot package binaries whose embedded identities, targets, or `--version`
+output disagree. The archive remains named for the static
+`x86_64-unknown-linux-musl` runtime. The dynamic
+`x86_64-unknown-linux-gnu` GUI is stored as
+`docs/lg-buddy-gui-x86_64-unknown-linux-gnu`: that established namespace is
+understood by the v1.4 updater. The named application icon is likewise carried
+under `docs/` for compatibility. The installer publishes them as
+`/usr/bin/lg-buddy-gui` and under the hicolor application-icon directory, and
+safely restores GUI executable mode when an older updater extracted it as data.
 Smoke validation checks the manifest before executing installer code and then
 compares it with both the bundled and installed binary. Publishing validates
 the manifest directly from each archive without extracting or executing archive
-content.
+content. CI builds on Ubuntu 24.04, establishing GTK 4.14, libadwaita 1.5, and
+a maximum GLIBC 2.39 symbol baseline. Fedora 43 and current Arch lanes install
+and launch the same artifact under Xvfb, drive it without a pointer, inspect its
+AT-SPI tree, and compare its light/dark and 1x/2x rendering; Ubuntu remains the
+ABI baseline.
 
 ## Upgrade compatibility preflight
 
@@ -198,10 +215,13 @@ An incompatible or legacy layout is refused rather than migrated. If a failure
 occurs after installation writes begin, correct the reported cause and rerun the
 same verified bundle with `--upgrade`.
 
-## Installing a locally built binary
+## Installing locally built binaries
 
-If you build `lg-buddy` yourself, install it by passing the binary path explicitly:
+If you build `lg-buddy` and `lg-buddy-gui` yourself, install them by passing both
+binary paths explicitly:
 
 ```bash
-./install.sh --runtime-binary ./target/release/lg-buddy
+./install.sh \
+  --runtime-binary ./target/x86_64-unknown-linux-musl/release/lg-buddy \
+  --gui-binary ./target/x86_64-unknown-linux-gnu/release/lg-buddy-gui
 ```
