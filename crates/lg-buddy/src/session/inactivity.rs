@@ -294,6 +294,7 @@ impl InactivityEngine {
             return InactivityDecision::NoOp;
         }
         self.lock_activity_floor = Some(observed_at);
+        self.post_lock_activity_grace_until = Some(grace_until);
 
         if matches!(
             self.phase,
@@ -305,7 +306,6 @@ impl InactivityEngine {
             return InactivityDecision::NoOp;
         }
 
-        self.post_lock_activity_grace_until = Some(grace_until);
         self.phase = InactivityPhase::BlankRequested;
         self.blank_at = None;
         InactivityDecision::BlankNow
@@ -711,6 +711,30 @@ mod tests {
                 assert!(!engine.timed_power_off_pending());
             }
         }
+    }
+
+    #[test]
+    fn lock_grace_applies_when_the_screen_is_already_blanked() {
+        let started_at = Instant::now();
+        let locked_at = started_at + Duration::from_secs(6);
+        let mut engine = test_engine(started_at);
+
+        assert_eq!(
+            engine.observe_time(started_at + Duration::from_secs(5)),
+            InactivityDecision::BlankNow
+        );
+        engine.complete_blank(true, started_at + Duration::from_secs(5));
+        assert!(engine.timed_power_off_pending());
+
+        assert_eq!(engine.observe_lock(locked_at), InactivityDecision::NoOp);
+        assert_eq!(
+            engine.observe_activity(
+                InactivityObservation::UserActivityObserved,
+                locked_at + Duration::from_millis(1),
+            ),
+            InactivityDecision::NoOp
+        );
+        assert!(engine.timed_power_off_pending());
     }
 
     #[test]
