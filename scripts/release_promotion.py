@@ -263,7 +263,7 @@ def validate_promotion(
 
     return {
         **identity,
-        "publish": True,
+        "prepare": True,
         "head_sha": head_sha,
         "source_sha": dev_sha,
         "base_sha": target_sha,
@@ -296,7 +296,7 @@ def validate_merged_promotion(
     if target == "prerelease" and main_sha == head_sha:
         version = package_version_at_ref(repository, head_sha, RUNTIME_MANIFEST_PATH)
         return {
-            "publish": False,
+            "prepare": False,
             "version": version,
             "tag": f"v{version}",
             "channel": "stable",
@@ -324,7 +324,7 @@ def validate_merged_promotion(
     )
     return {
         **identity,
-        "publish": True,
+        "prepare": True,
         "head_sha": head_sha,
         "source_sha": source_sha,
         "base_sha": previous_sha,

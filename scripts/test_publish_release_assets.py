@@ -6,7 +6,6 @@ import hashlib
 import io
 import json
 import os
-import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -26,6 +25,7 @@ VERSION = "9.8.7-beta.1"
 TAG = f"v{VERSION}"
 TARGET = "x86_64-unknown-linux-musl"
 GUI_TARGET = "x86_64-unknown-linux-gnu"
+PLACEHOLDER_NOTES = "Release notes pending maintainer review."
 
 
 FAKE_GH = r"""#!/usr/bin/env python3
@@ -48,6 +48,11 @@ state = json.loads(state_path.read_text(encoding="utf-8"))
 
 def save():
     state_path.write_text(json.dumps(state), encoding="utf-8")
+
+def option_value(arguments, option, default=None):
+    if option not in arguments:
+        return default
+    return arguments[arguments.index(option) + 1]
 
 if len(args) < 3 or args[0] != "release":
     sys.exit("unsupported fake gh invocation")
@@ -80,6 +85,8 @@ if command == "view":
         print(json.dumps({
             "isDraft": state["draft"],
             "isPrerelease": state["prerelease"],
+            "body": state["body"],
+            "name": state["title"],
         }))
     sys.exit(0)
 
@@ -90,6 +97,8 @@ if command == "create":
         "exists": True,
         "draft": "--draft" in rest,
         "prerelease": "--prerelease" in rest,
+        "body": option_value(rest, "--notes", ""),
+        "title": option_value(rest, "--title", ""),
         "assets": [],
     })
     save()
@@ -114,19 +123,18 @@ if command == "upload":
     save()
     sys.exit(0)
 
-if command == "download":
-    pattern = rest[rest.index("--pattern") + 1]
-    destination = Path(rest[rest.index("--dir") + 1])
-    destination.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(asset_dir / pattern, destination / pattern)
-    sys.exit(0)
-
 if command == "edit":
     for argument in rest:
         if argument.startswith("--draft="):
             state["draft"] = argument.split("=", 1)[1] == "true"
         elif argument.startswith("--prerelease="):
             state["prerelease"] = argument.split("=", 1)[1] == "true"
+    notes = option_value(rest, "--notes")
+    title = option_value(rest, "--title")
+    if notes is not None:
+        state["body"] = notes
+    if title is not None:
+        state["title"] = title
     save()
     sys.exit(0)
 
@@ -219,10 +227,14 @@ class PublishReleaseAssetsTests(unittest.TestCase):
         exists: bool = False,
         draft: bool = True,
         prerelease: bool = True,
+        body: str = "Reviewed release notes",
+        title: str = "Reviewed release title",
         assets: dict[str, bytes] | None = None,
     ) -> None:
         asset_values = assets or {}
         self.remote_assets.mkdir(parents=True, exist_ok=True)
+        for existing in self.remote_assets.iterdir():
+            existing.unlink()
         for name, content in asset_values.items():
             (self.remote_assets / name).write_bytes(content)
         self.state_path.write_text(
@@ -231,6 +243,8 @@ class PublishReleaseAssetsTests(unittest.TestCase):
                     "exists": exists,
                     "draft": draft,
                     "prerelease": prerelease,
+                    "body": body,
+                    "title": title,
                     "assets": list(asset_values),
                 }
             ),
@@ -239,6 +253,7 @@ class PublishReleaseAssetsTests(unittest.TestCase):
 
     def run_publisher(
         self,
+        mode: str = "stage-draft",
         *,
         fail_upload: str | None = None,
         corrupt_upload: str | None = None,
@@ -252,6 +267,7 @@ class PublishReleaseAssetsTests(unittest.TestCase):
             [
                 "bash",
                 self.publisher,
+                mode,
                 "--dist-dir",
                 self.dist,
                 "--tag",
@@ -287,24 +303,22 @@ class PublishReleaseAssetsTests(unittest.TestCase):
             self.checksums.name: self.checksums.read_bytes(),
         }
 
-    def test_new_release_is_published_only_after_assets_are_uploaded(self) -> None:
+    def test_new_release_is_staged_as_a_complete_draft(self) -> None:
         result = self.run_publisher()
 
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertEqual(set(self.state()["assets"]), set(self.complete_assets()))
-        self.assertFalse(self.state()["draft"])
+        self.assertTrue(self.state()["draft"])
+        self.assertEqual(self.state()["body"], PLACEHOLDER_NOTES)
         create = self.mutations("create")
         uploads = self.mutations("upload")
-        edit = self.mutations("edit")
         self.assertEqual(len(create), 1)
         self.assertIn("--draft", create[0])
         self.assertEqual(len(uploads), 2)
-        self.assertEqual(len(edit), 1)
-        self.assertIn("--draft=false", edit[0])
+        self.assertEqual(self.mutations("edit"), [])
         self.assertLess(self.calls().index(create[0]), self.calls().index(uploads[0]))
-        self.assertLess(self.calls().index(uploads[-1]), self.calls().index(edit[0]))
 
-    def test_retry_resumes_a_partially_uploaded_draft(self) -> None:
+    def test_staging_retry_resumes_a_partially_uploaded_draft(self) -> None:
         first = self.run_publisher(fail_upload=self.checksums.name)
         self.assertNotEqual(first.returncode, 0)
         self.assertTrue(self.state()["draft"])
@@ -312,15 +326,32 @@ class PublishReleaseAssetsTests(unittest.TestCase):
         second = self.run_publisher()
 
         self.assertEqual(second.returncode, 0, second.stdout)
-        self.assertFalse(self.state()["draft"])
+        self.assertTrue(self.state()["draft"])
         self.assertEqual(len(self.mutations("create")), 1)
         archive_uploads = [
             call for call in self.mutations("upload") if call[-1] == str(self.archive)
         ]
         self.assertEqual(len(archive_uploads), 1)
-        self.assertEqual(len(self.mutations("edit")), 1)
+        self.assertEqual(self.mutations("edit"), [])
 
-    def test_unexpected_draft_asset_blocks_publication_without_mutation(self) -> None:
+    def test_staging_preserves_existing_reviewed_title_and_notes(self) -> None:
+        self.write_state(
+            exists=True,
+            body="Carefully reviewed notes\n",
+            title="Custom title",
+            assets=self.complete_assets(),
+        )
+
+        result = self.run_publisher()
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(self.state()["body"], "Carefully reviewed notes\n")
+        self.assertEqual(self.state()["title"], "Custom title")
+        self.assertEqual(self.mutations("create"), [])
+        self.assertEqual(self.mutations("upload"), [])
+        self.assertEqual(self.mutations("edit"), [])
+
+    def test_unexpected_draft_asset_blocks_staging_without_mutation(self) -> None:
         self.write_state(exists=True, assets={"unexpected.txt": b"unexpected"})
 
         result = self.run_publisher()
@@ -345,11 +376,8 @@ class PublishReleaseAssetsTests(unittest.TestCase):
         self.assertEqual(self.mutations("upload"), [])
         self.assertEqual(self.mutations("edit"), [])
 
-    def test_mismatched_draft_asset_blocks_publication(self) -> None:
-        self.write_state(
-            exists=True,
-            assets={self.archive.name: b"different archive"},
-        )
+    def test_mismatched_draft_asset_blocks_staging(self) -> None:
+        self.write_state(exists=True, assets={self.archive.name: b"different archive"})
 
         result = self.run_publisher()
 
@@ -358,7 +386,7 @@ class PublishReleaseAssetsTests(unittest.TestCase):
         self.assertTrue(self.state()["draft"])
         self.assertEqual(self.mutations("edit"), [])
 
-    def test_successful_but_corrupted_upload_blocks_publication(self) -> None:
+    def test_successful_but_corrupted_upload_blocks_staging(self) -> None:
         result = self.run_publisher(corrupt_upload=self.checksums.name)
 
         self.assertNotEqual(result.returncode, 0)
@@ -366,7 +394,7 @@ class PublishReleaseAssetsTests(unittest.TestCase):
         self.assertTrue(self.state()["draft"])
         self.assertEqual(self.mutations("edit"), [])
 
-    def test_complete_published_release_is_verification_only(self) -> None:
+    def test_complete_published_release_is_staging_verification_only(self) -> None:
         self.write_state(exists=True, draft=False, assets=self.complete_assets())
 
         result = self.run_publisher()
@@ -375,6 +403,100 @@ class PublishReleaseAssetsTests(unittest.TestCase):
         self.assertEqual(self.mutations("create"), [])
         self.assertEqual(self.mutations("upload"), [])
         self.assertEqual(self.mutations("edit"), [])
+
+    def test_publication_requires_an_existing_draft(self) -> None:
+        result = self.run_publisher("publish-draft")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("does not exist", result.stdout)
+        self.assertEqual(self.mutations("create"), [])
+        self.assertEqual(self.mutations("upload"), [])
+        self.assertEqual(self.mutations("edit"), [])
+
+    def test_publication_rejects_missing_assets_without_uploading(self) -> None:
+        self.write_state(
+            exists=True,
+            assets={self.archive.name: self.archive.read_bytes()},
+        )
+
+        result = self.run_publisher("publish-draft")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("is missing required asset", result.stdout)
+        self.assertEqual(self.mutations("upload"), [])
+        self.assertEqual(self.mutations("edit"), [])
+
+    def test_publication_rejects_mismatched_draft_classification(self) -> None:
+        self.write_state(
+            exists=True,
+            prerelease=False,
+            assets=self.complete_assets(),
+        )
+
+        result = self.run_publisher("publish-draft")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("wrong prerelease classification", result.stdout)
+        self.assertEqual(self.mutations("upload"), [])
+        self.assertEqual(self.mutations("edit"), [])
+
+    def test_publication_preserves_reviewed_title_and_notes(self) -> None:
+        self.write_state(
+            exists=True,
+            body="Reviewed notes\nwith details.\n",
+            title="Custom reviewed title",
+            assets=self.complete_assets(),
+        )
+
+        result = self.run_publisher("publish-draft")
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertFalse(self.state()["draft"])
+        self.assertEqual(self.state()["body"], "Reviewed notes\nwith details.\n")
+        self.assertEqual(self.state()["title"], "Custom reviewed title")
+        self.assertEqual(self.mutations("create"), [])
+        self.assertEqual(self.mutations("upload"), [])
+        edits = self.mutations("edit")
+        self.assertEqual(len(edits), 1)
+        self.assertEqual(edits[0][3:], ["--draft=false"])
+
+    def test_empty_or_placeholder_notes_block_publication(self) -> None:
+        for notes in ("", " \n\t", PLACEHOLDER_NOTES):
+            with self.subTest(notes=notes):
+                self.write_state(
+                    exists=True,
+                    body=notes,
+                    assets=self.complete_assets(),
+                )
+                if self.log_path.exists():
+                    self.log_path.unlink()
+
+                result = self.run_publisher("publish-draft")
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("empty or placeholder release notes", result.stdout)
+                self.assertTrue(self.state()["draft"])
+                self.assertEqual(self.mutations("edit"), [])
+
+    def test_complete_published_release_is_publication_verification_only(self) -> None:
+        self.write_state(exists=True, draft=False, assets=self.complete_assets())
+
+        result = self.run_publisher("publish-draft")
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(self.mutations("create"), [])
+        self.assertEqual(self.mutations("upload"), [])
+        self.assertEqual(self.mutations("edit"), [])
+
+    def test_invalid_local_checksum_blocks_before_github_access(self) -> None:
+        self.checksums.write_text(
+            f"{'0' * 64}  {self.archive.name}\n", encoding="utf-8"
+        )
+
+        result = self.run_publisher()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.calls(), [])
 
 
 if __name__ == "__main__":

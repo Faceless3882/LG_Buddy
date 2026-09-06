@@ -22,7 +22,7 @@ jobs:
       channel: ${{ steps.contract.outputs.channel }}
       head_sha: ${{ steps.contract.outputs.head_sha }}
       prerelease_sha: ${{ steps.contract.outputs.prerelease_sha }}
-      publish: ${{ steps.contract.outputs.publish }}
+      prepare: ${{ steps.contract.outputs.prepare }}
       source_sha: ${{ steps.contract.outputs.source_sha }}
       tag: ${{ steps.contract.outputs.tag }}
       version: ${{ steps.contract.outputs.version }}
@@ -63,7 +63,7 @@ jobs:
               --github-output "$GITHUB_OUTPUT"
 
   build-release-bundle:
-    if: needs.validate.outputs.publish == 'true'
+    if: needs.validate.outputs.prepare == 'true'
     runs-on: ubuntu-24.04
     needs: validate
 
@@ -154,10 +154,11 @@ jobs:
             dist/*.tar.gz
             dist/sha256sums.txt
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 30
 
-  publish:
-    if: needs.validate.outputs.publish == 'true'
+  stage-release-draft:
+    name: stage-release-draft
+    if: needs.validate.outputs.prepare == 'true'
     runs-on: ubuntu-latest
     environment: release-promotion
     needs:
@@ -251,7 +252,7 @@ jobs:
           fi
           update_ref dev "$SOURCE_SHA"
 
-      - name: Publish release
+      - name: Stage verified release draft
         env:
           GH_TOKEN: ${{ steps.release-token.outputs.token }}
           HEAD_SHA: ${{ needs.validate.outputs.head_sha }}
@@ -271,7 +272,85 @@ jobs:
           if ! git rev-parse --verify "refs/tags/$RELEASE_TAG" >/dev/null 2>&1; then
               git tag "$RELEASE_TAG" "$HEAD_SHA"
           fi
-          ./scripts/publish-release-assets.sh \
+          ./scripts/publish-release-assets.sh stage-draft \
+              --dist-dir dist \
+              --tag "$RELEASE_TAG" \
+              --commit "$HEAD_SHA"
+
+          release_url="$(gh release view "$RELEASE_TAG" --json url --jq .url)"
+          {
+              echo "## Verified release draft"
+              echo
+              echo "[$RELEASE_TAG]($release_url) is ready for release-note review."
+              echo "After reviewing the draft and its assets, approve the release-publication environment to publish it."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    name: publish-reviewed-release
+    if: needs.validate.outputs.prepare == 'true'
+    runs-on: ubuntu-latest
+    environment: release-publication
+    permissions:
+      actions: read
+      contents: write
+    needs:
+      - validate
+      - build-release-bundle
+      - stage-release-draft
+
+    steps:
+      - name: Check out staged release commit
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.validate.outputs.head_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+
+      - name: Fetch and revalidate release refs
+        run: |
+          git fetch --force origin \
+              +refs/heads/main:refs/remotes/origin/main \
+              +refs/heads/prerelease:refs/remotes/origin/prerelease \
+              +refs/heads/dev:refs/remotes/origin/dev \
+              +refs/tags/*:refs/tags/*
+          python3 scripts/release_promotion.py \
+              --merged \
+              --target "${{ github.ref_name }}" \
+              --head-ref "${{ needs.validate.outputs.head_sha }}" \
+              --base-sha "${{ needs.validate.outputs.base_sha }}"
+
+      - name: Download staged release bundle
+        uses: actions/download-artifact@v7
+        with:
+          name: lg-buddy-release-${{ needs.validate.outputs.tag }}
+          path: dist
+
+      - name: Verify staged checksums
+        run: cd dist && sha256sum -c sha256sums.txt
+
+      - name: Revalidate staged bundle identity
+        run: |
+          python3 scripts/release_bundle_manifest.py validate \
+              --archive "dist/lg-buddy-${{ needs.validate.outputs.version }}-x86_64-unknown-linux-musl.tar.gz" \
+              --expected-release-tag "${{ needs.validate.outputs.tag }}" \
+              --expected-version "${{ needs.validate.outputs.version }}" \
+              --expected-channel "${{ needs.validate.outputs.channel }}" \
+              --expected-target x86_64-unknown-linux-musl \
+              --expected-gui-target x86_64-unknown-linux-gnu \
+              --expected-commit "${{ needs.validate.outputs.head_sha }}"
+
+      - name: Publish reviewed release draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ needs.validate.outputs.head_sha }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          ./scripts/publish-release-assets.sh publish-draft \
               --dist-dir dist \
               --tag "$RELEASE_TAG" \
               --commit "$HEAD_SHA"
@@ -290,7 +369,7 @@ jobs:
 
   production-prerelease-canary:
     name: production-prerelease-canary
-    if: needs.validate.outputs.publish == 'true' && needs.validate.outputs.channel == 'prerelease'
+    if: needs.validate.outputs.prepare == 'true' && needs.validate.outputs.channel == 'prerelease'
     runs-on: ubuntu-latest
     needs:
       - validate

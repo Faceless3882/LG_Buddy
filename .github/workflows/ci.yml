@@ -153,7 +153,7 @@ jobs:
       - name: Dry-run publish release assets
         env:
           GH_RELEASE_DRY_RUN: "1"
-        run: ./scripts/publish-release-assets.sh --dist-dir dist --tag "v${SMOKE_VERSION}" --commit "${{ github.sha }}"
+        run: ./scripts/publish-release-assets.sh stage-draft --dist-dir dist --tag "v${SMOKE_VERSION}" --commit "${{ github.sha }}"
 
       - name: Upload bundle for supported-distro checks
         uses: actions/upload-artifact@v6
