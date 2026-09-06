@@ -2,7 +2,10 @@ name: CI
 
 on:
   pull_request:
-  push:
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 permissions:
   checks: read
@@ -11,6 +14,7 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
 
     steps:
       - name: Check out repository
@@ -68,6 +72,7 @@ jobs:
 
   bundle-smoke-test:
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     needs: verify
     env:
       SMOKE_VERSION: 1.4.0-beta.2.ci
@@ -161,10 +166,12 @@ jobs:
           name: ci-release-bundle
           path: dist/*.tar.gz
           if-no-files-found: error
+          retention-days: 7
 
   bundle-supported-distros:
     needs: bundle-smoke-test
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     env:
       SMOKE_VERSION: 1.4.0-beta.2.ci
     strategy:
