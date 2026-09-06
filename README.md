@@ -48,9 +48,13 @@ require Python. Native-only packages can omit the Python client, `venv`, and
 `pip`. The release-bundle installer still provisions `bscpylgtv` as an explicit
 compatibility fallback, so it checks for Python 3 with a `venv` that provisions
 `pip`, plus `zenity`. Official release bundles target the Ubuntu 24.04 runtime
-baseline: GTK 4.14, libadwaita 1.5, and glibc 2.39 or newer. The installer
-verifies that the GUI executable can load and has the same release identity as
-the runtime before changing the installation.
+baseline: GTK 4.14, libadwaita 1.5, and glibc 2.39 or newer. Before executing
+the GUI, the installer checks the installed GTK and libadwaita runtime versions.
+On apt, dnf, and pacman systems it can install the mapped runtime packages after
+explicit confirmation; refusal and noninteractive operation without that opt-in
+leave package installation to the user. The installer then verifies that the GUI
+executable can load and has the same release identity as the runtime before
+changing the LG Buddy installation.
 Zenity remains the compatibility fallback when the GUI executable is absent.
 `swayidle` is needed only by an existing explicit selection or as the deprecated
 compatibility fallback.

@@ -110,6 +110,7 @@ SCREEN_IDLE_BLANK="enabled"
 SYSTEM_CONFIG_OVERRIDE_TMP=""
 CONFIG_POINTER_TMP=""
 NM_HOOK_TMP=""
+PM=""
 INSTALL_CMD=()
 
 prefix_path() {
@@ -197,6 +198,104 @@ check_python3_venv() {
 
     rm -rf "$tmp_venv_dir"
     return 1
+}
+
+detect_package_manager() {
+    if command -v apt &>/dev/null; then
+        PM="apt"
+        INSTALL_CMD=(apt install -y)
+    elif command -v dnf &>/dev/null; then
+        PM="dnf"
+        INSTALL_CMD=(dnf install -y)
+    elif command -v pacman &>/dev/null; then
+        PM="pacman"
+        INSTALL_CMD=(pacman -S --noconfirm)
+    else
+        PM=""
+        INSTALL_CMD=()
+    fi
+}
+
+gui_runtime_package() {
+    local requirement="$1"
+
+    case "$PM:$requirement" in
+        apt:gtk) printf '%s\n' "libgtk-4-1" ;;
+        apt:libadwaita) printf '%s\n' "libadwaita-1-0" ;;
+        dnf:gtk|pacman:gtk) printf '%s\n' "gtk4" ;;
+        dnf:libadwaita|pacman:libadwaita) printf '%s\n' "libadwaita" ;;
+        *:gtk) printf '%s\n' "GTK 4.14 or newer" ;;
+        *:libadwaita) printf '%s\n' "libadwaita 1.5 or newer" ;;
+    esac
+}
+
+gui_runtime_version_at_least() {
+    local library="$1"
+    local symbol_prefix="$2"
+    local required_major="$3"
+    local required_minor="$4"
+
+    if [ -n "${LG_BUDDY_GUI_RUNTIME_PROBE:-}" ]; then
+        "$LG_BUDDY_GUI_RUNTIME_PROBE" \
+            "$library" "$symbol_prefix" "$required_major" "$required_minor"
+        return
+    fi
+
+    python3 - "$library" "$symbol_prefix" "$required_major" "$required_minor" <<'PY'
+import ctypes
+import sys
+
+library, prefix, required_major, required_minor = sys.argv[1:]
+try:
+    runtime = ctypes.CDLL(library)
+    major = getattr(runtime, f"{prefix}_get_major_version")
+    minor = getattr(runtime, f"{prefix}_get_minor_version")
+    major.argtypes = []
+    minor.argtypes = []
+    major.restype = ctypes.c_uint
+    minor.restype = ctypes.c_uint
+    installed = (major(), minor())
+except (AttributeError, OSError):
+    raise SystemExit(1)
+
+required = (int(required_major), int(required_minor))
+raise SystemExit(0 if installed >= required else 1)
+PY
+}
+
+check_gui_runtime_prerequisites() {
+    check_dep \
+        "GTK 4.14 or newer" \
+        "$(gui_runtime_package gtk)" \
+        "gui_runtime_version_at_least libgtk-4.so.1 gtk 4 14"
+    check_dep \
+        "libadwaita 1.5 or newer" \
+        "$(gui_runtime_package libadwaita)" \
+        "gui_runtime_version_at_least libadwaita-1.so.0 adw 1 5"
+}
+
+verify_gui_runtime_prerequisites() {
+    local missing=0
+
+    if ! gui_runtime_version_at_least libgtk-4.so.1 gtk 4 14; then
+        echo "Error: GTK 4.14 or newer is still unavailable."
+        missing=1
+    fi
+    if ! gui_runtime_version_at_least libadwaita-1.so.0 adw 1 5; then
+        echo "Error: libadwaita 1.5 or newer is still unavailable."
+        missing=1
+    fi
+
+    [ "$missing" -eq 0 ] || return 1
+}
+
+print_manual_install_command() {
+    case "$PM" in
+        apt) echo "  sudo apt install ${MISSING_PKGS[*]}" ;;
+        dnf) echo "  sudo dnf install ${MISSING_PKGS[*]}" ;;
+        pacman) echo "  sudo pacman -S ${MISSING_PKGS[*]}" ;;
+        *) echo "Install these requirements with your system package manager: ${MISSING_PKGS[*]}" ;;
+    esac
 }
 
 write_config_override() {
@@ -352,19 +451,6 @@ install_missing_prerequisites() {
     echo ""
     echo "Missing: ${MISSING_PKGS[*]}"
 
-    if command -v apt &>/dev/null; then
-        PM="apt"
-        INSTALL_CMD=(apt install -y)
-    elif command -v dnf &>/dev/null; then
-        PM="dnf"
-        INSTALL_CMD=(dnf install -y)
-    elif command -v pacman &>/dev/null; then
-        PM="pacman"
-        INSTALL_CMD=(pacman -S --noconfirm)
-    else
-        PM=""
-    fi
-
     if [ -n "$PM" ]; then
         AUTO_INSTALL="${LG_BUDDY_AUTO_INSTALL_DEPS:-}"
         if [ -z "$AUTO_INSTALL" ] && [ "$NONINTERACTIVE" != "1" ]; then
@@ -372,27 +458,42 @@ install_missing_prerequisites() {
         fi
         case "$AUTO_INSTALL" in
             [Yy]*)
-                run_privileged "${INSTALL_CMD[@]}" "${MISSING_PKGS[@]}"
+                if ! run_privileged "${INSTALL_CMD[@]}" "${MISSING_PKGS[@]}"; then
+                    echo "Failed to install the missing packages. Install them manually and re-run install.sh."
+                    print_manual_install_command
+                    exit 1
+                fi
                 ;;
             *)
                 echo "Please install the missing packages manually and re-run install.sh."
+                print_manual_install_command
                 exit 1
                 ;;
         esac
     else
         echo "Could not detect a supported package manager (apt/dnf/pacman)."
         echo "Please install the missing packages manually and re-run install.sh."
+        print_manual_install_command
         exit 1
     fi
 }
 
-check_fresh_install_prerequisites() {
+check_install_prerequisites() {
     echo ""
     echo "Checking prerequisites..."
     MISSING_PKGS=()
-    check_dep "python3-venv" "python3-venv" "check_python3_venv"
-    check_dep "zenity" "zenity" "command -v zenity"
+    detect_package_manager
+    check_gui_runtime_prerequisites
+    if [ "$UPGRADE_MODE" -eq 0 ]; then
+        check_dep "python3-venv" "python3-venv" "check_python3_venv"
+        check_dep "zenity" "zenity" "command -v zenity"
+    fi
     install_missing_prerequisites
+    if ! verify_gui_runtime_prerequisites; then
+        echo "The installed packages do not satisfy the GUI runtime requirements."
+        print_manual_install_command
+        exit 1
+    fi
 }
 
 require_python_repair_prerequisites() {
@@ -487,6 +588,7 @@ if [ "$UPGRADE_MODE" -eq 1 ]; then
     "$RUNTIME_BINARY" upgrade-preflight "$SCRIPT_DIR"
     resolve_gui_binary
     resolve_app_icon
+    check_install_prerequisites
     validate_candidate_binary_identity
     load_upgrade_configuration
 
@@ -502,8 +604,8 @@ if [ "$UPGRADE_MODE" -eq 1 ]; then
 else
     resolve_gui_binary
     resolve_app_icon
+    check_install_prerequisites
     validate_candidate_binary_identity
-    check_fresh_install_prerequisites
 
 # CONFIGURE FRESH INSTALLATION
 echo ""
